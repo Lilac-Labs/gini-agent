@@ -183,14 +183,23 @@ deferred in ADR skill-env-containment.md: a fresh `gws auth login` needs
 `terminal_exec` deliberately never injects; shipping it as a named
 `skill_run` script is the prescribed scoped-env path.
 
-The script reads stdin JSON `{ tag, services?, readonly?, scopes?, adopt? }`:
+The script reads stdin JSON
+`{ tag, services?, readonly?, scopes?, configDir?, loginHint?, expectedEmail?, adopt? }`:
 
 - `adopt: true` → configDir is `~/.config/gws`; it requires an
   already-signed-in session there (no browser, no re-login) and registers it.
-- otherwise → mint a gini-managed config dir under `~/.gini/google-accounts/`,
-  run `gws auth login` (scrape the consent URL from gws's output, `open` it in
-  the user's browser, wait for the user to finish OAuth), then confirm the
-  session and capture the granted email/scopes.
+- otherwise → mint a gini-managed config dir under `~/.gini/google-accounts/`
+  (or re-use `configDir` when re-authing an existing account), run
+  `gws auth login` (scrape the consent URL from gws's output, `open` it in the
+  user's browser, wait for the user to finish OAuth), then confirm the session
+  and capture the granted email/scopes. The scraped consent URL is always opened
+  with `prompt=select_account` forced (merged into any prompt gws already set),
+  so Google shows the account chooser instead of silently authorizing whichever
+  account the browser is already signed into — the multi-account hazard that
+  otherwise mints a token for the wrong identity and overwrites the target dir's
+  tag. `loginHint` pre-highlights the intended account; `expectedEmail` makes the
+  login **fail before registering** if a different (or unconfirmable) account
+  signs in, so the wrong identity is never bound to the tag.
 
 The 5-minute default skill-script timeout bounds the human OAuth wait.
 
@@ -322,8 +331,10 @@ risk.
   aggregate-on-unscoped-read / ask-on-write rule for 2+; the block is
   byte-stable for a given registry.
 - `bun test skills/google/google-account-login/scripts/__tests__/account-login.test.ts`
-  — the pure URL-scrape / arg-build helpers (`extractConsentUrl`,
-  `buildLoginArgs`).
+  — the pure URL-scrape / arg-build / account-chooser helpers
+  (`extractConsentUrl`, `buildLoginArgs`, `forceAccountChooser` — merges
+  `select_account` into any existing prompt, adds `login_hint`, no-ops an
+  unparseable URL).
 - E2E in a real chat turn: with two accounts connected, an unscoped read
   ("what's on my calendar") runs against every account's config dir and
   aggregates the results; a write that doesn't name an account makes the agent

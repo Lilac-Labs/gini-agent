@@ -319,9 +319,19 @@ async function login(args: LoginArgs): Promise<Record<string, unknown>> {
 
   // Fail before registering if the signed-in account isn't the intended one —
   // never register the wrong identity under this tag (the silent-overwrite bug).
+  // When expectedEmail is set we fail CLOSED: a mismatch, or a valid session that
+  // reports no email at all (gws can omit `user`), both block registration rather
+  // than risk stamping the wrong identity onto this tag.
   const actualEmail = typeof status.user === "string" ? status.user : "";
   const expected = typeof args.expectedEmail === "string" ? args.expectedEmail.trim() : "";
-  if (expected && actualEmail && actualEmail.toLowerCase() !== expected.toLowerCase()) {
+  if (expected && !actualEmail) {
+    return {
+      ok: false,
+      error: `Couldn't confirm which account signed in (expected ${expected}). ` +
+        `Re-run and pick ${expected} at Google's account chooser.`
+    };
+  }
+  if (expected && actualEmail.toLowerCase() !== expected.toLowerCase()) {
     return {
       ok: false,
       error: `Signed in as ${actualEmail}, but this account is ${expected}. ` +

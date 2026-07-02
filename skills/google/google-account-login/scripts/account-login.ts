@@ -54,6 +54,12 @@ interface LoginArgs {
   // account's stored configDir (or "~/.config/gws" to re-log-in the default-dir
   // session). Ignored when adopt is true; when omitted a new dir is minted.
   configDir?: string;
+  // The intended account's email; pre-highlights it in Google's account
+  // chooser (login_hint) so a re-auth doesn't require hunting for it.
+  loginHint?: string;
+  // The account this dir must end up as. When set, login FAILS fast (never
+  // registers) if a different account signs in, instead of overwriting the tag.
+  expectedEmail?: string;
 }
 
 // ── Pure helpers (unit-tested) ───────────────────────────────────────────────
@@ -94,6 +100,30 @@ export function expandHome(path: string, home: string): string {
   return path;
 }
 
+// Force Google's account chooser onto a scraped consent URL. Without
+// prompt=select_account, Google silently continues as whatever account the
+// user's default browser is already signed into, so a multi-account re-auth
+// mints the token for the WRONG identity and overwrites the target dir's tag.
+// Adding select_account makes Google always show the chooser; a loginHint
+// pre-highlights the intended account. We MERGE select_account into any prompt
+// gws already set (e.g. consent, which guarantees a refresh token on re-auth)
+// rather than replacing it — only add the chooser, never drop gws's directives.
+// Returns the original URL unchanged if it can't be parsed.
+export function forceAccountChooser(url: string, loginHint?: string): string {
+  try {
+    const parsed = new URL(url);
+    const prompts = new Set(
+      (parsed.searchParams.get("prompt") ?? "").split(/\s+/).filter(Boolean)
+    );
+    prompts.add("select_account");
+    parsed.searchParams.set("prompt", [...prompts].join(" "));
+    if (loginHint && loginHint.trim()) parsed.searchParams.set("login_hint", loginHint.trim());
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 // ── gws subprocess boundary ──────────────────────────────────────────────────
 
 // `gws auth status` for a config dir → parsed JSON (or undefined). Drains
@@ -128,7 +158,8 @@ async function gwsAuthStatus(configDir: string, env: Record<string, string>): Pr
 async function runLogin(
   loginArgs: string[],
   configDir: string,
-  env: Record<string, string>
+  env: Record<string, string>,
+  loginHint?: string
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const proc = spawn(["gws", ...loginArgs], {
     stdin: "ignore",
@@ -170,7 +201,7 @@ async function runLogin(
     }
   }
 
-  openInBrowser(url, env);
+  openInBrowser(forceAccountChooser(url, loginHint), env);
 
   // Wait for the user to complete OAuth — gws exits when its callback server
   // receives the code. The skill-script timeout bounds this wait.
@@ -265,7 +296,7 @@ async function login(args: LoginArgs): Promise<Record<string, unknown>> {
     configDir = expandHome(targetDir, home);
     mkdirSync(configDir, { recursive: true, mode: 0o700 });
     const loginArgs = buildLoginArgs({ services: args.services, readonly: args.readonly, scopes: args.scopes });
-    const result = await runLogin(loginArgs, configDir, env);
+    const result = await runLogin(loginArgs, configDir, env, args.loginHint);
     if (!result.ok) return { ok: false, error: result.error };
   } else {
     // Mint a gini-managed config dir and run the browser OAuth login into it.
@@ -273,7 +304,7 @@ async function login(args: LoginArgs): Promise<Record<string, unknown>> {
     configDir = join(home, ".gini", "google-accounts", id);
     mkdirSync(configDir, { recursive: true, mode: 0o700 });
     const loginArgs = buildLoginArgs({ services: args.services, readonly: args.readonly, scopes: args.scopes });
-    const result = await runLogin(loginArgs, configDir, env);
+    const result = await runLogin(loginArgs, configDir, env, args.loginHint);
     if (!result.ok) return { ok: false, error: result.error };
   }
 
@@ -285,6 +316,18 @@ async function login(args: LoginArgs): Promise<Record<string, unknown>> {
   const scopes = Array.isArray(status.scopes)
     ? status.scopes.filter((s): s is string => typeof s === "string")
     : [];
+
+  // Fail before registering if the signed-in account isn't the intended one —
+  // never register the wrong identity under this tag (the silent-overwrite bug).
+  const actualEmail = typeof status.user === "string" ? status.user : "";
+  const expected = typeof args.expectedEmail === "string" ? args.expectedEmail.trim() : "";
+  if (expected && actualEmail && actualEmail.toLowerCase() !== expected.toLowerCase()) {
+    return {
+      ok: false,
+      error: `Signed in as ${actualEmail}, but this account is ${expected}. ` +
+        `Re-run and pick ${expected} at Google's account chooser.`
+    };
+  }
 
   // The gateway derives the canonical id (dir basename for managed dirs).
   const account = await registerWithApi(home, instance, { tag, configDir, adopt });

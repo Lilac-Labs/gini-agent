@@ -6,7 +6,7 @@
 // end-to-end through a real chat turn, not here.
 
 import { describe, expect, test } from "bun:test";
-import { buildLoginArgs, expandHome, extractConsentUrl } from "../account-login";
+import { buildLoginArgs, expandHome, extractConsentUrl, forceAccountChooser } from "../account-login";
 
 describe("extractConsentUrl", () => {
   test("finds the consent URL in a realistic gws auth login log blob", () => {
@@ -85,5 +85,51 @@ describe("expandHome", () => {
   test("passes an absolute path through unchanged", () => {
     expect(expandHome("/Users/me/.gini/google-accounts/gacct_ab12", "/Users/me"))
       .toBe("/Users/me/.gini/google-accounts/gacct_ab12");
+  });
+});
+
+describe("forceAccountChooser", () => {
+  test("adds prompt=select_account to a URL with no prompt", () => {
+    const out = new URL(forceAccountChooser(
+      "https://accounts.google.com/o/oauth2/auth?response_type=code&client_id=abc"
+    ));
+    expect(out.searchParams.get("prompt")?.split(/\s+/)).toContain("select_account");
+  });
+
+  test("merges select_account with an existing prompt=consent", () => {
+    const out = new URL(forceAccountChooser(
+      "https://accounts.google.com/o/oauth2/auth?prompt=consent&client_id=abc"
+    ));
+    const prompts = out.searchParams.get("prompt")?.split(/\s+/) ?? [];
+    expect(prompts).toContain("consent");
+    expect(prompts).toContain("select_account");
+  });
+
+  test("adds login_hint when provided", () => {
+    const out = new URL(forceAccountChooser(
+      "https://accounts.google.com/o/oauth2/auth?client_id=abc",
+      "me@example.com"
+    ));
+    expect(out.searchParams.get("login_hint")).toBe("me@example.com");
+  });
+
+  test("omits login_hint when not provided", () => {
+    const out = new URL(forceAccountChooser(
+      "https://accounts.google.com/o/oauth2/auth?client_id=abc"
+    ));
+    expect(out.searchParams.has("login_hint")).toBe(false);
+  });
+
+  test("preserves existing params", () => {
+    const out = new URL(forceAccountChooser(
+      "https://accounts.google.com/o/oauth2/auth?client_id=abc&redirect_uri=http://localhost:54321&scope=foo"
+    ));
+    expect(out.searchParams.get("client_id")).toBe("abc");
+    expect(out.searchParams.get("redirect_uri")).toBe("http://localhost:54321");
+    expect(out.searchParams.get("scope")).toBe("foo");
+  });
+
+  test("returns the input unchanged for an unparseable URL", () => {
+    expect(forceAccountChooser("not a url")).toBe("not a url");
   });
 });

@@ -4,6 +4,8 @@ Connect Gini to your Google account so it can work with **Gmail, Calendar, Drive
 
 The OAuth client Gini uses lives in **your own** Google Cloud project. Your credentials are stored in Gini's encrypted secret store and are never written to chat, logs, or disk.
 
+> **Managed deployments:** if your Gini is hosted for you, the Google credential is provisioned when you sign in — there is nothing to install and no setup flow to run, and the granted scopes are fixed at sign-in. The rest of this page applies to self-hosted installs.
+
 ## What you need
 
 - A Google account. A personal **@gmail.com** works — you do **not** need a paid Google Workspace subscription.
@@ -43,6 +45,10 @@ Managed Google Workspace accounts (for example `you@yourcompany.com`) are often 
 ## What Gini can access
 
 Gini asks for all seven products up front so you don't have to repeat setup when you move from, say, Calendar to Drive. You decide what to actually grant on Google's consent screen — each product is its own checkbox. You can also tell Gini "read-only" or "Gmail only" before that step to narrow what it requests.
+
+## Multiple accounts
+
+You can connect more than one Google account (for example a personal mailbox and a work mailbox) — just ask Gini to connect another account; each one gets its own tag (`personal`, `work`, …). Gini then picks the right account per request: a request that names an account (a tag or email) runs against that account; an unscoped read ("what's on my calendar", "search my email") runs against every connected account and aggregates the results; a write with no account named makes Gini ask which account first — there is no silent default. See [Multiple Tagged Google Accounts](../../adr/google-multi-account.md) for the full model.
 
 ## Use it
 

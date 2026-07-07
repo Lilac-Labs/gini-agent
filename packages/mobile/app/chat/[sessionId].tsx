@@ -20,7 +20,7 @@ import {
   View
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { api, ApiError, uploadImage, type UploadRef } from "@/src/api";
+import { api, isCredentialRejected, uploadImage, type UploadRef } from "@/src/api";
 import { clearCredentials } from "@/src/auth";
 import { AttachmentSheet } from "@/src/components/AttachmentSheet";
 import { AgentAvatar } from "@/src/components/chat/AgentAvatar";
@@ -154,14 +154,16 @@ export default function ChatDetailScreen() {
   // this drives the button's visibility (needs a re-render).
   const [atBottom, setAtBottom] = useState(true);
 
-  const unauthorized =
-    stream.error instanceof ApiError && stream.error.status === 401;
+  // Only a REAL gateway rejection (token presented and refused) signs out and
+  // redirects. A local "no credentials" 401 (already signed out) is ignored —
+  // the root auth gate owns routing, and re-navigating would just reopen the signed-out screen.
+  const unauthorized = isCredentialRejected(stream.error);
   useEffect(() => {
     // Clear the dead token (revoked/expired) before redirecting so a cold start
-    // doesn't replay route-to-app → 401 → setup (the cold-start flash).
+    // doesn't replay route-to-app → 401 → signed-out (the cold-start flash).
     if (unauthorized) {
       void clearCredentials();
-      router.replace("/setup");
+      router.replace("/");
     }
   }, [unauthorized]);
 
@@ -370,12 +372,18 @@ export default function ChatDetailScreen() {
     if (!canSubmit) return;
     pinnedToBottomRef.current = true;
     setAtBottom(true);
+    // Clear immediately — holding the composer until the server acks reads as
+    // send lag; onError restores text + attachments unless the user has
+    // already started composing something new.
+    const attachmentsAtSubmit = images;
+    setText("");
+    setImages([]);
     send.mutate(
       { content: trimmed, images: readyImages },
       {
-        onSuccess: () => {
-          setText("");
-          setImages([]);
+        onError: () => {
+          setText((current) => (current === "" ? trimmed : current));
+          setImages((current) => (current.length === 0 ? attachmentsAtSubmit : current));
         }
       }
     );

@@ -30,10 +30,26 @@ flow stays fast):
 cd packages/mobile && bunx tsc --noEmit
 ```
 
-## First-run setup
+## First-run connect
 
-The mobile app does not embed the gateway URL or token — you paste them
-on the setup screen the first time you launch.
+The app has two connect modes; the auth gate picks one at launch based
+on how the app was built.
+
+**Sign in with Google (edge-fronted builds).** When the build sets
+`EXPO_PUBLIC_EDGE_BASE_URL` (an origin running the Gini edge, inlined
+at build time — e.g. via an `env` entry in an `eas.json` build
+profile), signed-out users land on a login screen. "Continue with
+Google" opens the edge's `/auth/google?mode=mobile` flow in a system
+auth session; the edge redirects back via `gini://auth?token=…` and the
+app stores `{baseUrl, token}` — the same shape the manual flow saves,
+so every screen works identically after sign-in. Sign-out POSTs
+`/auth/mobile/logout` (best-effort session revocation) before clearing
+local credentials. The login screen also links to "Connect to your own
+gateway" for the manual flow below.
+
+**Connect to your own gateway (the default).** When
+`EXPO_PUBLIC_EDGE_BASE_URL` is unset, the app embeds no gateway URL or
+token — you paste them on the setup screen the first time you launch.
 
 - **Base URL**: the runtime gateway. Defaults to `http://localhost:7421`.
   For a real device on the same network, use your machine's LAN IP

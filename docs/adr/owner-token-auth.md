@@ -53,8 +53,10 @@ id is always `"owner"`. The helpers live in `packages/runtime/src/http.ts`
 - **Mobile signs in with Google via the edge** (`/auth/google?mode=mobile` →
   `gini://auth?token=…` redirect), stores `{baseUrl, token}` (AsyncStorage
   `gini.auth.v1`), and sends the Bearer on every call; sign-out POSTs
-  `/auth/mobile/logout` then clears locally. No QR/relay/pairing, no manual
-  token entry, no `/setup` screen.
+  `/auth/mobile/logout` then clears locally. No QR/relay/pairing; the Google
+  login renders only when the build sets `EXPO_PUBLIC_EDGE_BASE_URL`, and the
+  manual `/setup` connect screen (owner bearer paste) remains for self-hosted
+  gateways.
 - **The push-device registry is kept** (`/api/push/devices`, `X-Device-Token`,
   APNs) — it tracks notification endpoints, not credentials; its credential id
   is always `"owner"`. `/api/mobile/bootstrap` remains, owner-bearer-gated.

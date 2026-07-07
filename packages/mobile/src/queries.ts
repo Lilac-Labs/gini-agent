@@ -22,14 +22,15 @@ import type {
 } from "./types";
 
 // Web parity: chat task statuses where partial text is no longer arriving.
-// `waiting_approval` is included here on the polling side because the
-// runtime can't make further progress without user input; we don't poll
-// faster while sitting on it.
+// `waiting_approval` / `needs_input` are included here on the polling side
+// because the runtime can't make further progress without user input; we
+// don't poll faster while sitting on them.
 const CHAT_TERMINAL_TASK_STATUSES = new Set<string>([
   "completed",
   "failed",
   "cancelled",
-  "waiting_approval"
+  "waiting_approval",
+  "needs_input"
 ]);
 
 // Request timeout for voice-message sends. A voice POST blocks on
@@ -517,7 +518,7 @@ export function useChatStream(
         if (cancelled) return;
         // 401 means our bearer token was rejected — the library will
         // happily keep retrying with the same dead token, so we surface
-        // it to the screen (which already routes 401s to the setup flow)
+        // it to the screen (which already routes 401s to the signed-out screen)
         // and tear the connection down. Other errors are transient
         // network blips; let the library reconnect on its polling
         // interval, where Last-Event-ID will resume the stream.
@@ -623,7 +624,7 @@ export function useChatStream(
       } catch (err) {
         if (cancelled) return;
         setError(err as Error);
-        // Don't open the stream on a 401 — the screen redirects to setup.
+        // Don't open the stream on a 401 — the screen redirects to the signed-out screen.
         if (!(err instanceof ApiError && err.status === 401)) {
           // Mark as seeded even on transport failure so a foregrounding
           // user can retry via the AppState handler; the gateway will
@@ -717,12 +718,21 @@ export function useTopics(agentId: string | null) {
       api<ChatSession[]>(`/chat?agentId=${encodeURIComponent(agentId ?? "")}`),
     enabled: Boolean(agentId),
     refetchInterval: 30_000,
-    select: (sessions) =>
-      sessions
-        .filter((s) => s.kind === "topic" && !s.archivedAt)
+    select: (sessions) => {
+      // Pinned-aware gateways (the container model) mark sidebar topics
+      // `pinned === true` — legacy topics are backfilled by migration — so
+      // unpinned work-item containers stay out of the list. Gateways
+      // predating the field never send it on any session; fall back to the
+      // old kind-based predicate there so the list isn't empty.
+      const pinnedAware = sessions.some((s) => typeof s.pinned === "boolean");
+      return sessions
+        .filter((s) =>
+          pinnedAware ? s.pinned === true && !s.archivedAt : s.kind === "topic" && !s.archivedAt
+        )
         .sort((a, b) =>
           (b.updatedAt ?? b.createdAt).localeCompare(a.updatedAt ?? a.createdAt)
-        )
+        );
+    }
   });
 }
 

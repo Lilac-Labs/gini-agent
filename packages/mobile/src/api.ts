@@ -36,17 +36,39 @@ function assertTransportAllowed(baseUrl: string): URL {
 // queries.ts looks familiar and is easy to keep in sync with the web's
 // queries.ts when fields are added.
 
+// Distinguishes a locally-thrown "we have no token" 401 from a real gateway
+// rejection. The credentialless throws below carry "no_credentials"; a token
+// the gateway presented and rejected carries no code. Only a rejection should
+// drive sign-out + redirect — see isCredentialRejected.
+export type ApiErrorCode = "no_credentials";
+
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+    public code?: ApiErrorCode
+  ) {
     super(message);
     this.name = "ApiError";
   }
 }
 
 // Treat any 4xx/5xx as unauthenticated if it's a 401 from the gateway —
-// the auth gate uses this to bounce the user back to setup.
+// the auth gate uses this to bounce the user back to the signed-out screen.
 export function isUnauthorized(error: unknown): boolean {
   return error instanceof ApiError && error.status === 401;
+}
+
+// A real gateway 401: the token was presented and rejected, as opposed to a
+// local ApiError(401, …, "no_credentials") thrown before any fetch when no
+// token is stored. Screens gate their sign-out+redirect on this so a rejected
+// token bounces to the signed-out screen exactly once, while a *missing* token does nothing —
+// we're already signed out and the root auth gate (app/index.tsx) owns routing.
+// Without the distinction, every background poll that runs after sign-out throws
+// "No credentials configured" and re-fires the sign-out redirect, reopening
+// the signed-out screen over and over while the user sits on it doing nothing.
+export function isCredentialRejected(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401 && error.code !== "no_credentials";
 }
 
 // Request timeouts. A gateway that accepts the TCP connection but never
@@ -86,7 +108,7 @@ interface ApiOptions extends Omit<RequestInit, "headers" | "credentials"> {
 
 export async function api<T = unknown>(path: string, init: ApiOptions = {}): Promise<T> {
   const creds = init.auth ?? readCachedCredentials();
-  if (!creds) throw new ApiError(401, "No credentials configured");
+  if (!creds) throw new ApiError(401, "No credentials configured", "no_credentials");
 
   const { auth: _auth, timeoutMs, signal: callerSignal, ...rest } = init;
 
@@ -293,7 +315,7 @@ async function uploadFile(file: {
   mimeType: string;
 }): Promise<UploadRef> {
   const creds = readCachedCredentials();
-  if (!creds) throw new ApiError(401, "No credentials configured");
+  if (!creds) throw new ApiError(401, "No credentials configured", "no_credentials");
   // Same transport guard as api(): block public-http origins before the
   // bearer ever leaves the device, even on the multipart upload path.
   const parsed = assertTransportAllowed(creds.baseUrl);
@@ -343,7 +365,7 @@ export function uploadAudio(file: {
 // token, so callers must pass it via an Image source's `headers` prop.
 export function uploadUrl(id: string): string {
   const creds = readCachedCredentials();
-  if (!creds) throw new ApiError(401, "No credentials configured");
+  if (!creds) throw new ApiError(401, "No credentials configured", "no_credentials");
   const parsed = assertTransportAllowed(creds.baseUrl);
   return `${parsed.origin}/api/uploads/${encodeURIComponent(id)}`;
 }
@@ -360,7 +382,7 @@ export function authHeader(): Record<string, string> {
 // file to the OS preview/Share sheet. Mirrors fileRawSource for uploads.
 export function uploadRawSource(id: string): { uri: string; headers: Record<string, string> } {
   const creds = readCachedCredentials();
-  if (!creds) throw new ApiError(401, "No credentials configured");
+  if (!creds) throw new ApiError(401, "No credentials configured", "no_credentials");
   const parsed = assertTransportAllowed(creds.baseUrl);
   return {
     uri: `${parsed.origin}/api/uploads/${encodeURIComponent(id)}`,
@@ -380,7 +402,7 @@ export function uploadRawSource(id: string): { uri: string; headers: Record<stri
 // is absolute for the browser.
 export async function signUploadUrl(id: string): Promise<string> {
   const creds = readCachedCredentials();
-  if (!creds) throw new ApiError(401, "No credentials configured");
+  if (!creds) throw new ApiError(401, "No credentials configured", "no_credentials");
   const parsed = assertTransportAllowed(creds.baseUrl);
   // api() prepends `${origin}/api`, so the path passed here omits the `/api`
   // prefix (mirrors fetchWorkspaceFile). The gateway's response `path` IS
@@ -421,7 +443,7 @@ export function fileRawSource(
   opts: { inline?: boolean } = {}
 ): { uri: string; headers: Record<string, string> } {
   const creds = readCachedCredentials();
-  if (!creds) throw new ApiError(401, "No credentials configured");
+  if (!creds) throw new ApiError(401, "No credentials configured", "no_credentials");
   const parsed = assertTransportAllowed(creds.baseUrl);
   const inline = opts.inline ? "&inline=1" : "";
   return {
@@ -438,14 +460,14 @@ export function fileRawSource(
 // this helper centralizes origin normalization and bearer injection so the
 // streaming hook doesn't reimplement either. Throws ApiError(401) when no
 // credentials are configured — the caller surfaces that the same way the
-// /blocks fetch does so the chat detail screen's redirect-to-setup effect
+// /blocks fetch does so the chat detail screen's signed-out redirect effect
 // still fires.
 export function resolveStreamEndpoint(path: string): {
   url: string;
   headers: Record<string, string>;
 } {
   const creds = readCachedCredentials();
-  if (!creds) throw new ApiError(401, "No credentials configured");
+  if (!creds) throw new ApiError(401, "No credentials configured", "no_credentials");
   // Same transport guard as api(): if a stored URL is public-http,
   // refuse to open the stream rather than leak the bearer.
   const parsed = assertTransportAllowed(creds.baseUrl);

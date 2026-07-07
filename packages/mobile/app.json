@@ -55,14 +55,6 @@
           "microphonePermission": "Allow Gini to record voice messages."
         }
       ],
-      [
-        "expo-camera",
-        {
-          "cameraPermission": "Gini uses the camera to capture photos for chat.",
-          "barcodeScannerEnabled": true,
-          "recordAudioAndroid": false
-        }
-      ],
       "expo-web-browser"
     ],
     "experiments": { "typedRoutes": true },

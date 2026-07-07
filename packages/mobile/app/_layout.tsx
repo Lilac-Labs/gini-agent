@@ -53,8 +53,8 @@ const queryClient = new QueryClient({
 export default function RootLayout() {
   // Prime the AsyncStorage credentials cache once before the first child
   // render. Without this, the auth gate in `app/index.tsx` would briefly
-  // see `credentials: null` and bounce the user to /setup even if they
-  // were already authed — bad UX on every cold start.
+  // see `credentials: null` and bounce the user to the signed-out screen
+  // even if they were already authed — bad UX on every cold start.
   const [primed, setPrimed] = useState(false);
   useEffect(() => {
     let active = true;
@@ -143,8 +143,8 @@ export default function RootLayout() {
             <FilePreviewProvider>
               <Stack screenOptions={screenOptions}>
                 <Stack.Screen name="index" options={{ headerShown: false }} />
+                <Stack.Screen name="login" options={{ headerShown: false }} />
                 <Stack.Screen name="setup" options={{ title: "Connect to Gini" }} />
-                <Stack.Screen name="pair" options={{ title: "Connect to Gini" }} />
                 {/* channels.tsx (the Channels home) draws its own header
                     with the brand title, inbox icon, and compose button. */}
                 <Stack.Screen name="channels" options={{ headerShown: false }} />
@@ -194,7 +194,7 @@ function AuthCacheGuard() {
     // Sync the app icon badge once per (newly-authed) identity. The
     // gateway computes the unread total from chat_read_state across
     // every session for the credential, so a cold launch that opened
-    // straight to setup picks up everything that arrived while the
+    // signed-out picks up everything that arrived while the
     // app was killed. Subsequent badge updates ride on silent pushes
     // (push.ts:refreshBadge in the receive handler) and on chat-detail
     // mount.

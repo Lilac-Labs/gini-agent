@@ -12,7 +12,7 @@ import {
   View
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { api, ApiError } from "@/src/api";
+import { api, isCredentialRejected } from "@/src/api";
 import { clearCredentials } from "@/src/auth";
 import { consumeLaunchNotificationRoute } from "@/src/push";
 import { AgentAvatar } from "@/src/components/chat/AgentAvatar";
@@ -99,14 +99,18 @@ export default function ChannelsScreen() {
     consumeLaunchNotificationRoute();
   }, []);
 
-  const unauthorized =
-    agents.error instanceof ApiError && agents.error.status === 401;
+  // Only a REAL gateway rejection (token presented and refused) signs out and
+  // redirects. A local "no credentials" 401 — which every background poll
+  // throws once signed out — is ignored: we're already logged out, the root
+  // auth gate owns routing, and re-navigating would reopen the signed-out screen on a loop
+  // while the user sits on it.
+  const unauthorized = isCredentialRejected(agents.error);
   useEffect(() => {
     if (!unauthorized) return;
     // A 401 means the stored token is dead (revoked/expired). Drop it before
-    // redirecting so the next cold start goes straight to /setup.
+    // redirecting so the next cold start goes straight to the signed-out screen.
     void clearCredentials();
-    router.replace("/setup");
+    router.replace("/");
   }, [unauthorized]);
 
   // Open the active agent's canonical chat. Resolve the session id directly

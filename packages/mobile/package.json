@@ -23,13 +23,12 @@
     "@tanstack/react-query": "catalog:",
     "expo": "~56.0.8",
     "expo-audio": "~56.0.11",
-    "expo-camera": "~56.0.7",
     "expo-clipboard": "~56.0.3",
     "expo-constants": "~56.0.16",
     "expo-dev-client": "~56.0.18",
     "expo-file-system": "~56.0.8",
     "expo-device": "~56.0.4",
-    "expo-document-picker": "~56.0.4",
+    "expo-document-picker": "~57.0.0",
     "expo-font": "~56.0.5",
     "expo-image-picker": "~56.0.15",
     "expo-linking": "~56.0.13",
@@ -45,18 +44,18 @@
     "react-native": "0.85.3",
     "react-native-gesture-handler": "~2.31.1",
     "react-native-markdown-display": "^7.0.2",
-    "react-native-reanimated": "4.3.1",
+    "react-native-reanimated": "4.5.0",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "4.25.2",
     "react-native-sse": "^1.2.1",
     "react-native-web": "~0.21.0",
-    "react-native-worklets": "0.8.3"
+    "react-native-worklets": "0.10.1"
   },
   "devDependencies": {
     "@types/bun": "catalog:",
     "@types/react": "~19.2.0",
     "babel-preset-expo": "~56.0.16",
-    "markdown-it": "^10.0.0",
+    "markdown-it": "^14.3.0",
     "plist": "^3.1.0",
     "typescript": "catalog:"
   }

@@ -56,6 +56,10 @@ export interface ChatSession {
   // Archived marker (absent = active). Archived sessions keep their history
   // and stay directly addressable, but are excluded from session lists.
   archivedAt?: string;
+  // Sidebar membership (the container model): a session belongs in the
+  // Topics list iff the user pinned it. Legacy topics are backfilled true
+  // by a gateway migration; gateways predating the field never send it.
+  pinned?: boolean;
   // Follow-up messages queued server-side while a turn is in flight. Drains
   // FIFO one-per-turn; the "N Queued" pill above the composer renders from
   // this. Kept live by the chat_session SSE frame. See ADR
@@ -103,6 +107,7 @@ export type TaskStatus =
   | "queued"
   | "running"
   | "waiting_approval"
+  | "needs_input"
   | "completed"
   | "failed"
   | "cancelled";

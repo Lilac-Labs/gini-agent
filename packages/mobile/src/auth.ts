@@ -130,7 +130,7 @@ export function normalizeBaseUrl(input: string): string {
 
 export async function saveCredentials(creds: AuthCredentials): Promise<void> {
   // Funnel all writes through normalizeBaseUrl so query strings, paths,
-  // and trailing slashes can't sneak in via either the setup screen or
+  // and trailing slashes can't sneak in via either connect flow (login or setup) or
   // a future re-save path.
   const normalized: AuthCredentials = {
     baseUrl: normalizeBaseUrl(creds.baseUrl),

@@ -204,7 +204,7 @@ export async function refreshBadge(): Promise<void> {
     await Notifications.setBadgeCountAsync(unread);
   } catch (error) {
     // 401 means we lost auth — leave the badge alone (the next /chat
-    // navigation will route to setup). Other errors are transient
+    // navigation will route to the signed-out screen). Other errors are transient
     // network blips; the next event-driven refresh will catch up.
     if (error instanceof ApiError && error.status === 401) return;
     // swallow — badge accuracy is best-effort
@@ -280,11 +280,11 @@ export function installNotificationResponseListener(): void {
 // clear it so a later remount can't navigate a second time off the same tap.
 //
 // Called from the authed landing screen (channels) on mount. The index auth
-// gate is presence-only — it routes a MISSING credential to /setup but lets a
+// gate is presence-only — it routes a MISSING credential to the signed-out screen but lets a
 // stale/expired one through — so a dead token here pushes the chat
 // optimistically (same as tapping any agent/channel row), then the chat
-// screen's own 401 handler clears the token and redirects to /setup; the next
-// cold start skips straight to /setup. Best-effort and iOS-gated: any failure
+// screen's own 401 handler clears the token and redirects to the signed-out screen;
+// the next cold start skips straight there. Best-effort and iOS-gated: any failure
 // leaves the user on the screen they're already on.
 //
 // Approve/Deny action launches resolve to null in resolveLaunchTapRoute, so
@@ -621,7 +621,7 @@ export function __resetRegistrationForSignOut(): void {
     // Drop any stored launch tap too. The cold-start consume
     // (consumeLaunchNotificationRoute) only runs on the authed landing
     // screen, so an un-consumed tap that predates this sign-out would
-    // otherwise survive the signed-out /setup detour and replay after the
+    // otherwise survive the signed-out detour and replay after the
     // next sign-in — navigating into a chat from the prior credential.
     try {
       Notifications.clearLastNotificationResponse();
@@ -644,7 +644,7 @@ export function __resetRegistrationForSignOut(): void {
   // signed-out → signed-in user with no live tap routing until they happened
   // to open a chat detail. A tap handled while signed out self-heals: it
   // pushes the chat, the chat screen 401s, clears creds, and redirects to
-  // /setup. Test isolation tears it down via __resetForTests instead.
+  // the signed-out screen. Test isolation tears it down via __resetForTests instead.
 }
 
 // Call right before `saveCredentials` swaps the persisted base URL +

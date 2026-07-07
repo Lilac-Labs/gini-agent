@@ -199,11 +199,12 @@ function parseChoiceOptions(raw: unknown): ChoiceOption[] {
 }
 
 // Interactive single-select card for a pending chat.choice (ask_user)
-// SetupRequest, mirroring the web ChoiceCard. The question + options come
-// from the TRUSTED setup payload the dispatcher minted (the block carries
-// only the summary, which is the question too). The card always adds its own
-// "Other (type your answer)" freeform row — mobile has no auto-Other — and a
-// Skip affordance (Skip = the /cancel endpoint, which resumes the agent with
+// SetupRequest — mobile's own answer surface for the same /complete and
+// /cancel contract the web chat resolves through. The question + options
+// come from the TRUSTED setup payload the dispatcher minted (the block
+// carries only the summary, which is the question too). The card always
+// adds its own "Other (type your answer)" freeform row and a Skip
+// affordance (Skip = the /cancel endpoint, which resumes the agent with
 // a skip fallback rather than failing the task). Selecting an option clears
 // any typed Other text and vice-versa, so exactly one answer is submitted.
 // When the request resolves (status !== "pending") the controls give way to

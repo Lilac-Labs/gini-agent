@@ -40,6 +40,7 @@ const {
   api,
   ApiError,
   isUnauthorized,
+  isCredentialRejected,
   uploadImage,
   uploadAudio,
   uploadUrl,
@@ -336,6 +337,29 @@ describe("api() helpers", () => {
     expect(isUnauthorized(new ApiError(401, "x"))).toBe(true);
     expect(isUnauthorized(new ApiError(500, "x"))).toBe(false);
     expect(isUnauthorized(new Error("x"))).toBe(false);
+  });
+
+  test("isCredentialRejected distinguishes a rejected token from a missing one", () => {
+    // A gateway 401 with no code = the token was presented and refused → drives
+    // sign-out + redirect.
+    expect(isCredentialRejected(new ApiError(401, "Unauthorized"))).toBe(true);
+    // A locally-thrown "no_credentials" 401 = already signed out → ignored so
+    // background polls can't re-fire router.replace("/login") in a loop.
+    expect(
+      isCredentialRejected(new ApiError(401, "No credentials configured", "no_credentials"))
+    ).toBe(false);
+    // Non-401s and non-ApiErrors are never credential rejections.
+    expect(isCredentialRejected(new ApiError(500, "x"))).toBe(false);
+    expect(isCredentialRejected(new Error("x"))).toBe(false);
+  });
+
+  test("credentialless api() call throws a 401 tagged no_credentials", async () => {
+    await clearCredentials();
+    const err = await api("/agents").catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as InstanceType<typeof ApiError>).code).toBe("no_credentials");
+    // The predicate must NOT treat it as a rejection.
+    expect(isCredentialRejected(err)).toBe(false);
   });
 
   test("uploadImage/uploadAudio stream through the native uploader and return the ref", async () => {

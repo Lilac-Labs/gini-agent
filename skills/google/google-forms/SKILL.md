@@ -23,6 +23,7 @@ Use `gws forms` to create new forms, add questions to them, change publish setti
 
 ## Prerequisites
 
+- If this deployment is managed/hosted, the Google credential is already provisioned at sign-in — `gws` is installed and authenticated, so skip the setup flow below and run `gws` directly. Scopes are fixed at sign-in on a managed deployment: when a call fails with `scope required` or HTTP 401, tell the user which action needs a scope their account wasn't granted, instead of trying to set anything up. (The scope list below still describes which verb needs which scope.)
 - `gws` installed and authenticated. If `gws` is not on PATH OR `gws auth status` reports no authenticated user, do NOT silently call setup. Instead, in a single short reply to the user:
   1. State plainly what's missing — e.g. "Google Workspace access isn't set up on this machine yet" or "your Google sign-in has expired."
   2. Ask one sentence: "Want me to walk you through setting it up?" Wait for the user's answer.
@@ -33,6 +34,7 @@ Use `gws forms` to create new forms, add questions to them, change publish setti
   - Read form structure only (e.g. mapping `questionId → title` for summaries): `forms.body.readonly`
   - Read submitted responses: `forms.responses.readonly`
   - Summarize responses by question text: `forms.responses.readonly` AND `forms.body.readonly` (or `forms.body`). `forms.responses.readonly` is NOT on `forms.get`'s authorized scope list — you need a body scope to fetch the structure separately.
+  - The Forms API also accepts the broader `drive` scope for create, get, and responses — an account with a full `drive` grant can edit form structure and read responses without the separate Forms scopes.
 
 ## Selecting a Google account
 
@@ -48,7 +50,7 @@ Selection rule: one account connected → just use it. Two or more:
 - A read/lookup/search the user didn't tie to an account (e.g. listing events, searching mail, finding a doc) → run it against **every** connected account (one `gws` call per config dir) and aggregate, labeling each result by its tag and email. Don't pick just one, and don't ask — the user wants the whole picture across accounts.
 - A write (send, create, edit, delete) with no account named → ASK which account first; never guess.
 
-If no accounts are connected yet, fall back to the setup flow in Prerequisites (`read_skill` with `google-workspace-setup`).
+If no accounts are connected yet, fall back to the setup flow in Prerequisites (`read_skill` with `google-workspace-setup`). On a managed/hosted deployment an account is always connected, so this case doesn't arise.
 
 ## When to Use
 

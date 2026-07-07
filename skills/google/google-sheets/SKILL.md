@@ -23,6 +23,7 @@ Use `gws sheets` to create spreadsheets, read cell ranges, append rows, update v
 
 ## Prerequisites
 
+- If this deployment is managed/hosted, the Google credential is already provisioned at sign-in — `gws` is installed and authenticated, so skip the setup flow below and run `gws` directly. Scopes are fixed at sign-in on a managed deployment: when a call fails with `scope required` or HTTP 401, tell the user which action needs a scope their account wasn't granted, instead of trying to set anything up. (The scope list below still describes which verb needs which scope.)
 - `gws` installed and authenticated. If `gws` is not on PATH OR `gws auth status` reports no authenticated user, do NOT silently call setup. Instead, in a single short reply to the user:
   1. State plainly what's missing — e.g. "Google Workspace access isn't set up on this machine yet" or "your Google sign-in has expired."
   2. Ask one sentence: "Want me to walk you through setting it up?" Wait for the user's answer.
@@ -32,6 +33,7 @@ Use `gws sheets` to create spreadsheets, read cell ranges, append rows, update v
   - Read and write Sheets: `sheets` (maps to `https://www.googleapis.com/auth/spreadsheets`)
   - Read-only Sheets: pass `--scopes "https://www.googleapis.com/auth/spreadsheets.readonly"` at login
   - Find sheets by title (or list recent sheets) before reading: pair with `drive.readonly`
+  - The Sheets API also accepts the broader `drive` scope, which covers finding sheets by title too — an account with a full `drive` grant needs no separate `sheets` scope
 
 ## Selecting a Google account
 
@@ -47,7 +49,7 @@ Selection rule: one account connected → just use it. Two or more:
 - A read/lookup/search the user didn't tie to an account (e.g. listing events, searching mail, finding a doc) → run it against **every** connected account (one `gws` call per config dir) and aggregate, labeling each result by its tag and email. Don't pick just one, and don't ask — the user wants the whole picture across accounts.
 - A write (send, create, edit, delete) with no account named → ASK which account first; never guess.
 
-If no accounts are connected yet, fall back to the setup flow in Prerequisites (`read_skill` with `google-workspace-setup`).
+If no accounts are connected yet, fall back to the setup flow in Prerequisites (`read_skill` with `google-workspace-setup`). On a managed/hosted deployment an account is always connected, so this case doesn't arise.
 
 ## When to Use
 

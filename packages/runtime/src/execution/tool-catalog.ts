@@ -182,7 +182,7 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
     type: "function",
     function: {
       name: "terminal_exec",
-      description: "Run a shell command in the workspace. Approval-gated; user must approve. Returns stdout/stderr and exit code. Set timeoutMs explicitly for slow commands (Apple/AppleScript-backed CLIs like memo or remindctl can take 30+ seconds; brew installs can take minutes). Set pty=true for interactive CLI tools (vim, memo, claude-code, codex, python repl) — without pty they hang or exit immediately because stdin is not a TTY. Commands always run with a clean env: no connector secrets are ever injected, so a Linear-token leak can't ride alongside a curl invocation. A command that genuinely needs a connector credential must ship as a skill script and be invoked via `skill_run` — that is the only path connector secrets enter a process.",
+      description: "Run a shell command in the workspace. Approval-gated; user must approve. Returns stdout/stderr and exit code. The working directory is the agent WORKSPACE root, not the user's home directory — `~` does NOT point at the workspace, so reference workspace files with relative paths (or absolute paths inside the workspace), never `~/...`. Set timeoutMs explicitly for slow commands (Apple/AppleScript-backed CLIs like memo or remindctl can take 30+ seconds; brew installs can take minutes). Set pty=true for interactive CLI tools (vim, memo, claude-code, codex, python repl) — without pty they hang or exit immediately because stdin is not a TTY. Commands always run with a clean env: no connector secrets are ever injected, so a Linear-token leak can't ride alongside a curl invocation. A command that genuinely needs a connector credential must ship as a skill script and be invoked via `skill_run` — that is the only path connector secrets enter a process.",
       parameters: {
         type: "object",
         properties: {
@@ -287,6 +287,38 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
           timeout_ms: { type: "number", description: "How long to wait for the subagent before timing out. Defaults to 300000 (5 minutes)." }
         },
         required: ["name", "prompt"]
+      }
+    }
+  },
+  {
+    // Child-task delegation (unified task model). Where spawn_subagent runs
+    // an invisible in-run helper, spawn_task mints a durable child task
+    // container — its own thread under the spawning run's container — and
+    // runs the written brief as the child's first run. Idempotent via
+    // correlation_key (dedup survives acknowledge/archive), depth-capped on
+    // both the helper chain and the container chain, audited like
+    // spawn_subagent.
+    toolset: "subagents",
+    displayLabel: "Spawn task",
+    type: "function",
+    function: {
+      name: "spawn_task",
+      description:
+        "Spawn a durable child task with its own thread. Use for user-facing or durable delegated work — a draft the user must review, a follow-up errand, one work item per finding from a watch. The child starts ONLY from the written brief you pass here (title/prompt/goal/context); it cannot see this conversation, so include everything it needs. Its activity mirrors into this thread as it runs. For invisible in-run helpers (parallel fan-out, heavy reads, a narrowed-tool chunk of THIS task) use spawn_subagent instead — helpers report back only to you and never surface to the user.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Short user-facing title for the child task's thread." },
+          prompt: { type: "string", description: "The written brief the child's first run starts from. Self-contained — the child cannot read this thread's transcript." },
+          goal: { type: "string", description: "Optional one-line objective for the child, rendered as a '## Goal' section ahead of the prompt." },
+          context: { type: "string", description: "Optional background the child needs (constraints, prior findings), rendered as a '## Context' section ahead of the prompt. Include the relevant slice here — never assume the child can see this thread." },
+          correlation_key: { type: "string", description: "Optional idempotency key, scoped to this container. Re-spawning with the same key returns the existing child (deduped: true) instead of minting another — including after the user acknowledged or archived it. Use a stable per-finding id (e.g. 'email:<message-id>')." },
+          surface: { type: "boolean", description: "true marks the child as user-facing so it can appear on the user's home (e.g. a draft to review). Default false: an internal errand whose activity only mirrors into this thread." },
+          await: { type: "string", enum: ["result", "none"], description: "'result' (default) waits for the child's first run and returns its outcome; 'none' returns immediately with the child's ids (fire-and-forget, e.g. watch fan-out)." },
+          toolsets: { type: "array", items: { type: "string" }, description: "Optional list of toolset names to expose to the child. Subset of the parent's enabled toolsets." },
+          skills: { type: "array", items: { type: "string" }, description: "Optional list of enabled skill names to advertise to the child. Subset of the parent's enabled skills." }
+        },
+        required: ["title", "prompt"]
       }
     }
   },
@@ -795,31 +827,34 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
     }
   },
   {
-    // User-choice affordance. The agent calls this mid-turn to put a
-    // single-select question card in the web chat; the task pauses on the
-    // resulting chat.choice SetupRequest and resumes with the user's pick.
-    // Always-on (like request_connector): the model needs this path even on
-    // a fresh instance with no toolsets toggled. See
+    // User-choice affordance. The agent calls this mid-turn to present a
+    // concrete single-select choice: the web chat renders the question as
+    // the agent's own message with the options beneath, and the task pauses
+    // on the resulting chat.choice SetupRequest until the user picks. The
+    // tool is options-ONLY — an open-ended question belongs in the agent's
+    // plain message text (the dispatcher rejects option-less calls with a
+    // steer back there). Always-on (like request_connector): the model needs
+    // this path even on a fresh instance with no toolsets toggled. See
     // docs/adr/user-choice-prompt.md.
     toolset: "core",
     displayLabel: "Ask user",
     type: "function",
     function: {
       name: "ask_user",
-      description: "Ask the user to pick between options when multiple viable paths exist and their preference matters. The user sees a single-select card in chat; the task pauses until they choose, then resumes with their selection. Every option must be a concrete action you can actually take with your available tools, or a setup you can request — never a way of opting out of the task. ESPECIALLY use this before requesting connector setup — offer the setup-vs-alternative choices first (e.g. for missing web search: \"Connect a search provider\", \"Fetch likely sites directly with web_fetch\", \"Browse the web with the browser\") so the user decides whether setup is worth it. Do NOT offer \"answer from general knowledge/memory\" as an option for research or current-information tasks — if the user wants that, they can type it under Other; fall back to general knowledge only when they explicitly choose it or every live path is exhausted. Also use it for general mid-task preference or clarification questions (which approach, which account, which format). Single-select only. The card automatically adds an \"Other (type your answer)\" freeform input and a Skip affordance — do NOT include an \"Other\" / \"something else\" / \"skip\" entry in `options`. Do NOT use this for permission confirmations — risk-gated actions already go through the authorization flow.",
+      description: "Present the user a concrete choice the task cannot proceed without. They see your question with 2-6 selectable options beneath it; the task pauses until they pick, then resumes with their answer. This tool ONLY presents choices — `options` is required. For an open-ended question with no options to offer (a free-form detail, and above all content that speaks in the user's voice, like what a message or reply should say), do NOT call this tool: ask directly in your plain message text and the user's reply arrives as the next message — NEVER invent multiple-choice options for content only the user can author. Use it whenever multiple viable paths exist and their preference matters (single-select). Every option must be a concrete action you can actually take with your available tools, or a setup you can request — never a way of opting out of the task. ESPECIALLY use this before requesting connector setup — offer the setup-vs-alternative choices first (e.g. for missing web search: \"Connect a search provider\", \"Fetch likely sites directly with web_fetch\", \"Browse the web with the browser\") so the user decides whether setup is worth it. Do NOT offer \"answer from general knowledge/memory\" as an option for research or current-information tasks — if the user wants that, they can type it under Other; fall back to general knowledge only when they explicitly choose it or every live path is exhausted. Also use it for mid-task preference or clarification decisions the task cannot proceed without (which approach, which account, which restaurant, what time — offer your best concrete guesses as the options): the call parks the task as needs-input and keeps the question on the user's home screen until they answer, while a prose question ends the run looking done. The UI automatically adds an \"Other (type your answer)\" freeform input and a Skip affordance — do NOT include an \"Other\" / \"something else\" / \"skip\" entry in `options`. Do NOT use this for permission confirmations — risk-gated actions already go through the authorization flow.",
       parameters: {
         type: "object",
         properties: {
-          question: { type: "string", description: "The question shown at the top of the card. One clear sentence." },
+          question: { type: "string", description: "The question, shown as your own message above the options. One clear sentence." },
           options: {
             type: "array",
             minItems: 2,
             maxItems: 6,
-            description: "2-6 mutually exclusive choices. Keep labels short; put any detail in `description`.",
+            description: "2-6 mutually exclusive choices (required — this tool only presents choices; ask open-ended questions in your message text instead). Keep labels short; put any detail in `description`.",
             items: {
               type: "object",
               properties: {
-                label: { type: "string", description: "Short choice label shown on the radio row (e.g. \"Set up Brave only\")." },
+                label: { type: "string", description: "Short choice label shown on the option (e.g. \"Set up Brave only\")." },
                 description: { type: "string", description: "Optional one-line detail rendered muted under the label." }
               },
               required: ["label"]
@@ -847,7 +882,7 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
     type: "function",
     function: {
       name: "request_confirmation",
-      description: "Ask the user to confirm before an irreversible action that goes to another person — sending or replying to a message or email, posting a reply in a web app, submitting or purchasing on their behalf. The user sees an inline Confirm/Cancel card in chat; the task pauses until they decide, then resumes with { confirmed: true } (do the action) or { confirmed: false } (don't — ask what to change). This fires even when you are otherwise auto-approved (yolo): yolo authorizes operational, reversible work, NOT speaking in the user's voice to others. EXCEPTION: if the user already gave a clear, specific go-ahead for THIS action in the conversation (\"send it\", \"reply yes\", \"you can submit\"), do NOT call this — just execute. This is for consent to send content the user has ALREADY approved; it is never a license to fabricate what they would say — when you lack the substance, ask for it as a normal question instead. Do NOT use this for risk-gated operational actions (those already go through the authorization flow) or for picking between options (use ask_user).",
+      description: "Ask the user to confirm before an irreversible action that goes to another person — sending or replying to a message or email, posting a reply in a web app, submitting or purchasing on their behalf. The user sees an inline Confirm/Cancel card in chat; the task pauses until they decide, then resumes with { confirmed: true } (do the action) or { confirmed: false } (don't — ask what to change). This fires even when you are otherwise auto-approved (yolo): yolo authorizes operational, reversible work, NOT speaking in the user's voice to others. EXCEPTION: if the user already gave a clear, specific go-ahead for THIS action in the conversation (\"send it\", \"reply yes\", \"you can submit\"), do NOT call this — just execute. This is for consent to send content the user has ALREADY approved; it is never a license to fabricate what they would say — when you lack the substance, ask for it directly in your message text (their reply arrives as the next message) and compose from their answer. Do NOT use this for risk-gated operational actions (those already go through the authorization flow) or for picking between options (use ask_user).",
       parameters: {
         type: "object",
         properties: {
@@ -1190,6 +1225,11 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
           },
           prompt: { type: "string", description: "The instruction the agent will receive when the job fires. Phrase it from the user's perspective (e.g. 'Remind me to take the cake out of the oven.')." },
           oneShot: { type: "boolean", description: "If true, the job is paused after its first successful run. Defaults to false (recurring)." },
+          deliveryPolicy: {
+            type: "string",
+            enum: ["always", "on_findings", "silent"],
+            description: "How each fire's final reply is delivered. \"always\" (default): every reply delivers. \"on_findings\": watch-style — the fire is invited to reply [SILENT] when there is nothing new, so only real findings deliver. \"silent\": never deliver — the run's output stays in the job's hidden working thread; use for watch jobs that spawn a child task per finding (spawn_task with a correlation_key) instead of reporting. Not allowed with oneShot=true."
+          },
           skillNames: {
             type: "array",
             items: { type: "string" },
@@ -1280,6 +1320,11 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
           cronExpression: { type: ["string", "null"], description: "Optional new 5-field Unix cron expression. Pass a string to make the job cron-driven; pass null to clear it when switching to intervalSeconds." },
           cronTimezone: { type: ["string", "null"], description: "Optional new IANA timezone identifier (only valid with cronExpression). Pass null to clear (only legal when also clearing cronExpression)." },
           oneShot: { type: "boolean", description: "Optional. If true the job is auto-paused after its first run." },
+          deliveryPolicy: {
+            type: "string",
+            enum: ["always", "on_findings", "silent"],
+            description: "Optional new delivery policy for each fire's final reply. \"always\": every reply delivers. \"on_findings\": watch-style — only real findings deliver (the fire may reply [SILENT] when there is nothing new). \"silent\": never deliver — output stays in the job's hidden working thread. Rejected on oneShot jobs."
+          },
           skillNames: {
             type: ["array", "null"],
             items: { type: "string" },
@@ -2193,6 +2238,10 @@ export function buildToolCatalog(state: RuntimeState, agentToolsetFilter?: Set<s
     // on enable would silently disable delegation on freshly cloned
     // instances. Subagent path itself is depth-capped and audited.
     if (tool.function.name === "spawn_subagent") return true;
+    // spawn_task rides alongside spawn_subagent for the same reason: it's a
+    // runtime capability on the non-default "subagents" toolset, and the
+    // child-task path is depth-capped, dedup-keyed, and audited.
+    if (tool.function.name === "spawn_task") return true;
     // Always expose the full scheduled-job tool surface (create / list /
     // update / delete / run). The "jobs" toolset isn't part of the legacy
     // defaults; gating on enable would silently hide scheduling (and the
@@ -2608,6 +2657,8 @@ export function chatBlockArgsPreviewFor(
       return truncatePreview("skill");
     case "spawn_subagent":
       return truncatePreview(previewValue(safe.name) || previewValue(safe.prompt));
+    case "spawn_task":
+      return truncatePreview(previewValue(safe.title) || previewValue(safe.prompt));
     case "browser_navigate":
       return truncatePreview(previewValue(safe.url));
     case "browser_click":

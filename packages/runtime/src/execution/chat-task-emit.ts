@@ -65,11 +65,12 @@ export interface ChatEmitContext {
   // for main-chat turns.
   threadId?: string;
   parentBlockId?: string;
-  // Render-only Topic→Chat activity mirror target (ADR
-  // chat-topics-tasks-subagents.md). Set when the emitting session is a
-  // kind:"topic" with a parentChatSessionId, so every emit helper can mirror
-  // its block into the parent Chat. Forwarded copies are never replayed into
-  // the model context.
+  // Render-only child→parent activity mirror target (ADR
+  // chat-topics-tasks-subagents.md). Set when the emitting session has a
+  // parentChatSessionId whose parent still exists — a Topic under Chat, or a
+  // spawned child task container under its parent — so every emit helper can
+  // mirror its block one level up into the parent thread. Forwarded copies
+  // are never replayed into the model context.
   forward?: { sessionId: string; topicId: string; topicTitle: string };
 }
 
@@ -90,12 +91,16 @@ export function resolveEmitContext(
   if (!task?.chatSessionId) return undefined;
   const session = state.chatSessions.find((s) => s.id === task.chatSessionId);
   if (!session) return undefined;
-  // When the turn runs inside a Topic spawned from a Chat, every block it
-  // emits is mirrored render-only into the parent Chat (Change below).
-  const forward =
-    session.kind === "topic" && session.parentChatSessionId
-      ? { sessionId: session.parentChatSessionId, topicId: session.id, topicTitle: session.title }
-      : undefined;
+  // When the turn runs inside ANY child container (a session with a
+  // parentChatSessionId whose parent still exists), every block it emits is
+  // mirrored render-only one level up into the parent thread. The wire
+  // fields keep the forwardedFromTopic* names (payload_json, render-only).
+  const parentSession = session.parentChatSessionId
+    ? state.chatSessions.find((s) => s.id === session.parentChatSessionId)
+    : undefined;
+  const forward = parentSession
+    ? { sessionId: parentSession.id, topicId: session.id, topicTitle: session.title }
+    : undefined;
   return {
     instance: config.instance,
     sessionId: task.chatSessionId,

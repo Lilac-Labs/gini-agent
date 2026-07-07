@@ -2462,15 +2462,26 @@ describe("manual tunnel drivers", () => {
     const dnsGate = Promise.withResolvers<never>();
     const tailscale = scriptedDriver({ connect: () => dnsGate.promise });
     setTunnelDeps(deps({ drivers: fakeDrivers({ tailscale }) }));
-    await connectTunnel(config, "tailscale");
-    for (let i = 0; tailscale.connects < 1 && i < 1000; i += 1) await Bun.sleep(1);
-    expect(getTunnel(config).status).toBe("connecting");
-    await stopAllTunnels();
-    // The off is queued behind the parked connect op, so it lands once the
-    // in-flight serve op settles — but it MUST have been issued.
-    dnsGate.reject(new Error("shutdown"));
-    for (let i = 0; tailscale.disconnects < 1 && i < 1000; i += 1) await Bun.sleep(1);
-    expect(tailscale.disconnects).toBe(1);
+    // The connect is parked, so both stopAllTunnels drain races (the pending
+    // `settled` and the queued `off`) would otherwise eat the full 2s default
+    // shutdown-drain bound. Shrink it — the queued off still fires when the
+    // connect rejects below, independent of this timeout.
+    const prevDrain = process.env.GINI_TUNNEL_SHUTDOWN_DRAIN_MS;
+    process.env.GINI_TUNNEL_SHUTDOWN_DRAIN_MS = "20";
+    try {
+      await connectTunnel(config, "tailscale");
+      for (let i = 0; tailscale.connects < 1 && i < 1000; i += 1) await Bun.sleep(1);
+      expect(getTunnel(config).status).toBe("connecting");
+      await stopAllTunnels();
+      // The off is queued behind the parked connect op, so it lands once the
+      // in-flight serve op settles — but it MUST have been issued.
+      dnsGate.reject(new Error("shutdown"));
+      for (let i = 0; tailscale.disconnects < 1 && i < 1000; i += 1) await Bun.sleep(1);
+      expect(tailscale.disconnects).toBe(1);
+    } finally {
+      if (prevDrain === undefined) delete process.env.GINI_TUNNEL_SHUTDOWN_DRAIN_MS;
+      else process.env.GINI_TUNNEL_SHUTDOWN_DRAIN_MS = prevDrain;
+    }
   });
 
   test("reconcile tears provider-side state down when resetting a stale manual CONNECTING record", async () => {
@@ -3308,10 +3319,18 @@ describe("makeDefaultDrivers", () => {
   test("defaultRunCommand escalates to SIGKILL when the command ignores SIGTERM", async () => {
     // A wedged CLI trapping TERM would hold the stream/exit awaits open
     // forever without the escalation (boot awaits a detection pass, so a
-    // hang here would block the port bind). The 2s escalation delay plus
-    // margin keeps this test bounded well under the per-test cap.
-    const result = await defaultRunCommand(["sh", "-c", 'trap "" TERM; sleep 30'], 25);
-    expect(result.exitCode).not.toBe(0);
+    // hang here would block the port bind). The escalation delay is env-driven
+    // (read at call time via killEscalationMs), so shrink it here — the SIGKILL
+    // still fires, just sooner — keeping this bounded well under the per-test cap.
+    const prevEscalation = process.env.GINI_TUNNEL_KILL_ESCALATION_MS;
+    process.env.GINI_TUNNEL_KILL_ESCALATION_MS = "20";
+    try {
+      const result = await defaultRunCommand(["sh", "-c", 'trap "" TERM; sleep 30'], 25);
+      expect(result.exitCode).not.toBe(0);
+    } finally {
+      if (prevEscalation === undefined) delete process.env.GINI_TUNNEL_KILL_ESCALATION_MS;
+      else process.env.GINI_TUNNEL_KILL_ESCALATION_MS = prevEscalation;
+    }
   });
 });
 
@@ -3542,8 +3561,8 @@ describe("tunnel auto-reconnect", () => {
   // sees the supervisor was replaced and bails without clobbering idle or
   // rebuilding a tunnel the user tore down.
   test("a disconnect during the reconnect backoff bails the loop without rebuilding", async () => {
-    process.env.GINI_TUNNEL_RECONNECT_BASE_MS = "200"; // a backoff window to disconnect within
-    process.env.GINI_TUNNEL_RECONNECT_MAX_MS = "200";
+    process.env.GINI_TUNNEL_RECONNECT_BASE_MS = "50"; // a backoff window to disconnect within
+    process.env.GINI_TUNNEL_RECONNECT_MAX_MS = "50";
     const live = crashableChild();
     let built = 0;
     setTunnelDeps(
@@ -3564,8 +3583,10 @@ describe("tunnel auto-reconnect", () => {
     // The user disconnects mid-backoff.
     const after = await disconnectTunnel(config);
     expect(after.status).toBe("idle");
-    // Give the loop time to wake from its sleep and observe the supersede.
-    await Bun.sleep(300);
+    // Give the loop several backoff windows to wake from its sleep and observe
+    // the supersede — long enough that a rebuild, had one been going to happen,
+    // would have bumped `built` by now.
+    await Bun.sleep(200);
     expect(getTunnel(config).status).toBe("idle");
     expect(built).toBe(1); // no rebuild happened
   });

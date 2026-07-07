@@ -18,6 +18,7 @@ const STATUS_ORDER: TaskStatus[] = [
   "running",
   "queued",
   "waiting_approval",
+  "needs_input",
   "completed",
   "failed",
   "cancelled"
@@ -32,6 +33,7 @@ const STATUS_COLOR: Record<TaskStatus, string> = {
   running: "#60a5fa",
   queued: "#a1a1aa",
   waiting_approval: "#fbbf24",
+  needs_input: "#fbbf24",
   completed: "#34d399",
   failed: "#f87171",
   cancelled: "#a1a1aa"
@@ -41,6 +43,7 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
   running: "Running",
   queued: "Queued",
   waiting_approval: "Waiting",
+  needs_input: "Needs input",
   completed: "Completed",
   failed: "Failed",
   cancelled: "Cancelled"

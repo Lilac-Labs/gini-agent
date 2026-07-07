@@ -122,7 +122,8 @@ function TaskListRow({
 const DOT_TONE: Partial<Record<TaskStatus, string>> = {
   queued: "text-zinc-400",
   running: "text-blue-400",
-  waiting_approval: "text-amber-400"
+  waiting_approval: "text-amber-400",
+  needs_input: "text-amber-400"
 };
 
 function LiveDot({ status }: { status: TaskStatus }) {

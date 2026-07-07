@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-07
-- **See also:** [Crash Reporting And Issue Filing](crash-reporting-and-issue-filing.md), [Device-Pairing Authentication (Loopback-Trusted, Relay-Gated)](device-pairing-auth.md), [Local Runtime Architecture](local-runtime-architecture.md)
+- **See also:** [Crash Reporting And Issue Filing](crash-reporting-and-issue-filing.md), [Owner-Token-Only Authentication](owner-token-auth.md), [Local Runtime Architecture](local-runtime-architecture.md)
 
 ## Decision
 
@@ -31,15 +31,15 @@ is the operator, who already has filesystem read access to the same files under
 `~/.gini/instances/<instance>/logs/`. Exposing the raw bytes in the app adds no
 trust boundary the operator didn't already cross; it just saves them a `tail`.
 
-A **paired relay session mirrors loopback** (see
-[device-pairing-auth.md](device-pairing-auth.md)): after the human-approved
-pairing handshake, a relay operator is owner-equivalent and reaches the same
-bearer-gated `/api/*` surface through the BFF. This is called out explicitly
-because the raw tail is **un-redacted** — a paired relay operator can therefore
-read raw logs (including the un-redacted `data` payload) exactly like the local
-operator. That is consistent with the deliberate "logged in == admin" mirror
-model in that ADR, not a new exposure: the trust anchor remains the pairing
-handshake, and an *unpaired* relay visitor never reaches the route.
+A **trusted remote front mirrors loopback** (see
+[owner-token-auth.md](owner-token-auth.md)): a relay/tunnel/allowlisted front
+is owner-equivalent and reaches the same bearer-gated `/api/*` surface through
+the BFF. This is called out explicitly because the raw tail is **un-redacted**
+— a remote operator on a trusted front can therefore read raw logs (including
+the un-redacted `data` payload) exactly like the local operator. That is
+consistent with the deliberate owner-equivalence model in that ADR, not a new
+exposure: the trust anchor is the front's host/origin trust lane, and a
+visitor on an untrusted front never reaches the route.
 
 ### Redaction reuses the crash-report definition
 
@@ -72,9 +72,9 @@ of relying on any externally-hosted link. This page is the resolution of #232.
 - The viewer is a tail, not a live stream: it fetches the last `limit` lines
   (default 500, clamped to 5000) per request and refreshes on demand. No SSE
   live-tail and no pagination beyond `limit` — deliberately out of scope.
-- A paired relay operator can read raw logs; this is the intended mirror of
-  loopback and must not be "hardened" into a relay-only redaction, which would
-  make a paired session less capable than `127.0.0.1`.
+- A remote operator on a trusted front can read raw logs; this is the intended
+  mirror of loopback and must not be "hardened" into a remote-only redaction,
+  which would make a trusted front less capable than `127.0.0.1`.
 
 ## Acceptance Checks
 

@@ -3,7 +3,7 @@
 // basename) or a named test/smoke instance.
 export type Instance = "default" | string;
 
-export type TaskStatus = "queued" | "running" | "waiting_approval" | "completed" | "failed" | "cancelled";
+export type TaskStatus = "queued" | "running" | "waiting_approval" | "needs_input" | "completed" | "failed" | "cancelled";
 
 // Authorization (agent-actor): user approves/denies, runtime then performs
 // the action. SetupRequest (user-actor): user performs a setup step in the
@@ -28,10 +28,6 @@ export type ProviderName = "echo" | "openai" | "codex" | "openrouter" | "local" 
 export type ImprovementStatus = "proposed" | "approved" | "rejected" | "applied";
 
 export type ImprovementKind = "skill" | "job";
-
-export type PairingStatus = "pending" | "claimed" | "expired" | "revoked";
-
-export type DeviceStatus = "active" | "revoked";
 
 export type PromotionStatus = "proposed" | "approved" | "rejected";
 
@@ -135,8 +131,8 @@ export type RuntimeEventKind =
   | "messaging"
   | "provider"
   | "runtime"
-  | "pairing"
-  | "notification";
+  | "notification"
+  | "onboarding";
 
 export type JobRunStatus = "running" | "completed" | "failed";
 
@@ -308,6 +304,11 @@ export interface RuntimeConfig {
   // are raw page captures for local debugging/audit review — they never
   // enter the model context. See src/tools/browser.ts.
   browserRecording?: boolean;
+  // Optional owner first name surfaced in GET /api/home's greeting. Set by
+  // editing config.json directly (no UI in v1). When unset the response
+  // omits `owner` and the web greeting falls back to a name-less line —
+  // NEVER derived from an email local-part.
+  ownerFirstName?: string;
 }
 
 // ChatBlock — semantic, typed conversation block emitted by the runtime so
@@ -497,9 +498,10 @@ export interface AuthorizationRequestedBlock extends ChatBlockBase {
 //   - `messaging.remove_bridge` → destructive confirmation card showing
 //     bridge name + irreversibility warning. Submit POSTs `{}` to /complete
 //     → server calls removeMessagingBridge.
-//   - `chat.choice` → single-select question card (ask_user tool). Options
-//     live in the SetupRequest payload; the card always adds its own
-//     "Other (type your answer)" freeform input and a Skip affordance.
+//   - `chat.choice` → single-select question (ask_user tool), rendered as
+//     the agent's own message with the options beneath. Options live in the
+//     SetupRequest payload; the UI adds its own "Other (type your answer)"
+//     freeform input and a Skip affordance.
 //     Submit POSTs `{ choice: { label } }` or `{ choice: { other } }` to
 //     /complete; Skip POSTs to /cancel, which resumes the loop with a skip
 //     fallback instead of failing the task.
@@ -664,9 +666,6 @@ export interface RuntimeState {
   // (still-unactioned) proposal isn't re-posted every run. Absent until the
   // first digest posts; normalizeState leaves it as-is (passthrough).
   lastSkillReviewDigestAt?: string;
-  pairingCodes: PairingCode[];
-  pairingRequests: PairingRequest[];
-  devices: PairedDevice[];
   promotions: PromotionProposal[];
   snapshots: SnapshotRecord[];
   tools: ToolRecord[];
@@ -896,13 +895,26 @@ export interface Task {
   // Times this task has been re-dispatched after a gateway restart; capped to
   // break crash loops — see ADR task-resume-on-restart.md.
   bootResumeCount?: number;
-  // "Additional input needed" marker (ADR chat-topics-tasks-subagents.md). Set
-  // when this task is a subagent child whose ask_user call could not be
-  // answered in-band (no chat surface), so the question must bubble up to the
-  // parent's spawn_subagent tool result. syncSubagentFromTask mirrors it onto
-  // the SubagentRecord's resultNeedsInput; the parent then re-asks via its own
-  // ask_user. Render-only/return-value grain — NOT a TaskStatus.
-  needsInput?: { question: string };
+  // Supersede provenance. Set when this task was parked at waiting_approval
+  // on Authorization gates and a new user message cancelled it (cancelTask
+  // reason "superseded") — the id of the fresh task that ran that message.
+  // The gated side effect was NOT executed: user text never resolves a gate
+  // as approval; the only path that executes one is the explicit approve
+  // endpoint.
+  supersededByTaskId?: string;
+  // "Additional input needed" marker (ADR chat-topics-tasks-subagents.md).
+  // Two producers:
+  //   - The chat-task park: when EVERY gate the loop paused on is a pending
+  //     `chat.choice` SetupRequest (ask_user), the park stamps the question
+  //     payload here (question/options/setupRequestId/blockId) and the task's
+  //     status becomes `needs_input` (unless GINI_NEEDS_INPUT_STATUS=0 keeps
+  //     the exposed status `waiting_approval` for one release). Cleared when
+  //     the resume flips the task back to running.
+  //   - A subagent child whose ask_user call could not be answered in-band
+  //     (no chat surface): question-only stamp (no setupRequestId), so the
+  //     question bubbles up to the parent's spawn_subagent tool result via
+  //     syncSubagentFromTask; the parent then re-asks via its own ask_user.
+  needsInput?: { question: string; options?: string[]; setupRequestId?: string; blockId?: string };
 }
 
 export interface RuntimeEvent {
@@ -1030,10 +1042,49 @@ export interface ChatSessionRecord {
   // routing/retrieval (Chat picks a topic to dispatch into by recalling over
   // topic summaries). Absent until a topic accrues content.
   topicSummary?: string;
-  // The Chat (`kind:"agent"`) session that spawned a `kind:"topic"` session,
-  // used later to forward a topic's final answer back into Chat. The topic's
-  // display name reuses the existing `title` field.
+  // The session that spawned a `kind:"topic"` session — the Chat
+  // (`kind:"agent"`) it was routed out of, used to forward a topic's final
+  // answer back into Chat. Doubles as the parent edge for child containers:
+  // a container spawned from inside another container records that parent
+  // here. The topic's display name reuses the existing `title` field.
   parentChatSessionId?: string;
+  // User pin gesture. `pinned === true` is the only thing the sidebar topics
+  // section lists; nothing the agent or router creates is ever auto-pinned.
+  // Legacy non-archived `kind:"topic"` sessions are backfilled to true once
+  // (migrations.topicsPinnedBackfilled) so the pinned-based sidebar keeps
+  // showing them.
+  pinned?: boolean;
+  // Never surfaced in chrome (home, sidebar, session lists, router
+  // candidates) — e.g. a watch job's working thread. The container stays
+  // directly addressable by id.
+  headless?: boolean;
+  // Home checkbox: stamped when the user acknowledges the container's latest
+  // outcome. Attention is DERIVED, never stored — an acknowledgedAt at or
+  // after the latest run outcome decays `done_unacknowledged` to `none`
+  // (state/attention.ts). Seeded to now() on all pre-existing sessions once
+  // (migrations.containersAckSeeded) so the first boot after upgrade doesn't
+  // flood home.
+  acknowledgedAt?: string;
+  // Idempotent-spawn dedup key, scoped to `parentChatSessionId`. A spawner
+  // that re-fires with the same key finds the existing child container
+  // (findChildContainerByCorrelationKey) instead of minting a duplicate —
+  // including after the child was acknowledged or archived.
+  correlationKey?: string;
+  // Provenance: the run (task) whose spawn created this container. Records
+  // where the spawn was journaled, not agency — jobs never create containers;
+  // the agent does, during a run.
+  spawnedByTaskId?: string;
+  // Agent-created container explicitly marked user-facing by its spawner
+  // (e.g. a watch job's draft tasks). Drives the home inclusion predicate;
+  // user-started containers don't need it.
+  surfaced?: boolean;
+  // Records the creation gesture: which composer mode the user started the
+  // container from — "task" (a fire-and-forget work item that lives on home)
+  // or "message" (a conversation the user stays in; the sidebar Messages
+  // section lists these). Immutable presentation intent, not lifecycle —
+  // nothing flips it later. Absent on containers minted before the field
+  // existed and on router/agent/job-minted containers (unknown ≠ either).
+  startedAs?: "task" | "message";
   // Archived marker. Absent = active. An archived session keeps its full
   // history and stays directly addressable (GET /api/chat/<id>, deep links),
   // but is excluded from session/channel lists. Set when a job's delivery
@@ -1077,7 +1128,73 @@ export interface PendingChatMessage {
   // block survives the queue (a popped reply that lost it would re-dispatch
   // without the main-chat mirror).
   alsoToMain?: boolean;
+  // The user_text block inserted at accept time (echo-first ack). Auto-dispatch
+  // attaches the task to this block instead of inserting a duplicate bubble,
+  // and removing the queued message deletes it. Absent for thread replies and
+  // topic-queue entries, whose blocks are created at dispatch time.
+  echoBlockId?: string;
   createdAt: string;
+}
+
+// Derived attention state of a container (chat session), computed on read by
+// deriveContainerAttention (src/state/attention.ts) — never stored. Only
+// facts persist on the record (`pinned`, `headless`, `acknowledgedAt`,
+// `correlationKey`, `spawnedByTaskId`, `surfaced`). Precedence:
+// needs_input > review > working > done_unacknowledged > none.
+export type ContainerAttention =
+  | "needs_input"
+  | "review"
+  | "working"
+  | "done_unacknowledged"
+  | "none";
+
+// One row of the home attention queue (GET /api/home). A lean read shape —
+// deliberately NOT the full ChatSessionRecord (no message arrays). Web
+// imports this via @runtime/types; never export a bare `Task` alias for it
+// (the ops /tasks page owns that word).
+export interface HomeTaskItem {
+  // Container (chat session) id — the row deep-links to /chat?session=<id>.
+  id: string;
+  title: string;
+  attention: ContainerAttention;
+  // First line of the latest terminal run's summary/error. Present on
+  // done_unacknowledged rows so home can render the outcome line.
+  outcomeLine?: string;
+  // Present when attention === "needs_input": the pending ask_user question.
+  // `options` are the choice labels; answering goes through the existing
+  // /api/setup-requests/:id/complete endpoint.
+  needsInput?: { question: string; options?: string[]; setupRequestId?: string };
+  // Present when attention === "review": the pending Authorization gate.
+  // The home button deep-links to the thread; `authorizationId` is kept for
+  // a later inline approve/deny affordance.
+  review?: { label: string; kind: "email" | "document" | "generic"; authorizationId: string };
+  // Present (true) only when the newest terminal outcome has status "failed"
+  // — the row renders the destructive treatment plus a Retry affordance
+  // instead of a normal done outcome line. Cancelled outcomes stay neutral
+  // (a superseded container immediately has a new live run anyway). Retry
+  // POSTs to /api/containers/:id/retry; the server looks up the failed run's
+  // input, so the row never carries it.
+  failed?: boolean;
+  // The home checkbox. Served rows are always false (acknowledged containers
+  // decay to attention "none" and are filtered server-side); the client flips
+  // it optimistically after POST /api/containers/:id/acknowledge.
+  acknowledged: boolean;
+  startedBy: "user" | "agent" | "schedule";
+  updatedAt: string;
+}
+
+// One row of the home Recents feed (GET /api/home): one entry per
+// home-eligible container, carrying its newest completed run. Follow-up
+// runs in the same container update the entry's recency instead of adding
+// rows, and the title is the CONTAINER's title (never a follow-up's text).
+export interface RecentItem {
+  // Task (run) id of the container's newest completed run.
+  id: string;
+  // Owning container (chat session) id — the row deep-links there.
+  containerId: string;
+  icon: "draft" | "document";
+  title: string;
+  timestamp: string;
 }
 
 // `lastInboundMessageId` is the most recent originating-message id the
@@ -1240,9 +1357,11 @@ export interface SubagentRecord {
   // own, so when its child task calls ask_user the question can't be answered
   // in-band; instead the question bubbles up here and surfaces in the parent's
   // spawn_subagent tool result so the PARENT (which does have a topic/chat
-  // session) can re-ask. This lives only on the return-value/marker types — it
-  // is NOT a persisted SubagentStatus.
-  resultNeedsInput?: { question: string };
+  // session) can re-ask. `options` carries the child's choice labels so the
+  // parent re-asks with the same options instead of inventing its own. This
+  // lives only on the return-value/marker types — it is NOT a persisted
+  // SubagentStatus.
+  resultNeedsInput?: { question: string; options?: string[] };
   // Optional framing the parent passes when delegating: a one-line objective and
   // any background the subagent needs. Rendered as `## Goal` / `## Context`
   // sections ahead of the subagent's prompt in its system context.
@@ -1674,12 +1793,15 @@ export type SetupRequestAction =
   | "messaging.add_bridge"
   | "messaging.approve_pairing"
   | "messaging.remove_bridge"
-  // chat.choice — the ask_user tool's single-select question card. The
-  // payload carries { question, options: [{label, description?}], toolCallId };
-  // /complete resolves with the user's pick ({choice:{label}} for a listed
-  // option, {choice:{other}} for the freeform answer) and /cancel is the Skip
-  // affordance, which resumes the loop with a skip fallback rather than
-  // failing the task. See docs/adr/user-choice-prompt.md.
+  // chat.choice — the ask_user tool's question. The payload carries
+  // { question, options: [{label, description?}], toolCallId }; every new
+  // mint has 2-6 options (the dispatcher rejects option-less calls), but
+  // historical rows may carry an empty array — those answer through the
+  // freeform shape or a plain message post. /complete resolves with the
+  // user's pick ({choice:{label}} for a listed option, {choice:{other}} for
+  // the freeform answer) and /cancel is the Skip affordance, which resumes
+  // the loop with a skip fallback rather than failing the task. See
+  // docs/adr/user-choice-prompt.md.
   | "chat.choice"
   // confirmation.request — the request_confirmation tool's inline
   // Confirm/Cancel card. The agent calls it before an irreversible action
@@ -1861,6 +1983,21 @@ export interface JobRoute {
   prompt?: string;
 }
 
+// How a job's terminal-run reply fans out (finalizeJobRunFromTask,
+// src/jobs/finalize.ts):
+//   - "always": deliver every reply — the [SILENT] sentinel still suppresses
+//     when the model emits it. This is the pre-policy behavior; existing jobs
+//     are defaulted to it once (migrations.jobsDeliveryPolicyDefaulted).
+//   - "on_findings": watch-style — the cron hint invites the model to reply
+//     [SILENT] when there is nothing new, so only real findings deliver. The
+//     hint is injected ONLY under this policy; the suppression machinery is
+//     policy-independent.
+//   - "silent": never deliver — the run's output stays in the job's working
+//     thread (minted headless), and the job surfaces findings by spawning
+//     keyed child tasks instead of reporting. Rejected on oneShot reminders
+//     (a reminder that delivers nothing is a no-op).
+export type JobDeliveryPolicy = "always" | "on_findings" | "silent";
+
 export interface JobRecord {
   id: string;
   instance: Instance;
@@ -1934,6 +2071,10 @@ export interface JobRecord {
   // first terminal run (success or fail). The user can resume manually
   // through /jobs. Defaults to undefined/false (recurring behavior).
   oneShot?: boolean;
+  // Terminal-run delivery fan-out policy (see JobDeliveryPolicy). Optional —
+  // absent reads as "always" (records predating the field, or a hand-edited
+  // state file restored after the one-time default migration ran).
+  deliveryPolicy?: JobDeliveryPolicy;
   // Per-job auto-approve envelope (see ADR approval-mode.md, "Per-job
   // scope"). When the agent's `create_job` tool schedules an unattended
   // job, it can opt into approval-bypass for just that job's spawned
@@ -2185,8 +2326,58 @@ export interface GoogleAccount {
 // the connectors layer so this foundational types module stays import-free.
 export interface GoogleAccountStatus extends GoogleAccount {
   signedIn: boolean;
+  // True when the account's gws token was actively revoked (reauth required),
+  // carried from the live `gws auth status` probe. Consumers check
+  // `x.tokenRevoked === true`.
+  tokenRevoked?: boolean;
   services: Record<string, boolean>;
   message: string;
+  // True on exactly one row: the effective primary account (the persisted
+  // primaryAccountId when it still names a registered account, else the
+  // first provisioned row, else the first row). Server-resolved so every
+  // client agrees on which account is "the" account.
+  primary?: boolean;
+}
+
+// Web onboarding record (ADR web-onboarding-flow.md). Persisted per-instance
+// at ~/.gini/instances/<instance>/onboarding.json (src/state/onboarding.ts) —
+// deliberately NOT part of state.json. The profile is what the Gmail scan
+// task distills from the user's recent inbox; the web renders it verbatim.
+
+export interface OnboardingProfileSection {
+  title: string;        // e.g. "Professional Identity", "Key Contacts Sample"
+  bullets?: string[];   // bullet lines
+  note?: string;        // muted paragraph (used by e.g. Key Contacts Sample)
+}
+
+export interface OnboardingProfile {
+  displayName: string;  // e.g. "Alex Chen (legal name: Alexander Chen)"
+  sections: OnboardingProfileSection[];
+}
+
+export type OnboardingScanStatus = "idle" | "running" | "ready" | "failed" | "no_account";
+
+// The Gmail profile scan's lifecycle. The deterministic in-runtime pipeline
+// (src/runtime/onboarding-scan.ts) runs in the background while `status ===
+// "running"`; on completion it writes `profile`/`suggestedTasks` (ready) or
+// `error` (failed) and pushes an `onboarding` event so the browser refetches.
+export interface OnboardingScan {
+  status: OnboardingScanStatus;
+  startedAt?: string;
+  finishedAt?: string;
+  error?: string;
+  profile?: OnboardingProfile;
+  suggestedTasks?: string[];
+}
+
+export interface OnboardingRecord {
+  version: 1;
+  completed: boolean;
+  completedAt?: string;
+  timezone?: string;              // IANA
+  theme?: "light" | "dark";
+  scan: OnboardingScan;
+  routineJobIds: string[];        // jobs created by the routines step (for idempotent replace)
 }
 
 export interface ImprovementProposal {
@@ -2284,96 +2475,6 @@ export type SkillEditOp =
   | { op: "insert_after"; anchor: string; content: string }
   | { op: "replace"; target: string; content: string }
   | { op: "delete"; target: string };
-
-export interface PairingCode {
-  id: string;
-  instance: Instance;
-  codeHash: string;
-  status: PairingStatus;
-  createdAt: string;
-  expiresAt: string;
-  claimedAt?: string;
-  claimedByDeviceId?: string;
-}
-
-export interface PairedDevice {
-  id: string;
-  instance: Instance;
-  name: string;
-  tokenHash: string;
-  status: DeviceStatus;
-  scopes: string[];
-  createdAt: string;
-  updatedAt: string;
-  lastSeenAt?: string;
-  revokedAt?: string;
-  // Network front the session connected over: "loopback" for a local browser
-  // or LAN-paired device, or the relay Host (e.g.
-  // <sub>.gini-relay.lilaclabs.ai) for a tunnel-paired browser. Surfaced in the
-  // Active Sessions UI to distinguish local vs remote sessions. Absent on
-  // legacy/mobile rows minted before browser pairing existed.
-  origin?: string;
-  // Raw User-Agent captured at pairing time, for the Active Sessions list.
-  // Absent on legacy/mobile rows.
-  userAgent?: string;
-  // Stable per-client id keying device identity so two distinct clients with the
-  // same User-Agent on one relay subdomain don't collide (and evict each other).
-  // Browsers send it via the gini_client cookie (minted server-side, survives
-  // re-pairs); native clients send it via the X-Gini-Client-ID header (never
-  // server-minted — a cookieless client can't echo one back). Absent on legacy
-  // code-claimed bearer rows and on native rows that sent no header.
-  clientId?: string;
-  // Optional session expiry. Paired sessions no longer set it — they live until
-  // the operator revokes them (revokeDevice), the same no-expiry contract as
-  // code-claimed bearer devices. Retained on the type (and honored by the token
-  // validators, which treat a past expiresAt as inactive) so any legacy row
-  // minted with a finite expiry still expires correctly.
-  expiresAt?: string;
-}
-
-export type PairingRequestStatus =
-  | "pending"
-  | "approved"
-  | "rejected"
-  | "claimed"
-  | "expired"
-  | "cancelled";
-
-// A relay device's request to be paired, awaiting operator approval on the
-// loopback front. Distinct from PairingCode (which is operator-initiated,
-// device-claimed-by-code): a PairingRequest is device-initiated and
-// operator-approved. The `code` is stored in plaintext on purpose — it is a
-// human-comparison artifact shown on BOTH the device screen and the operator's
-// approval panel so the operator can confirm they are approving the device in
-// front of them, not a concurrent attacker's request. The actual credential is
-// the device token minted on claim (hashed), never the code.
-export interface PairingRequest {
-  id: string;
-  instance: Instance;
-  code: string;
-  // hashSecret(binding secret). The binding secret is returned to the requester at
-  // creation — to a browser as an HttpOnly `gini_pair` cookie, to a verified native
-  // client (the mobile app) in the response body — and re-sent on poll/claim/cancel
-  // (cookie for browsers, `X-Gini-Pair-Secret` header for native), so only the
-  // requester that created the request can claim its approved session or cancel it;
-  // knowing the request id alone is not enough.
-  bindHash: string;
-  status: PairingRequestStatus;
-  // Human-readable label derived from the User-Agent (e.g. "Safari · iPhone").
-  deviceName: string;
-  userAgent: string;
-  // The Host the request arrived on, for operator display.
-  relayHost: string;
-  createdAt: string;
-  expiresAt: string;
-  resolvedAt?: string;
-  // Stable per-client id (browser gini_client cookie or native X-Gini-Client-ID
-  // header). Copied onto the PairedDevice on claim so device identity keys on it.
-  // Absent on legacy code-claimed rows and on native requests that sent no header.
-  clientId?: string;
-  // Set when a claim mints the session device, linking request → PairedDevice.
-  deviceId?: string;
-}
 
 export interface PromotionProposal {
   id: string;

@@ -15,45 +15,46 @@ const ACTION_TO_KEYS: Record<string, string[]> = {
   // Keep `approval` mapped to all three caches during the alias window so
   // legacy events from old clients/servers still wake up the new query
   // keys. Once the alias is removed this can drop "approvals".
-  approval: ["approvals", "authorizations", "setup-requests", "tasks", "task", "chat"],
-  authorization: ["authorizations", "approvals", "tasks", "task", "chat"],
-  setup: ["setup-requests", "approvals", "tasks", "task", "chat"],
-  task: ["tasks", "task", "chat"],
+  // "home" rides along wherever "chat" invalidates — home's attention rows
+  // derive from the same container/task/gate mutations.
+  approval: ["approvals", "authorizations", "setup-requests", "tasks", "task", "chat", "home"],
+  authorization: ["authorizations", "approvals", "tasks", "task", "chat", "home"],
+  setup: ["setup-requests", "approvals", "tasks", "task", "chat", "home"],
+  task: ["tasks", "task", "chat", "home"],
   connector: ["connectors"],
   skill: ["skills"],
   memory: ["memory"],
   job: ["jobs", "jobRuns", "improvements"],
   subagent: ["subagents"],
-  chat: ["chat"],
+  chat: ["chat", "home"],
   // `provider.auth.needs_reauth` / `provider.auth.cleared` (issue #233) must
   // refresh the Settings catalog query, not just the status card.
   provider: ["status", "providers"],
   mcp: [],
-  messaging: ["chat"],
+  messaging: ["chat", "home"],
   notification: [],
   runtime: ["status"],
-  run: ["tasks", "task", "chat"]
+  run: ["tasks", "task", "chat", "home"],
+  // The deterministic onboarding scan finalizes with an `onboarding.scan` event
+  // so the first-run flow refetches the record instead of polling.
+  onboarding: ["onboarding"]
 };
 
 // Fallback when the event has no parseable action — uses the SSE kind only.
 const KIND_TO_KEYS: Record<string, string[]> = {
-  task: ["tasks", "task", "chat"],
-  approval: ["approvals", "authorizations", "setup-requests"],
+  task: ["tasks", "task", "chat", "home"],
+  approval: ["approvals", "authorizations", "setup-requests", "home"],
   job: ["jobs", "jobRuns", "improvements"],
   memory: ["memory"],
   skill: ["skills"],
   connector: ["connectors"],
   mcp: [],
-  messaging: ["chat"],
+  messaging: ["chat", "home"],
   provider: ["status", "providers"],
   runtime: ["status"],
-  // Every pairing mutator (request/approve/reject/claim/cancel) emits a
-  // content-free kind:"pairing" tick; refresh the operator's pending-requests
-  // list AND the Active Sessions (devices) list — the latter so a device's
-  // claim shows up without the dialog being open.
-  pairing: ["pairingRequests", "devices"],
   notification: [],
-  run: ["tasks", "task", "chat"]
+  run: ["tasks", "task", "chat", "home"],
+  onboarding: ["onboarding"]
 };
 
 const ALWAYS = ["events", "audit", "state"];

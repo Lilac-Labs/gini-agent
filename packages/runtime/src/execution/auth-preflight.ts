@@ -28,16 +28,28 @@ interface ToolStatus {
   action: string;
 }
 
-function run(cmd: string, args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number; stdout: string; stderr: string }> {
+export interface ProbeResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+// A command runner: given a shell probe, resolve its exit code + output. The
+// default (`realRun`) shells out to the real `yc`/`gws` CLIs. Tests inject a
+// stub so the builder's branch logic can be exercised without booting a real
+// subprocess or hitting a live OAuth probe — the slow, machine-dependent part.
+export type CommandRunner = (cmd: string, args: string[], env: NodeJS.ProcessEnv) => Promise<ProbeResult>;
+
+const realRun: CommandRunner = (cmd, args, env) => {
   return new Promise((resolve) => {
     execFile(cmd, args, { timeout: PROBE_TIMEOUT_MS, env, maxBuffer: 1_000_000 }, (err, stdout, stderr) => {
       const code = err && typeof (err as { code?: unknown }).code === "number" ? (err as { code: number }).code : err ? 1 : 0;
       resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
-}
+};
 
-async function checkYc(env: NodeJS.ProcessEnv): Promise<ToolStatus> {
+async function checkYc(env: NodeJS.ProcessEnv, run: CommandRunner): Promise<ToolStatus> {
   const r = await run("bash", ["-lc", `export PATH="${YC_PATH_PREFIX}:$PATH"; yc me`], env);
   const out = `${r.stdout}\n${r.stderr}`.trim();
   if (r.code === 0 && /\(/.test(r.stdout)) {
@@ -55,7 +67,14 @@ async function checkYc(env: NodeJS.ProcessEnv): Promise<ToolStatus> {
   };
 }
 
-function ycAccountConfigDir(): string | undefined {
+// Resolve the gws config dir from the first registered Google account, or
+// undefined when none is registered. Injectable so tests can drive both the
+// "no account" and "account present" branches deterministically, independent
+// of what ~/.gini/google-accounts/accounts.json happens to hold on the machine
+// running the suite (homedir() is not env-overridable at runtime).
+export type AccountConfigDirLookup = () => string | undefined;
+
+const realAccountConfigDir: AccountConfigDirLookup = () => {
   try {
     const raw = readFileSync(join(homedir(), ".gini", "google-accounts", "accounts.json"), "utf8");
     const parsed = JSON.parse(raw) as { accounts?: Array<{ configDir?: string }> };
@@ -63,19 +82,20 @@ function ycAccountConfigDir(): string | undefined {
   } catch {
     return undefined;
   }
-}
+};
 
-async function checkGws(env: NodeJS.ProcessEnv): Promise<ToolStatus> {
-  const cfg = ycAccountConfigDir();
+async function checkGws(env: NodeJS.ProcessEnv, run: CommandRunner, accountConfigDir: AccountConfigDirLookup): Promise<ToolStatus> {
+  const cfg = accountConfigDir();
   if (!cfg) {
     return {
       tool: "google (gws)",
       ok: false,
       detail: "no Google account registered in ~/.gini/google-accounts/accounts.json",
       action:
-        "No Google account is set up. You MUST resolve this now, before continuing the task, even if the " +
-        "task does not use Google — then proceed. Follow your own instructions/skills for HOW (e.g. the " +
-        "google-workspace-setup skill); this notice only tells you that you must act, not how."
+        "No Google account is set up. On hosted, the Google account is connected at sign-in through the host, " +
+        "so this normally means the account has not finished provisioning yet. You MUST resolve this now, before " +
+        "continuing the task, even if the task does not use Google — then proceed. This notice only tells you that " +
+        "you must act, not how; there is no in-chat setup skill for this."
     };
   }
   const r = await run("bash", ["-lc", `export PATH="${YC_PATH_PREFIX}:$PATH"; GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${cfg}" gws auth status`], env);
@@ -97,9 +117,10 @@ async function checkGws(env: NodeJS.ProcessEnv): Promise<ToolStatus> {
     detail: "session expired / not signed in",
     action:
       "The Google session is expired (the account is already registered in accounts.json, so this is a " +
-      "RE-AUTH of the existing account, not first-time setup). You MUST resolve this now, before continuing " +
-      "the task, even if the task does not use Google — then proceed. Follow your own instructions/skills " +
-      "for HOW (e.g. google-account-login with that account's configDir/tag); this notice only tells you that you must act, not how."
+      "RE-AUTH of the existing account, not first-time setup). On hosted, the Google account is connected at " +
+      "sign-in through the host; a re-auth is driven the same way. You MUST resolve this now, before continuing " +
+      "the task, even if the task does not use Google — then proceed. This notice only tells you that you must " +
+      "act, not how; there is no in-chat setup skill for this."
   };
 }
 
@@ -108,7 +129,11 @@ async function checkGws(env: NodeJS.ProcessEnv): Promise<ToolStatus> {
 // path). When something is logged out, emits a directive block the agent must
 // act on. The string is plain factual text authored by the runtime (not
 // external/untrusted input), safe to inject verbatim.
-export async function buildAuthPreflightBlock(env: NodeJS.ProcessEnv = process.env): Promise<string> {
+export async function buildAuthPreflightBlock(
+  env: NodeJS.ProcessEnv = process.env,
+  run: CommandRunner = realRun,
+  accountConfigDir: AccountConfigDirLookup = realAccountConfigDir
+): Promise<string> {
   // Gate: only run on a provisioned machine. Absent/empty GINI_RELAY_PROVISIONED
   // => safe no-op (no checks, no injected block), so an install without the
   // fleet's yc/gws tooling never pays for (or fails) the probes on every turn.
@@ -116,7 +141,7 @@ export async function buildAuthPreflightBlock(env: NodeJS.ProcessEnv = process.e
   if (!provisioned || provisioned.trim().length === 0) return "";
   let statuses: ToolStatus[];
   try {
-    statuses = await Promise.all([checkYc(env), checkGws(env)]);
+    statuses = await Promise.all([checkYc(env, run), checkGws(env, run, accountConfigDir)]);
   } catch {
     return "";
   }

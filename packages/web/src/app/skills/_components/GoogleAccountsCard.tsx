@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { CheckIcon, PencilIcon, PlusIcon, Trash2Icon, XIcon } from "lucide-react";
+import { CheckIcon, PencilIcon, PlusIcon, RotateCwIcon, Trash2Icon, XIcon } from "lucide-react";
 import type { GoogleAccountStatus } from "@runtime/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,18 +15,26 @@ import {
   DialogTitle
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api";
-import { useInvalidate } from "@/lib/queries";
+import { useGoogleAuthMode, useInvalidate } from "@/lib/queries";
+import { primaryAccountId, reloginPrimaryUrl } from "@/app/onboarding/_components/lib";
 import type { ChatSession } from "@/lib/view-types";
 
 // The tagged Google accounts surfaced on the google-oauth-desktop connector
-// (GET /api/connectors attaches `accounts`). Lets the user retag / remove an
-// account, or add another. Adding requires the browser OAuth flow only the
-// agent can drive (the google-account-login skill), so "Add account" hands the
-// user off to a fresh chat with a seed message rather than attempting OAuth
-// from the page.
+// (GET /api/connectors attaches `accounts`) plus the boot-registered hosted
+// primary account. Lets the user retag / remove an account, or add another.
+// Connecting an additional account runs a browser OAuth flow the agent drives,
+// so "Add account" hands the user off to a fresh chat with a seed message
+// rather than attempting OAuth from the page.
 export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus[] }) {
   const router = useRouter();
   const invalidate = useInvalidate();
+  // Which auth mode shapes the reconnect URL (edge → full sign-in flow, loopback
+  // → gateway PKCE start), and which row is the primary. Only the PRIMARY row's
+  // revoked state heals through reloginPrimaryUrl; non-primary revoked rows keep
+  // the add/reconnect-via-chat affordance.
+  const authMode = useGoogleAuthMode();
+  const mode = authMode.data?.mode;
+  const primaryId = primaryAccountId(accounts);
   // Account whose tag is being edited inline. Null when no row is in edit mode.
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftTag, setDraftTag] = useState("");
@@ -117,6 +125,11 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
             const granted = Object.entries(account.services)
               .filter(([, ok]) => ok)
               .map(([name]) => name);
+            // The primary row, once revoked, heals only through the full sign-in
+            // flow — show a dedicated Reconnect button. Gated on the resolved
+            // auth mode so the click can never target the wrong URL.
+            const canReloginPrimary =
+              account.id === primaryId && !account.signedIn && account.tokenRevoked === true && Boolean(mode);
             return (
               <li
                 key={account.id}
@@ -164,7 +177,11 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
                         aria-hidden
                       />
                       <span className={`text-[10px] ${account.signedIn ? "text-emerald-600" : "text-amber-600"}`}>
-                        {account.signedIn ? "Signed in" : "Sign-in expired"}
+                        {account.signedIn
+                          ? "Signed in"
+                          : account.tokenRevoked === true
+                            ? "Reconnect needed"
+                            : "Sign-in expired"}
                       </span>
                     </div>
                   )}
@@ -177,6 +194,20 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
                 </div>
                 {editingId === account.id ? null : (
                   <div className="flex items-center gap-1">
+                    {canReloginPrimary && mode ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 gap-1 px-2 text-[10px]"
+                        aria-label={`Reconnect ${account.tag}`}
+                        onClick={() =>
+                          window.location.assign(reloginPrimaryUrl(mode, "/skills", window.location.origin))
+                        }
+                      >
+                        <RotateCwIcon className="size-3" />
+                        Reconnect
+                      </Button>
+                    ) : null}
                     <Button
                       size="icon"
                       variant="ghost"

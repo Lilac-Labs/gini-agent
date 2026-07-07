@@ -316,6 +316,60 @@ describe("topic dispatch + forward", () => {
     rmSync(workspaceRoot, { recursive: true, force: true });
   });
 
+  test("follow-up into an idle container mints a new task there and replays prior context", async () => {
+    // The follow-up continuity contract (unified task model): posting into a
+    // container with NO live run — via the public submitChatMessage path that
+    // POST /api/chat/:id/messages uses — mints a fresh task in the SAME
+    // container, and session-scoped packing replays the prior turns into the
+    // new task's context for free.
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "gini-topic-ws-"));
+    const config = buildConfig(workspaceRoot, `topic-fwd-followup-${basename(workspaceRoot)}`);
+    const provider = normalizeProvider(config.provider);
+
+    const topicId = await mutateState(config.instance, (state) => {
+      const chat = createChatSession(state, "Messages", undefined, undefined, undefined, "agent");
+      return createTopic(state, {
+        agentId: chat.agentId,
+        title: "Splitwise June",
+        parentChatSessionId: chat.id
+      }).id;
+    });
+
+    setEchoToolCallingResponse({
+      provider,
+      text: "You owe Sam $42 from June.",
+      toolCalls: [],
+      finishReason: "stop"
+    });
+    const first = await submitChatMessage(config, topicId, { content: "check my June balance" });
+    if ("queued" in first || !("taskId" in first)) throw new Error("expected the first submit to run now");
+    const firstFinished = await waitForTerminal(config, first.taskId);
+    expect(firstFinished.status).toBe("completed");
+
+    clearEchoToolCallingResponses();
+    setEchoToolCallingResponse({ provider, text: "Settled it.", toolCalls: [], finishReason: "stop" });
+    const second = await submitChatMessage(config, topicId, { content: "pay him back" });
+    if ("queued" in second || !("taskId" in second)) throw new Error("expected the follow-up to run now");
+    expect(second.taskId).not.toBe(first.taskId);
+    const secondFinished = await waitForTerminal(config, second.taskId);
+    expect(secondFinished.status).toBe("completed");
+
+    // Both tasks live in the SAME container.
+    expect(secondFinished.chatSessionId).toBe(topicId);
+    const state = readState(config.instance);
+    expect(state.tasks.find((t) => t.id === first.taskId)?.chatSessionId).toBe(topicId);
+
+    // The follow-up's provider messages replay turn 1 (user + answer) —
+    // context continuity comes from session-scoped packing, not the caller.
+    const calls = getEchoToolCallingCalls();
+    const lastTurn = calls[calls.length - 1]!;
+    const replayed = lastTurn.map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+    expect(replayed).toContain("check my June balance");
+    expect(replayed).toContain("You owe Sam $42 from June.");
+
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  });
+
   test("per-topic queue: a second routed message queues on the Topic and drains in order", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "gini-topic-ws-"));
     const config = buildConfig(workspaceRoot, `topic-fwd-queue-${basename(workspaceRoot)}`);
@@ -385,6 +439,59 @@ describe("topic dispatch + forward", () => {
       .filter((b) => b.kind === "assistant_text" && b.forwardedFromTopicId === topicId)
       .map((b) => (b.kind === "assistant_text" ? b.text : ""));
     expect(forwarded).toEqual(["First answer.", "Second answer."]);
+
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  });
+
+  test("child-of-child forwards one level up only: into ITS parent topic, not the root Chat", async () => {
+    // Forwarding is generalized to ANY session with a parentChatSessionId
+    // whose parent exists — including when the parent is itself a topic
+    // (spawned child task containers nest this way). The mirror is one hop:
+    // the grandparent must see nothing from the grandchild.
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "gini-topic-ws-"));
+    const config = buildConfig(workspaceRoot, `topic-fwd-nested-${basename(workspaceRoot)}`);
+    const provider = normalizeProvider(config.provider);
+
+    const { chatId, parentTopicId, childTopicId } = await mutateState(config.instance, (state) => {
+      const chat = createChatSession(state, "Messages", undefined, undefined, undefined, "agent");
+      const parentTopic = createTopic(state, {
+        agentId: chat.agentId,
+        title: "Inbox watch",
+        parentChatSessionId: chat.id
+      });
+      const childTopic = createTopic(state, {
+        agentId: chat.agentId,
+        title: "Reply to Sam",
+        parentChatSessionId: parentTopic.id
+      });
+      return { chatId: chat.id, parentTopicId: parentTopic.id, childTopicId: childTopic.id };
+    });
+
+    setEchoToolCallingResponse({
+      provider,
+      text: "Drafted the reply to Sam.",
+      toolCalls: [],
+      finishReason: "stop"
+    });
+
+    const result = await runTopicSubmission(config, childTopicId, prepared(config, "draft the reply", childTopicId));
+    const finished = await waitForTerminal(config, result.taskId);
+    expect(finished.status).toBe("completed");
+
+    // The child's answer mirrors into ITS parent topic.
+    const parentBlocks = listChatBlocks(config.instance, parentTopicId);
+    const forwarded = parentBlocks.find(
+      (b) => b.kind === "assistant_text" && b.forwardedFromTopicId === childTopicId
+    );
+    expect(forwarded).toBeDefined();
+    if (forwarded!.kind === "assistant_text") {
+      expect(forwarded!.text).toBe("Drafted the reply to Sam.");
+      expect(forwarded!.forwardedFromTopicTitle).toBe("Reply to Sam");
+    }
+
+    // One hop only: the root Chat sees NOTHING from the grandchild.
+    const chatBlocks = listChatBlocks(config.instance, chatId);
+    expect(chatBlocks.some((b) => b.forwardedFromTopicId === childTopicId)).toBe(false);
 
     rmSync(workspaceRoot, { recursive: true, force: true });
   });

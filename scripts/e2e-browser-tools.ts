@@ -109,7 +109,7 @@ interface ChatSession {
 
 interface ChatMessageResult {
   taskId: string;
-  runId: string;
+  runId?: string;
 }
 
 interface Task {
@@ -133,8 +133,28 @@ async function createSession(title: string): Promise<ChatSession> {
 }
 
 async function submitMessage(sessionId: string, content: string): Promise<ChatMessageResult> {
-  const result = await api(`/api/chat/${sessionId}/messages`, { method: "POST", body: { content } });
-  return result as ChatMessageResult;
+  const result = (await api(`/api/chat/${sessionId}/messages`, { method: "POST", body: { content } })) as {
+    taskId?: string;
+    runId?: string;
+    accepted?: boolean;
+    blockId?: string;
+  };
+  if (result.taskId) return { taskId: result.taskId, runId: result.runId };
+  // Echo-first ack: the POST resolves before the routing verdict, so the
+  // taskId lands on the echo block once dispatch completes — poll for it.
+  if (!result.accepted || !result.blockId) {
+    throw new Error(`Unexpected submit response: ${JSON.stringify(result)}`);
+  }
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const { blocks } = (await api(`/api/chat/${sessionId}/blocks`)) as {
+      blocks: Array<{ id: string; taskId?: string; runId?: string }>;
+    };
+    const echo = blocks.find((block) => block.id === result.blockId);
+    if (echo?.taskId) return { taskId: echo.taskId, runId: echo.runId };
+    await Bun.sleep(250);
+  }
+  throw new Error(`Message ${result.blockId} was not dispatched to a task within 30s`);
 }
 
 async function getTaskAndTrace(taskId: string): Promise<{ task: Task; trace: TraceEvent[] }> {

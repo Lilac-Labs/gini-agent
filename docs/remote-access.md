@@ -84,15 +84,7 @@ For anything the drivers don't cover — a reverse proxy, or any front you run y
    ```
 
    To make it durable, add the line `GINI_TRUSTED_ORIGINS=...` to `~/.gini/secrets.env` — the installed `gini` wrapper sources it on every launch, and `gini autostart enable` merges it into the launchd plist (re-run that after editing). If the variable is set but contains no parseable origin, the gateway refuses every web-bound request on a front not covered by the other trust lanes until it's fixed — the typo bricks exactly the manual front you were configuring, loudly rather than silently downgrading. See ADR [bff-trust-boundary.md](adr/bff-trust-boundary.md).
-3. **Pair the device.** A browser arriving on a trusted non-loopback origin is redirected to `/pair` and must be approved once — from the loopback UI, or from the "Pair requests" panel of any **already-paired** session; see ADR [device-pairing-auth.md](adr/device-pairing-auth.md). A paired session is owner-equivalent (it can approve future pairing requests and mint pairing codes), so pair only devices you fully trust. Non-browser clients are never redirected to `/pair` — the native `/api/*` surface is bearer-gated instead, and the origin gate applies only to web-bound paths. A remote non-browser client should still pair: the mobile app runs the pairing handshake natively (admitted on relay, loopback, and runtime-managed tunnel fronts), and any other client can claim a pairing code against the tunnel origin — mint the code on the host (`gini pairing`), then from the remote device:
-
-   ```bash
-   curl -X POST <origin>/api/pairing/claim \
-     -H "content-type: application/json" \
-     -d '{"code":"<code>","deviceName":"my laptop"}'
-   ```
-
-   The endpoint is public and rate-limited (no bearer needed); the `201` response returns `{ device, token }`, and the device then sends that token as `Authorization: Bearer`. Tokens are individually revocable (`gini device revoke <device-id>`). (`gini pairing claim <code>` wraps the same endpoint but always posts to the local instance, so it is only useful on the gateway host itself.) Reserve the instance owner bearer (`config.json`) for local operator tooling — it is a singleton with no per-device revocation, so don't copy it onto remote devices.
+3. **Understand what trust grants.** A trusted origin is **owner-equivalent**: any browser arriving on it gets the same access as loopback — there is no per-device pairing gate (see ADR [owner-token-auth.md](adr/owner-token-auth.md)). Expose a manual front only to devices and networks you fully trust (a tailnet, a password-protected proxy), or use the hosted edge when multiple users need access. Non-browser clients use the native `/api/*` surface with the owner bearer from `config.json` — a singleton with no per-device revocation (revoke by rotating it), so treat any device holding it as the operator.
 
 ## Verifying any front
 
@@ -100,8 +92,8 @@ The full decision table — identical across every tunnel:
 
 | Probe through the tunnel | Origin **not** trusted | Origin trusted |
 | --- | --- | --- |
-| Page navigation (`/`) | `404` | `302 → /pair` (until the device is paired) |
-| `GET /api/runtime/__healthz` (web-bound) | `403` | `401` (until paired) |
+| Page navigation (`/`) | `404` | `200` (serves the app) |
+| `GET /api/runtime/__healthz` (web-bound) | `403` | `200` |
 | `GET /api/tunnel` with bearer (native API) | `200` | `200` |
 
 The third row is the discriminator when something is wrong: the native bearer-gated API ignores the origin gate, so a `200` there means the tunnel and gateway are healthy and any `404` on pages is the origin gate (for a runtime-driven tunnel that means it is no longer `connected`; for a manual front, fix `GINI_TRUSTED_ORIGINS`). If even the bearer probe fails, the tunnel itself is broken. Provider-specific symptoms live in each provider's guide.

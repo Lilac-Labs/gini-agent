@@ -1,0 +1,60 @@
+# Gini Agent — container deployment.
+#
+#   docker compose up --build      # build + run
+#   docker compose logs -f         # follow runtime + web logs
+#   open http://localhost:7777     # the web control plane
+#
+# Set your provider via the environment (see `environment:` below) or configure
+# it after boot at http://localhost:7777/setup. State persists in the named
+# volume, so chats, sign-ins, memory, and downloaded models survive restarts.
+
+services:
+  gini:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gini-agent:xvfb
+    # tini-as-PID1 is baked into the image ENTRYPOINT, but `init: true` is kept
+    # as a belt-and-suspenders reaper in case the entrypoint is overridden.
+    init: true
+    # Chromium uses /dev/shm for shared memory; the Docker default (64MB) is too
+    # small and causes "Target closed" renderer crashes. Either raise it here OR
+    # rely on the image's --disable-dev-shm-usage (GINI_CHROME_NO_SANDBOX=1).
+    # Raising shm is the better-performing path, so we do both.
+    shm_size: "1gb"
+    ports:
+      - "7777:7777" # web control plane (the URL you open)
+      - "7778:7778" # runtime gateway API
+    environment:
+      # --- Provider: pick ONE and supply its credential, or leave echo and
+      #     configure at /setup after boot. Echo is a deterministic stub. ---
+      GINI_PROVIDER: "${GINI_PROVIDER:-echo}"
+      # OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      # ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      # GINI_MODEL: "${GINI_MODEL:-}"
+      #
+      # --- Container-mode seams (image already defaults these; shown for clarity) ---
+      GINI_BIND_HOST: "0.0.0.0"
+      GINI_BROWSER_HEADLESS: "false"
+      GINI_CHROME_NO_SANDBOX: "1"
+      GINI_INSTANCE: "default"
+      DISPLAY: ":99"
+    volumes:
+      # Durable per-instance state + the shared model cache.
+      - gini-state:/home/bun/.gini
+    restart: unless-stopped
+    # The gateway answers /api/status once healthy; compose marks the service
+    # healthy when it does. Uses bun (no curl needed in the slim image).
+    healthcheck:
+      test:
+        - "CMD"
+        - "bun"
+        - "-e"
+        - "fetch('http://127.0.0.1:7778/api/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: "15s"
+      timeout: "5s"
+      retries: 5
+      start_period: "40s"
+
+volumes:
+  gini-state:

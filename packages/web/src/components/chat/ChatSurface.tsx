@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useMutation } from "@tanstack/react-query";
-import { ChevronDown, X } from "lucide-react";
+import { ChevronDown, Maximize2, Pin, PinOff, X } from "lucide-react";
 import { toast } from "sonner";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { BlockRenderer } from "@/components/chat/BlockRenderer";
@@ -149,24 +150,45 @@ export function ChatSurface({
   // inline alongside everything else.
   const mainBlocks = blocks;
 
-  // Run-now responses carry { taskId }; enqueued ones carry { queued, pendingId }.
-  // The server decides which based on whether a turn is already in flight; the
-  // client treats both as success (the pill / transcript update via SSE).
+  // Chat sends resolve with { accepted, blockId } (echo-first ack); queued
+  // ones carry { queued, pendingId } and non-routed sessions still return
+  // { taskId }. The client treats all of them as success (the pill /
+  // transcript update via SSE) and reads none of the fields.
   const send = useMutation({
     mutationFn: ({ content, images }: { content: string; images: UploadRef[] }) =>
-      api<{ taskId?: string; queued?: boolean; pendingId?: string }>(`/chat/${sessionId}/messages`, {
-        method: "POST",
-        body: JSON.stringify({ content, client: "web", ...(images.length > 0 ? { images } : {}) })
-      }),
+      api<{ accepted?: boolean; blockId?: string; taskId?: string; queued?: boolean; pendingId?: string }>(
+        `/chat/${sessionId}/messages`,
+        {
+          method: "POST",
+          body: JSON.stringify({ content, client: "web", ...(images.length > 0 ? { images } : {}) })
+        }
+      ),
     onSuccess: () => {
-      setText("");
       invalidate(["chat", "tasks"]);
     },
-    onError: (error: Error) => toast.error(error.message)
+    onError: (error: Error, variables) => {
+      toast.error(error.message);
+      // The composer cleared optimistically at submit; give the text back on
+      // failure so the message isn't lost — unless the user already started
+      // typing something new.
+      setText((current) => (current === "" ? variables.content : current));
+    }
   });
 
   const cancel = useCancelTask();
   const removePending = useRemovePendingChatMessage(sessionId);
+
+  // Pin/unpin the container to the sidebar (Topics = pinned === true only).
+  // Router-minted topics start unpinned and surface on home, so this toggle
+  // is the gesture that keeps a thread in the sidebar.
+  const isContainer = liveSession.kind === "topic" || liveSession.kind === "channel";
+  const containerPinned = liveSession.pinned === true;
+  const setPinned = useMutation({
+    mutationFn: (pinned: boolean) =>
+      api(`/containers/${sessionId}`, { method: "PATCH", body: JSON.stringify({ pinned }) }),
+    onSuccess: () => invalidate(["chat", "home"]),
+    onError: (error: Error) => toast.error(error.message)
+  });
 
   const submit = (images: UploadRef[]) => {
     const trimmed = text.trim();
@@ -174,6 +196,10 @@ export function ChatSurface({
     // Don't gate on send.isPending: successive Enters while a turn runs must
     // each POST so they queue in order. The server serializes (run-vs-queue),
     // so concurrent POSTs are safe.
+    //
+    // Clear immediately — waiting for the server ack would hold the user's
+    // text hostage to the POST round trip; onError restores it.
+    setText("");
     send.mutate({ content: trimmed, images });
   };
 
@@ -355,19 +381,29 @@ export function ChatSurface({
     <>
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         {panel ? (
-          // Compact panel header: `#<topic title>` + a close button. The full
-          // AgentChatHeader / tab bar / search are full-page affordances the
-          // drawer doesn't need.
+          // Compact panel header: `#<topic title>` + open-full-page and close
+          // buttons. The full AgentChatHeader / tab bar / search are full-page
+          // affordances the drawer doesn't need.
           <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3">
             <h2 className="truncate text-[15px] font-semibold text-foreground">{headerName}</h2>
-            <button
-              type="button"
-              onClick={onClosePanel}
-              aria-label="Close topic panel"
-              className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-            >
-              <X className="size-4" />
-            </button>
+            <div className="flex shrink-0 items-center gap-1">
+              <Link
+                href={`/chat?session=${sessionId}`}
+                aria-label="Open full page"
+                title="Open full page"
+                className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <Maximize2 className="size-4" />
+              </Link>
+              <button
+                type="button"
+                onClick={onClosePanel}
+                aria-label="Close topic panel"
+                className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
           </header>
         ) : (
           <AgentChatHeader
@@ -377,9 +413,23 @@ export function ChatSurface({
             subtitle={isChannel ? "recurring job channel" : isTopic ? "topic" : undefined}
             showAvatar={!isChannel && !isTopic}
             titleAction={
-              isChannel && job ? (
-                <ChannelViewJob jobId={job.id} agentId={job.agentId} activeAgentId={activeAgentId} />
-              ) : undefined
+              <>
+                {isChannel && job ? (
+                  <ChannelViewJob jobId={job.id} agentId={job.agentId} activeAgentId={activeAgentId} />
+                ) : null}
+                {isContainer ? (
+                  <button
+                    type="button"
+                    onClick={() => setPinned.mutate(!containerPinned)}
+                    disabled={setPinned.isPending}
+                    aria-label={containerPinned ? "Unpin from sidebar" : "Pin to sidebar"}
+                    title={containerPinned ? "Unpin from sidebar" : "Pin to sidebar"}
+                    className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+                  >
+                    {containerPinned ? <PinOff className="size-4" /> : <Pin className="size-4" />}
+                  </button>
+                ) : null}
+              </>
             }
             right={
               <ChatSearchBox
@@ -495,7 +545,10 @@ export function ChatSurface({
                       });
                     }
                   }}
-                  placeholder={`Ask ${headerName} anything`}
+                  // Always address the AGENT, never the container: headerName
+                  // is the topic/channel TITLE on those surfaces ("#Write a
+                  // two-line haiku…"), which reads absurd in a placeholder.
+                  placeholder={`Ask ${messageAgent?.name ?? "Gini"} anything`}
                 />
               </div>
             </div>

@@ -18,8 +18,10 @@ import {
   googleAccountsRoot,
   newAccountId,
   readGoogleAccounts,
+  readPrimaryGoogleAccountId,
   removeGoogleAccount,
   retagGoogleAccount,
+  setPrimaryGoogleAccountId,
   writeGoogleAccounts
 } from "./google-accounts";
 
@@ -125,6 +127,57 @@ describe("google account registry", () => {
     const accts = [account({ tag: "a", configDir: "/tmp/a" }), account({ tag: "b", configDir: "/tmp/b" })];
     writeGoogleAccounts(accts);
     expect(readGoogleAccounts()).toEqual(accts);
+  });
+});
+
+describe("primary account id", () => {
+  test("missing registry / registry without the field → undefined", () => {
+    expect(readPrimaryGoogleAccountId()).toBeUndefined();
+    addGoogleAccount(account());
+    // A registry written before the field existed carries no primaryAccountId.
+    expect(readPrimaryGoogleAccountId()).toBeUndefined();
+  });
+
+  test("set then read back", () => {
+    const a = addAndReturn(account());
+    setPrimaryGoogleAccountId(a.id);
+    expect(readPrimaryGoogleAccountId()).toBe(a.id);
+  });
+
+  test("set undefined clears the field", () => {
+    const a = addAndReturn(account());
+    setPrimaryGoogleAccountId(a.id);
+    setPrimaryGoogleAccountId(undefined);
+    expect(readPrimaryGoogleAccountId()).toBeUndefined();
+    expect(readGoogleAccounts()).toEqual([a]);
+  });
+
+  test("account writes preserve the persisted primary", () => {
+    const a = addAndReturn(account({ tag: "a", configDir: "/tmp/a" }));
+    setPrimaryGoogleAccountId(a.id);
+    const b = addAndReturn(account({ tag: "b", configDir: "/tmp/b" }));
+    retagGoogleAccount(b.id, "c");
+    writeGoogleAccounts(readGoogleAccounts());
+    expect(readPrimaryGoogleAccountId()).toBe(a.id);
+  });
+
+  test("removing the primary account clears the field; removing another keeps it", () => {
+    const a = addAndReturn(account({ tag: "a", configDir: "/tmp/a" }));
+    const b = addAndReturn(account({ tag: "b", configDir: "/tmp/b" }));
+    setPrimaryGoogleAccountId(a.id);
+    removeGoogleAccount(b.id);
+    expect(readPrimaryGoogleAccountId()).toBe(a.id);
+    removeGoogleAccount(a.id);
+    expect(readPrimaryGoogleAccountId()).toBeUndefined();
+    expect(readGoogleAccounts()).toEqual([]);
+  });
+
+  test("corrupt registry / non-string field → undefined", () => {
+    mkdirSync(googleAccountsRoot(), { recursive: true });
+    writeFileSync(googleAccountsRegistryPath(), "{ not json", "utf8");
+    expect(readPrimaryGoogleAccountId()).toBeUndefined();
+    writeFileSync(googleAccountsRegistryPath(), JSON.stringify({ version: 1, accounts: [], primaryAccountId: 7 }), "utf8");
+    expect(readPrimaryGoogleAccountId()).toBeUndefined();
   });
 });
 

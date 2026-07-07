@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readdirSync, rmSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync } from "node:fs";
 import { createEmptyState, normalizeState, readState, writeState } from "./store";
+import { createChatSession, createJob, createTopic } from "./records";
 import { readSecret, writeSecret } from "./secrets";
 import { bindingsForCredentials, resolveSkillEnv } from "../integrations/connectors";
-import { instanceRoot } from "../paths";
+import { instanceRoot, statePath } from "../paths";
 import type { ConnectorRecord, RuntimeConfig, RuntimeState, SkillRecord } from "../types";
 
 // Isolated state root so the test never touches ~/.gini.
@@ -1119,6 +1120,25 @@ describe("writeState atomic temp files", () => {
     // The last write is the durable state.
     expect(readState(instance).tasks[0]?.title).toBe("write-4");
   });
+
+  test("writes a complete, fsync-durable file (never zero-length or torn)", () => {
+    // The durability guarantee behind the fsync-before-rename: the on-disk
+    // state.json is always a complete JSON document, never the correctly-sized
+    // ALL-ZERO file a delayed-allocation rename-without-fsync leaves after a
+    // hard poweroff — the exact corruption that crash-looped a guest on boot.
+    const instance = "test-write-durable";
+    const state = createEmptyState(instance);
+    state.tasks = [{ ...MARKER_TASK, instance, title: "durable" }];
+    writeState(instance, state);
+    const raw = readFileSync(statePath(instance), "utf8");
+    // Non-empty, and its tail was written (not truncated/zeroed): the trailing
+    // "}\n" that writeState always appends is present.
+    expect(raw.length).toBeGreaterThan(0);
+    expect(raw.endsWith("}\n")).toBe(true);
+    // Parses as complete JSON and round-trips the marker.
+    const parsed = JSON.parse(raw) as RuntimeState;
+    expect(parsed.tasks[0]?.title).toBe("durable");
+  });
 });
 
 // The runtime drives a single spawned per-instance Chrome that carries no
@@ -1171,158 +1191,20 @@ describe("normalizeState browser connection record", () => {
   });
 });
 
-// Pre-existing stale-duplicate session pileup: every re-pair of the same device
-// minted a fresh session and left the prior "active" forever (before supersede-
-// on-re-pair). normalizeState collapses each (origin + name) group to the most-
-// recently-seen active session, revoking the older siblings.
-describe("dedupeStaleDeviceSessions (stale-duplicate session backfill)", () => {
-  function pushDevice(
-    state: RuntimeState,
-    overrides: Partial<RuntimeState["devices"][number]> & { id: string }
-  ) {
-    state.devices.push({
-      instance: state.instance,
-      name: "Chrome · Mac",
-      tokenHash: `hash-${overrides.id}`,
-      status: "active",
-      scopes: [],
-      origin: "aaa.gini-relay.lilaclabs.ai",
-      createdAt: "2026-01-01T00:00:00.000Z",
-      updatedAt: "2026-01-01T00:00:00.000Z",
-      ...overrides
-    });
-  }
-
-  test("collapses duplicate active sessions to the most-recently-seen, revoking the rest", () => {
-    const state = createEmptyState("dedupe-collapse");
-    pushDevice(state, { id: "device_old", lastSeenAt: "2026-06-01T00:00:00.000Z" });
-    pushDevice(state, { id: "device_mid", lastSeenAt: "2026-06-10T00:00:00.000Z" });
-    pushDevice(state, { id: "device_new", lastSeenAt: "2026-06-18T00:00:00.000Z" });
-
-    const normalized = normalizeState(state.instance, state);
-
-    const byId = (id: string) => normalized.devices.find((d) => d.id === id)!;
-    expect(byId("device_new").status).toBe("active");
-    expect(byId("device_old").status).toBe("revoked");
-    expect(byId("device_mid").status).toBe("revoked");
-    expect(byId("device_old").revokedAt).toBeString();
-    expect(normalized.devices.filter((d) => d.status === "active").length).toBe(1);
-
-    const audit = normalized.audit.find(
-      (e) => e.action === "device.superseded" && e.evidence?.reason === "stale.duplicate.session.backfill"
-    );
-    expect(audit?.evidence?.revoked).toBe(2);
-  });
-
-  test("falls back to updatedAt then createdAt when lastSeenAt is absent", () => {
-    const state = createEmptyState("dedupe-fallback");
-    // No lastSeenAt on either — survivor is chosen by updatedAt.
-    pushDevice(state, { id: "device_stale", updatedAt: "2026-06-01T00:00:00.000Z" });
-    pushDevice(state, { id: "device_fresh", updatedAt: "2026-06-15T00:00:00.000Z" });
-
-    const normalized = normalizeState(state.instance, state);
-    expect(normalized.devices.find((d) => d.id === "device_fresh")!.status).toBe("active");
-    expect(normalized.devices.find((d) => d.id === "device_stale")!.status).toBe("revoked");
-  });
-
-  test("keeps distinct devices (different name, or different origin) all active", () => {
-    const state = createEmptyState("dedupe-distinct");
-    pushDevice(state, { id: "device_mac", name: "Chrome · Mac" });
-    pushDevice(state, { id: "device_iphone", name: "Safari · iPhone" });
-    pushDevice(state, { id: "device_other_relay", origin: "bbb.gini-relay.lilaclabs.ai" });
-
-    const normalized = normalizeState(state.instance, state);
-    expect(normalized.devices.every((d) => d.status === "active")).toBe(true);
-    expect(normalized.audit.some((e) => e.evidence?.reason === "stale.duplicate.session.backfill")).toBe(false);
-  });
-
-  test("never touches originless legacy bearer devices (null identity key)", () => {
-    const state = createEmptyState("dedupe-originless");
-    // Two code-claimed mobile bearer devices with no origin and the same name.
-    pushDevice(state, { id: "device_legacy_a", origin: undefined });
-    pushDevice(state, { id: "device_legacy_b", origin: undefined });
-
-    const normalized = normalizeState(state.instance, state);
-    expect(normalized.devices.every((d) => d.status === "active")).toBe(true);
-    expect(normalized.audit.some((e) => e.evidence?.reason === "stale.duplicate.session.backfill")).toBe(false);
-  });
-
-  test("leaves already-revoked siblings alone and never collapses a lone active session", () => {
-    const state = createEmptyState("dedupe-revoked-mix");
-    pushDevice(state, { id: "device_live", lastSeenAt: "2026-06-18T00:00:00.000Z" });
-    pushDevice(state, { id: "device_dead", status: "revoked", revokedAt: "2026-05-01T00:00:00.000Z" });
-
-    const normalized = normalizeState(state.instance, state);
-    // Only one ACTIVE session in the group → nothing to collapse.
-    expect(normalized.devices.find((d) => d.id === "device_live")!.status).toBe("active");
-    // The pre-existing revoked row keeps its original timestamp (untouched).
-    expect(normalized.devices.find((d) => d.id === "device_dead")!.revokedAt).toBe("2026-05-01T00:00:00.000Z");
-    expect(normalized.audit.some((e) => e.evidence?.reason === "stale.duplicate.session.backfill")).toBe(false);
-  });
-
-  test("is idempotent — a second normalize collapses nothing new", () => {
-    const state = createEmptyState("dedupe-idempotent");
-    pushDevice(state, { id: "device_old", lastSeenAt: "2026-06-01T00:00:00.000Z" });
-    pushDevice(state, { id: "device_new", lastSeenAt: "2026-06-18T00:00:00.000Z" });
-
-    const once = normalizeState(state.instance, state);
-    const revokedStamp = once.devices.find((d) => d.id === "device_old")!.revokedAt;
-    expect(revokedStamp).toBeString();
-
-    const twice = normalizeState(state.instance, once);
-    expect(twice.devices.find((d) => d.id === "device_old")!.revokedAt).toBe(revokedStamp);
-    expect(
-      twice.audit.filter((e) => e.evidence?.reason === "stale.duplicate.session.backfill").length
-    ).toBe(1);
-  });
-
-  // At the migration layer: two DISTINCT browsers on one relay subdomain share
-  // the same User-Agent-derived name but each carries its own gini_client id
-  // (clientId). The migration must key on clientId and leave both live sessions
-  // active rather than collapsing one person's session into the other's.
-  test("keeps two distinct browsers (same origin+name, different clientId) both active", () => {
-    const state = createEmptyState("dedupe-distinct-clients");
-    pushDevice(state, { id: "device_alice", clientId: "client-alice", lastSeenAt: "2026-06-10T00:00:00.000Z" });
-    pushDevice(state, { id: "device_bob", clientId: "client-bob", lastSeenAt: "2026-06-18T00:00:00.000Z" });
-
-    const normalized = normalizeState(state.instance, state);
-    expect(normalized.devices.every((d) => d.status === "active")).toBe(true);
-    expect(normalized.audit.some((e) => e.evidence?.reason === "stale.duplicate.session.backfill")).toBe(false);
-  });
-
-  test("still collapses one browser's re-pairs (same origin + same clientId)", () => {
-    const state = createEmptyState("dedupe-same-client");
-    pushDevice(state, { id: "device_repair_1", clientId: "client-x", lastSeenAt: "2026-06-01T00:00:00.000Z" });
-    pushDevice(state, { id: "device_repair_2", clientId: "client-x", lastSeenAt: "2026-06-18T00:00:00.000Z" });
-
-    const normalized = normalizeState(state.instance, state);
-    expect(normalized.devices.find((d) => d.id === "device_repair_2")!.status).toBe("active");
-    expect(normalized.devices.find((d) => d.id === "device_repair_1")!.status).toBe("revoked");
-    expect(normalized.devices.filter((d) => d.status === "active").length).toBe(1);
-  });
-
-  test("legacy rows without clientId still collapse by name (back-compat)", () => {
-    const state = createEmptyState("dedupe-legacy-noclient");
-    // Rows with no clientId, same origin + name, must still collapse so the
-    // stale-duplicate heal keeps working for sessions minted without a clientId.
-    pushDevice(state, { id: "device_pre_1", clientId: undefined, lastSeenAt: "2026-06-01T00:00:00.000Z" });
-    pushDevice(state, { id: "device_pre_2", clientId: undefined, lastSeenAt: "2026-06-18T00:00:00.000Z" });
-
-    const normalized = normalizeState(state.instance, state);
-    expect(normalized.devices.find((d) => d.id === "device_pre_2")!.status).toBe("active");
-    expect(normalized.devices.find((d) => d.id === "device_pre_1")!.status).toBe("revoked");
-    expect(normalized.devices.filter((d) => d.status === "active").length).toBe(1);
-  });
-
-  test("a legacy (no clientId) row and a clientId row never collapse into each other", () => {
-    const state = createEmptyState("dedupe-mixed-namespace");
-    pushDevice(state, { id: "device_legacy", clientId: undefined, lastSeenAt: "2026-06-01T00:00:00.000Z" });
-    pushDevice(state, { id: "device_modern", clientId: "client-new", lastSeenAt: "2026-06-18T00:00:00.000Z" });
-
-    const normalized = normalizeState(state.instance, state);
-    // Different key namespaces ("name:" vs "client:") → no group of 2 → none revoked.
-    expect(normalized.devices.every((d) => d.status === "active")).toBe(true);
-    expect(normalized.audit.some((e) => e.evidence?.reason === "stale.duplicate.session.backfill")).toBe(false);
+// The device-pairing subsystem is gone (owner-token-only auth; see ADR
+// owner-token-auth.md). Old state files still carry its collections — pin that
+// normalizeState sheds the legacy keys so the next write drops them.
+describe("normalizeState legacy pairing-key shed", () => {
+  test("drops pairingCodes/pairingRequests/devices from a legacy state file", () => {
+    const state = createEmptyState("legacy-pairing-shed");
+    const loose = state as unknown as Record<string, unknown>;
+    loose.pairingCodes = [{ id: "pair_1" }];
+    loose.pairingRequests = [{ id: "pairreq_1" }];
+    loose.devices = [{ id: "device_1", status: "active" }];
+    const normalized = normalizeState("legacy-pairing-shed", state) as unknown as Record<string, unknown>;
+    expect(normalized.pairingCodes).toBeUndefined();
+    expect(normalized.pairingRequests).toBeUndefined();
+    expect(normalized.devices).toBeUndefined();
   });
 });
 
@@ -1469,5 +1351,87 @@ describe("normalizeState emailWatchers agentId rehome", () => {
     const normalized = normalizeState(state.instance, state);
     expect(normalized.emailWatchers.find((w) => w.id === "emailwatch_orphan")!.agentId).toBe("agent_default");
     expect(normalized.audit.some((e) => e.action === "records.agentid.backfill")).toBe(true);
+  });
+});
+
+describe("normalizeState home container migrations", () => {
+  test("topicsPinnedBackfilled pins non-archived topics once, skipping archived and non-topic sessions", () => {
+    const state = createEmptyState("mig-topics-pinned");
+    const topic = createTopic(state, { title: "Live topic" });
+    const archived = createTopic(state, { title: "Archived topic" });
+    archived.archivedAt = "2026-01-01T00:00:00.000Z";
+    const chat = createChatSession(state, "Main chat", undefined, "agent_default", undefined, "agent");
+
+    const dyn = state as unknown as { migrations?: { topicsPinnedBackfilled?: string } };
+    expect(dyn.migrations?.topicsPinnedBackfilled).toBeUndefined();
+
+    normalizeState("mig-topics-pinned", state);
+
+    expect(topic.pinned).toBe(true);
+    // The archived topic keeps its mint-time pinned:false — the backfill
+    // never pins archived sessions.
+    expect(archived.pinned).toBe(false);
+    expect(chat.pinned).toBeUndefined();
+    expect(dyn.migrations?.topicsPinnedBackfilled).toBeString();
+  });
+
+  test("topicsPinnedBackfilled is marker-gated: an unpin after the backfill survives re-normalize", () => {
+    const state = createEmptyState("mig-topics-pinned-gated");
+    const topic = createTopic(state, { title: "Legacy topic" });
+    normalizeState("mig-topics-pinned-gated", state);
+    expect(topic.pinned).toBe(true);
+
+    // The user unpins; a later load must not re-pin it.
+    topic.pinned = false;
+    normalizeState("mig-topics-pinned-gated", state);
+    expect(topic.pinned).toBe(false);
+  });
+
+  test("containersAckSeeded stamps acknowledgedAt on every pre-existing session and sets the marker", () => {
+    const state = createEmptyState("mig-ack-seeded");
+    const topic = createTopic(state, { title: "Old errand" });
+    const chat = createChatSession(state, "Old chat");
+    const dyn = state as unknown as { migrations?: { containersAckSeeded?: string } };
+
+    normalizeState("mig-ack-seeded", state);
+
+    expect(topic.acknowledgedAt).toBeString();
+    expect(chat.acknowledgedAt).toBeString();
+    expect(dyn.migrations?.containersAckSeeded).toBeString();
+  });
+
+  test("containersAckSeeded is marker-gated: sessions created after the seed stay unacknowledged", () => {
+    const state = createEmptyState("mig-ack-seeded-gated");
+    normalizeState("mig-ack-seeded-gated", state);
+
+    const fresh = createTopic(state, { title: "New errand" });
+    normalizeState("mig-ack-seeded-gated", state);
+    expect(fresh.acknowledgedAt).toBeUndefined();
+  });
+});
+
+describe("normalizeState job deliveryPolicy migration", () => {
+  test("jobsDeliveryPolicyDefaulted stamps 'always' on jobs missing the field, preserves explicit values, and sets the marker", () => {
+    const state = createEmptyState("mig-jobs-delivery-policy");
+    const at = new Date().toISOString();
+    const legacy = createJob(state, { name: "legacy digest", prompt: "p", nextRunAt: at });
+    const explicit = createJob(state, { name: "watch", prompt: "p", nextRunAt: at, deliveryPolicy: "silent" });
+    const dyn = state as unknown as { migrations?: { jobsDeliveryPolicyDefaulted?: string } };
+    expect(dyn.migrations?.jobsDeliveryPolicyDefaulted).toBeUndefined();
+
+    normalizeState("mig-jobs-delivery-policy", state);
+
+    expect(legacy.deliveryPolicy).toBe("always");
+    expect(explicit.deliveryPolicy).toBe("silent");
+    expect(dyn.migrations?.jobsDeliveryPolicyDefaulted).toBeString();
+  });
+
+  test("jobsDeliveryPolicyDefaulted is marker-gated: a job added after the pass is not re-stamped", () => {
+    const state = createEmptyState("mig-jobs-delivery-policy-gated");
+    normalizeState("mig-jobs-delivery-policy-gated", state);
+
+    const fresh = createJob(state, { name: "later job", prompt: "p", nextRunAt: new Date().toISOString() });
+    normalizeState("mig-jobs-delivery-policy-gated", state);
+    expect(fresh.deliveryPolicy).toBeUndefined();
   });
 });

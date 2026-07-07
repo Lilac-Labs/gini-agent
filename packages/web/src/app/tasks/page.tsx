@@ -14,8 +14,8 @@ import { TaskDetail } from "./_components/TaskDetail";
 import { FleetDashboard } from "./_components/FleetDashboard";
 
 const FILTERS: readonly TaskFilter[] = [
-  { key: "active", label: "Active", match: (t: Task) => ["queued", "running", "waiting_approval"].includes(t.status) },
-  { key: "waiting", label: "Waiting", match: (t: Task) => t.status === "waiting_approval" },
+  { key: "active", label: "Active", match: (t: Task) => ["queued", "running", "waiting_approval", "needs_input"].includes(t.status) },
+  { key: "waiting", label: "Waiting", match: (t: Task) => t.status === "waiting_approval" || t.status === "needs_input" },
   { key: "scheduled", label: "Scheduled", match: (t: Task) => Boolean(t.jobId) && (t.status === "queued" || t.status === "running") },
   { key: "completed", label: "Completed", match: (t: Task) => t.status === "completed" },
   { key: "failed", label: "Failed", match: (t: Task) => t.status === "failed" || t.status === "cancelled" },

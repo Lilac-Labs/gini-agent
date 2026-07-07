@@ -4,10 +4,14 @@
 // transcript opens already at the bottom, and later growth so a pinned user
 // keeps following with no visible animation. Growth scrolls ONLY while the user
 // is still pinned to the bottom — a new block must not yank a reader who
-// scrolled up. A key change (panel reused for a different conversation) and an
-// enabled false→true cycle (tab hidden then shown again) both re-arm the snap.
-// scrollIntoView isn't implemented in happy-dom, so it's spied; the scroll
-// container's metrics are stubbed to drive the guard.
+// scrolled up. Size changes with no count change (a gate card expanding when
+// its payload resolves, the composer autosizing) follow via a ResizeObserver
+// under the same pinned guard. A key change (panel reused for a different
+// conversation) and an enabled false→true cycle (tab hidden then shown again)
+// both re-arm the snap. scrollIntoView isn't implemented in happy-dom, so it's
+// spied; the scroll container's metrics are stubbed to drive the guard;
+// ResizeObserver doesn't exist in happy-dom, so a manually-triggered fake
+// stands in.
 
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, render } from "@testing-library/react";
@@ -16,15 +20,39 @@ import { useStickToBottom } from "./use-stick-to-bottom";
 let behaviors: (ScrollBehavior | undefined)[] = [];
 const original = Element.prototype.scrollIntoView;
 
+// happy-dom has no ResizeObserver; the hook's growth-follow path is driven by
+// triggering this fake's callback by hand.
+class FakeResizeObserver {
+  static instances: FakeResizeObserver[] = [];
+  constructor(private callback: ResizeObserverCallback) {
+    FakeResizeObserver.instances.push(this);
+  }
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+  trigger() {
+    act(() => {
+      this.callback([], this as unknown as ResizeObserver);
+    });
+  }
+}
+
+function triggerResize() {
+  FakeResizeObserver.instances[FakeResizeObserver.instances.length - 1]!.trigger();
+}
+
 beforeEach(() => {
   behaviors = [];
   Element.prototype.scrollIntoView = mock((arg?: boolean | ScrollIntoViewOptions) => {
     behaviors.push(typeof arg === "object" ? arg.behavior : undefined);
   });
+  FakeResizeObserver.instances = [];
+  (globalThis as { ResizeObserver?: unknown }).ResizeObserver = FakeResizeObserver;
 });
 
 afterEach(() => {
   Element.prototype.scrollIntoView = original;
+  delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
 });
 
 function Harness({ count, k, enabled }: { count: number; k?: unknown; enabled?: boolean }) {
@@ -56,12 +84,18 @@ function ButtonHarness({ count, k }: { count: number; k?: unknown }) {
   );
 }
 
-// Stub the layout metrics the guard reads, then fire a scroll so the hook
-// samples the new pinned state. gap = scrollHeight - scrollTop - clientHeight.
-function setScroll(vp: HTMLElement, scrollHeight: number, clientHeight: number, scrollTop: number) {
+// Stub the layout metrics the guard reads, without firing any event — the
+// stale-sample scenarios (content resized, nothing scrolled) start here.
+// gap = scrollHeight - scrollTop - clientHeight.
+function setMetrics(vp: HTMLElement, scrollHeight: number, clientHeight: number, scrollTop: number) {
   Object.defineProperty(vp, "scrollHeight", { configurable: true, value: scrollHeight });
   Object.defineProperty(vp, "clientHeight", { configurable: true, value: clientHeight });
   Object.defineProperty(vp, "scrollTop", { configurable: true, writable: true, value: scrollTop });
+}
+
+// Stub the metrics, then fire a scroll so the hook samples the new pinned state.
+function setScroll(vp: HTMLElement, scrollHeight: number, clientHeight: number, scrollTop: number) {
+  setMetrics(vp, scrollHeight, clientHeight, scrollTop);
   // Wrap in act so the sample's setState (which drives `atBottom`) flushes
   // before the test reads it.
   act(() => {
@@ -142,6 +176,41 @@ describe("useStickToBottom", () => {
 
     // Unmount detaches the scroll listener.
     unmount();
+  });
+
+  test("content resize without a new block re-snaps while pinned", () => {
+    const { container } = render(<ScrollerHarness count={1} k="s1" />);
+    expect(behaviors).toEqual(["auto"]);
+
+    const vp = container.querySelector<HTMLElement>('[data-slot="scroll-area-viewport"]')!;
+    // A gate card expands after its payload query resolves: the content grows
+    // with no count change and no scroll event, so the mount-time pinned
+    // sample is all the hook has. The observer must re-snap.
+    setMetrics(vp, 621, 517, 0);
+    triggerResize();
+    expect(behaviors).toEqual(["auto", "auto"]);
+  });
+
+  test("content resize does NOT scroll when the user has scrolled up", () => {
+    const { container, getByTestId } = render(<ButtonHarness count={1} k="s1" />);
+    expect(behaviors).toEqual(["auto"]);
+
+    const vp = container.querySelector<HTMLElement>('[data-slot="scroll-area-viewport"]')!;
+    // gap = 1000 - 100 - 400 = 500 > 64 → scrolled up, not pinned.
+    setScroll(vp, 1000, 400, 100);
+    expect(getByTestId("at-bottom").textContent).toBe("false");
+
+    // Growth below: no yank, just a re-sample (button stays visible).
+    setMetrics(vp, 1200, 400, 100);
+    triggerResize();
+    expect(behaviors).toEqual(["auto"]);
+    expect(getByTestId("at-bottom").textContent).toBe("false");
+
+    // Shrinkage that leaves the user near the bottom (a transient phase block
+    // filtered out) re-pins through the same sample, hiding the button.
+    setMetrics(vp, 520, 400, 100);
+    triggerResize();
+    expect(getByTestId("at-bottom").textContent).toBe("true");
   });
 
   test("atBottom tracks scroll position; scrollToBottom snaps and re-pins", () => {

@@ -440,11 +440,10 @@ function applyMigrations(db: Database): void {
 
   // Step 5 — devices table (schema version 4). Stores APNs push tokens
   // per credential so the runtime can fan an `approval_requested` block
-  // out to every iOS install that belongs to the same paired credential.
+  // out to every iOS install that belongs to the operator.
   // `credential_id` is the upstream caller's identity as resolved by
-  // governance/pairing.ts:authorizedBearer — the PairedDevice id for
-  // mobile clients or the literal "owner" string for the runtime's
-  // config token. Indexed on credential_id because the dispatcher's hot
+  // the http.ts owner-token bearer gate — always the literal "owner"
+  // (see ADR owner-token-auth.md). Indexed on credential_id because the dispatcher's hot
   // path is "give me every device for this credential". The CHECK on
   // platform pins us to iOS for now; Step 2/3/4 are iOS-only this round.
   db.exec(`

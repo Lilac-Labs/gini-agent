@@ -1,6 +1,6 @@
 import { submitTask } from "../agent";
 import { spawnSubagent } from "../capabilities/subagents";
-import type { JobRecord, JobRoute, JobRunRecord, RuntimeConfig, RuntimeState, SkillRecord } from "../types";
+import type { JobDeliveryPolicy, JobRecord, JobRoute, JobRunRecord, RuntimeConfig, RuntimeState, SkillRecord } from "../types";
 import { addAudit, appendEvent, appendLog, appendTrace, createChatMessage, createChatSession, createJob, createJobRun, createRun, insertChatBlock, mutateState, now, readState } from "../state";
 import { isSkillActive } from "../integrations/connectors";
 import { resolveEffectiveContext } from "../execution/effective-context";
@@ -16,25 +16,37 @@ export { finalizeJobRunFromTask } from "./finalize";
 // session inherits the prior conversation context and the LLM tends to
 // respond conversationally ("Scheduled: feed-cat will fire in 45 seconds.")
 // instead of actually delivering the reminder ("Feed the cat now.").
-//
-// The hint also defines a `[SILENT]` sentinel the LLM can emit when there
-// is genuinely nothing to report — see syncChatTaskResult for the
-// suppression path.
-const CRON_EXECUTION_HINT = [
+const CRON_EXECUTION_HINT_LINES = [
   "[IMPORTANT: You are running as a scheduled job, not as part of a live conversation.",
-  "DELIVERY: Your final response IS the deliverable. The runtime ships it back to the originating chat (or other configured target) automatically — do NOT try to schedule another job, do NOT acknowledge the schedule, do NOT say 'I will remind you'. Just produce the reminder/report/output the user wanted.",
-  "SILENT: If there is genuinely nothing new to report (e.g. a watcher job with no change), respond with exactly \"[SILENT]\" and nothing else to suppress delivery. Never combine [SILENT] with content.]",
-  ""
-].join("\n");
+  "DELIVERY: Your final response IS the deliverable. The runtime ships it back to the originating chat (or other configured target) automatically — do NOT try to schedule another job, do NOT acknowledge the schedule, do NOT say 'I will remind you'. Just produce the reminder/report/output the user wanted."
+];
 
-function withCronHint(jobPrompt: string, context: string[], skillBlock?: string): string {
+// The `[SILENT]` sentinel invitation. Injected ONLY for deliveryPolicy
+// "on_findings" (watch-style jobs where "nothing new" is the common case) —
+// see syncChatTaskResult for the suppression path, which honors an emitted
+// sentinel under EVERY policy; only the prompt-side invitation is gated.
+const CRON_SILENT_HINT_LINE =
+  "SILENT: If there is genuinely nothing new to report (e.g. a watcher job with no change), respond with exactly \"[SILENT]\" and nothing else to suppress delivery. Never combine [SILENT] with content.";
+
+function cronExecutionHint(deliveryPolicy: JobRecord["deliveryPolicy"]): string {
+  const lines = [...CRON_EXECUTION_HINT_LINES];
+  if ((deliveryPolicy ?? "always") === "on_findings") lines.push(CRON_SILENT_HINT_LINE);
+  return `${lines.join("\n")}]\n`;
+}
+
+function withCronHint(
+  jobPrompt: string,
+  context: string[],
+  skillBlock: string | undefined,
+  deliveryPolicy: JobRecord["deliveryPolicy"]
+): string {
   // The skill block (trusted, operator-registered instructions) precedes
   // the context block, which may carry untrusted fenced hook content.
   // Absent skillBlock keeps the assembled prompt byte-identical to the
   // pre-attachment behavior.
   const skillSection = skillBlock ? `${skillBlock}\n\n` : "";
   const contextBlock = context.length > 0 ? `Context:\n${context.join("\n")}\n\n` : "";
-  return `${CRON_EXECUTION_HINT}\n${skillSection}${contextBlock}${jobPrompt}`;
+  return `${cronExecutionHint(deliveryPolicy)}\n${skillSection}${contextBlock}${jobPrompt}`;
 }
 
 function assertPositiveInt(label: string, value: unknown): number {
@@ -101,8 +113,10 @@ function resolveEnabledSkill(state: RuntimeState, name: string): SkillRecord | u
 // entry in a typed `Invalid input: …` so the caller (agent or HTTP client)
 // can correct it. createScheduledJob and updateJob both route here — the
 // single choke point for CLI, HTTP, and the agent's create_job/update_job
-// tools, which all delegate to those two functions.
-function assertSkillNamesResolve(state: RuntimeState, skillNames: string[]): void {
+// tools, which all delegate to those two functions. Also exported so the
+// onboarding routines endpoint can pre-validate every spec before deleting
+// the jobs it is replacing.
+export function assertSkillNamesResolve(state: RuntimeState, skillNames: string[]): void {
   for (const name of skillNames) {
     if (!resolveEnabledSkill(state, name)) {
       throw new Error(`Invalid input: skillNames entry "${name}" does not match any enabled skill`);
@@ -262,6 +276,20 @@ export async function createScheduledJob(
       throw new Error(`Invalid input: oneShot must be a boolean (got ${String(input.oneShot)})`);
     }
     oneShot = input.oneShot;
+  }
+  // Terminal-run delivery fan-out policy (see JobDeliveryPolicy in types.ts).
+  // Absent defaults to "always" — the pre-policy behavior, [SILENT] sentinel
+  // included. "silent" is rejected on one-shot reminders: a reminder that
+  // delivers nothing is a no-op the user would read as a dropped ball.
+  let deliveryPolicy: JobDeliveryPolicy | undefined;
+  if (input.deliveryPolicy !== undefined && input.deliveryPolicy !== null) {
+    if (input.deliveryPolicy !== "always" && input.deliveryPolicy !== "on_findings" && input.deliveryPolicy !== "silent") {
+      throw new Error(`Invalid input: deliveryPolicy must be one of "always" | "on_findings" | "silent" (got ${String(input.deliveryPolicy)})`);
+    }
+    deliveryPolicy = input.deliveryPolicy;
+  }
+  if (deliveryPolicy === "silent" && oneShot === true) {
+    throw new Error(`Invalid input: deliveryPolicy "silent" is not allowed on one-shot reminder jobs`);
   }
   // Forward-to-Chat flag (ADR chat-topics-tasks-subagents.md). When true, each
   // fire forwards its final answer into the owning agent's Chat (in addition to
@@ -435,6 +463,10 @@ export async function createScheduledJob(
       // Recurring-job-derived sessions are channels in the new chats IA;
       // they always carry origin: "job" as well.
       const session = createChatSession(state, createDedicatedSessionTitle, undefined, owningAgentId, "job", "channel");
+      // A silent (watch-shaped) job's working thread never surfaces in
+      // chrome: mint it headless so it stays out of session lists and
+      // router candidates while remaining addressable by id.
+      if (deliveryPolicy === "silent") session.headless = true;
       if (parentTaskId) {
         const parentSession = state.chatSessions.find((candidate) =>
           candidate.id !== session.id && candidate.taskIds.includes(parentTaskId)
@@ -473,6 +505,7 @@ export async function createScheduledJob(
       costBudget: typeof input.costBudget === "number" ? input.costBudget : undefined,
       chatSessionId: resolvedChatSessionId,
       oneShot,
+      deliveryPolicy: deliveryPolicy ?? "always",
       forwardToChat,
       preRunHook,
       dangerouslyAutoApprove,
@@ -1106,7 +1139,7 @@ async function dispatchPromptRun(
   // every non-hook caller byte-identical. Skill attachments resolve at fire
   // time so a stale name skips (traced below) instead of failing the fire.
   const attachments = resolveJobSkillAttachments(readState(config.instance), job);
-  const prompt = withCronHint(job.prompt, [...job.context, ...hookContext], attachments?.block);
+  const prompt = withCronHint(job.prompt, [...job.context, ...hookContext], attachments?.block, job.deliveryPolicy);
   // Persist any fire-time skill skips on the run BEFORE submitTask so the
   // degradation is durable on /api/job-runs and finalizeJobRunFromTask sees it
   // — submitTask dispatches the chat task detached, and that task's own
@@ -1413,7 +1446,7 @@ async function dispatchFanOut(
       // context + this bucket's fenced items, assembled at the same point
       // dispatchPromptRun assembles its single-turn prompt (including the
       // job's inlined skill attachments).
-      const prompt = withCronHint(route?.prompt ?? job.prompt, [...job.context, ...bucketContext], attachments?.block);
+      const prompt = withCronHint(route?.prompt ?? job.prompt, [...job.context, ...bucketContext], attachments?.block, job.deliveryPolicy);
       // Spawn one constrained worker into the route's session. NO parentTaskId
       // (a parentless constrained subagent — the depth cap no-ops without a
       // parent chain), so the worker runs under the route's systemPrompt/toolsets/
@@ -1632,7 +1665,14 @@ export async function updateJob(
   config: RuntimeConfig,
   jobId: string,
   input: Record<string, unknown>,
-  parentTaskId?: string
+  parentTaskId?: string,
+  // One-shot patch, supplied ONLY by the update_job tool. It rides as a
+  // separate parameter (never an `input` key) because the raw HTTP PATCH
+  // /api/jobs handler forwards its body straight into `input` — the HTTP
+  // surface must stay unable to patch oneShot. Applying it inside this
+  // function's single mutateState keeps the silent × one-shot guards and
+  // every sibling field atomic: a rejection aborts the whole patch.
+  oneShotPatch?: boolean
 ) {
   // Validate up-front so 400-class errors come back as `Invalid input: ...`
   // before we open a mutateState write. Only validate fields the caller
@@ -1740,6 +1780,18 @@ export async function updateJob(
     } else {
       autoApproveCommandsPatch = cleaned;
     }
+  }
+
+  // Delivery-policy patch. `undefined`/`null` = no change (the field always
+  // reads with an "always" default, so there is no meaningful "clear"). The
+  // silent × oneShot rejection is re-checked against the live record inside
+  // mutateState below.
+  let deliveryPolicyPatch: JobDeliveryPolicy | undefined;
+  if (input.deliveryPolicy !== undefined && input.deliveryPolicy !== null) {
+    if (input.deliveryPolicy !== "always" && input.deliveryPolicy !== "on_findings" && input.deliveryPolicy !== "silent") {
+      throw new Error(`Invalid input: deliveryPolicy must be one of "always" | "on_findings" | "silent" (got ${String(input.deliveryPolicy)})`);
+    }
+    deliveryPolicyPatch = input.deliveryPolicy;
   }
 
   // Skill attachments patch. `undefined` = no change; `null` or `[]` =
@@ -1913,6 +1965,49 @@ export async function updateJob(
       job.autoApproveCommands = autoApproveCommandsPatch;
     }
 
+    // One-shot patch (tool path only — see the parameter note above).
+    // Applied BEFORE the delivery-policy block so the silent guard below
+    // reads the effective post-patch value: converting a reminder to a
+    // recurring silent watch ({ deliveryPolicy: "silent", oneShot: false })
+    // works in one call. Flipping TO one-shot re-checks the effective
+    // policy — this call's patch if supplied, else the live record, which a
+    // concurrent update may have flipped silent since the caller's
+    // lock-free pre-flight.
+    if (oneShotPatch !== undefined) {
+      if (
+        oneShotPatch === true &&
+        (deliveryPolicyPatch ?? job.deliveryPolicy ?? "always") === "silent"
+      ) {
+        throw new Error(`Invalid input: deliveryPolicy "silent" is not allowed on one-shot reminder jobs`);
+      }
+      job.oneShot = oneShotPatch;
+    }
+
+    // Delivery-policy patch, re-checked inside the lock against the record —
+    // which already reflects a same-call oneShot patch applied just above —
+    // so a patch can't flip a one-shot reminder silent (same rule as create
+    // time), and a caller that never patches oneShot (the HTTP PATCH
+    // surface) is judged on the live value.
+    if (deliveryPolicyPatch !== undefined) {
+      if (deliveryPolicyPatch === "silent" && job.oneShot === true) {
+        throw new Error(`Invalid input: deliveryPolicy "silent" is not allowed on one-shot reminder jobs`);
+      }
+      job.deliveryPolicy = deliveryPolicyPatch;
+      // Keep the dedicated channel's `headless` bit in sync across the
+      // silent boundary, mirroring the mint invariant in createScheduledJob
+      // and rebindJobDelivery: a silent (watch-shaped) job's working thread
+      // never surfaces in chrome, and a job flipped audible must surface
+      // again. Scoped to the job's dedicated channel only — a job bound to
+      // a conversation session must never be hidden by a policy flip.
+      const session = job.chatSessionId !== undefined
+        ? state.chatSessions.find((s) => s.id === job.chatSessionId)
+        : undefined;
+      if (session?.kind === "channel") {
+        if (deliveryPolicyPatch === "silent") session.headless = true;
+        else if (session.headless) delete session.headless;
+      }
+    }
+
     // Skill attachments resolve inside the lock (same rationale as in
     // createScheduledJob): a throw here aborts the whole patch — no write.
     if (clearSkillNames) {
@@ -2019,6 +2114,9 @@ export async function rebindJobDelivery(
       // copy within this write.
       const mirror = current?.source ?? current?.outboundMirror;
       if (mirror) session.outboundMirror = { ...mirror };
+      // Preserve the mint invariant from createScheduledJob: a silent
+      // (watch-shaped) job's working thread is always headless.
+      if ((job.deliveryPolicy ?? "always") === "silent") session.headless = true;
       job.chatSessionId = session.id;
     }
     job.forwardToChat = desiredForward;

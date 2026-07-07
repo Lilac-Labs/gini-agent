@@ -21,6 +21,10 @@ import {
   createAuthorization,
   createSetupRequest,
   createChatMessage,
+  createTaskContainer,
+  deleteChatSession,
+  findChildContainerByCorrelationKey,
+  insertChatBlock,
   isTerminalTaskStatus,
   mutateState,
   now,
@@ -31,7 +35,7 @@ import { accountSelectionNeeded, addEmailWatcher, clearEmailWatcherObjective, li
 import { ApprovalRaceLostError, ApprovedActionFailedError, TaskAlreadyTerminalError, cancelTask, findTask, resolveAuthorization, runTerminalCommand } from "../agent";
 import { walkFiles, simpleDiff } from "../tools/file";
 import { codeExecutionCommand } from "../tools/code";
-import { MAX_SUBAGENT_DEPTH, spawnSubagent, subagentDepth } from "../capabilities/subagents";
+import { MAX_SUBAGENT_DEPTH, containerChainDepth, spawnSubagent, subagentDepth } from "../capabilities/subagents";
 import { matchAutoApprove } from "./auto-approve";
 import { resolveApprovalPolicy, type PolicyAction } from "./policy";
 import { createScheduledJob, listJobs, rebindJobDelivery, removeJob, runJobNow, updateJob, updateJobStatus } from "../jobs";
@@ -230,6 +234,8 @@ async function dispatchToolCallInner(
       return { kind: "sync", result: await recordSkillFeedbackTool(config, taskId, args) };
     case "spawn_subagent":
       return { kind: "sync", result: await spawnSubagentTool(config, taskId, args) };
+    case "spawn_task":
+      return { kind: "sync", result: await spawnTaskTool(config, taskId, args) };
     case "create_job":
       return { kind: "sync", result: await createJobTool(config, taskId, args) };
     case "list_jobs":
@@ -1222,8 +1228,8 @@ function truncate(text: string, max: number): string {
 // The gate lives HERE, in skill_run dispatch, and deliberately NOT in
 // invokeSkillScript: internal callers — the skill-script pre-run hook
 // handler (skill-script-hook.ts) and the approved-action executor in
-// agent.ts — call invokeSkillScript directly and must stay ungated.
-// See ADR skill-script-approval-gating.md.
+// agent.ts — call invokeSkillScript directly and must stay ungated. See
+// ADR skill-script-approval-gating.md.
 async function skillRunDispatch(
   config: RuntimeConfig,
   taskId: string,
@@ -1516,6 +1522,268 @@ async function spawnSubagentTool(
   return JSON.stringify(payload);
 }
 
+// Child-task delegation (unified task model). Where spawn_subagent runs an
+// invisible in-run helper that reports back only to the spawning run,
+// spawn_task mints a durable CHILD TASK CONTAINER — its own thread, child of
+// the spawning run's container — and runs the written brief as the child's
+// first run. The subagent machinery is reused purely as the mechanical
+// carrier of the brief/constraints: the child's run 1 starts from
+// title/prompt/goal/context, never the parent transcript, so the child
+// thread is self-contained. Idempotent via `correlation_key` (scoped to the
+// parent container; the dedup lookup deliberately ignores acknowledge/
+// archive so a re-firing spawner never re-mints a dismissed finding), and
+// depth-capped on BOTH walks: the task chain (subagentDepth, same cap as
+// spawn_subagent) and the container chain (containerChainDepth — each
+// child's follow-up runs start with a fresh task chain, so the task walk
+// alone couldn't cap container nesting). `surface: true` stamps the child
+// container user-facing (the home inclusion bit — watch drafts set it;
+// internal errands default false).
+async function spawnTaskTool(
+  config: RuntimeConfig,
+  taskId: string,
+  args: Record<string, unknown>
+): Promise<string> {
+  const title = requireString(args, "title");
+  const prompt = requireString(args, "prompt");
+  const goal = typeof args.goal === "string" ? args.goal : undefined;
+  const context = typeof args.context === "string" ? args.context : undefined;
+  const toolsets = Array.isArray(args.toolsets) ? args.toolsets.map(String) : undefined;
+  const skills = Array.isArray(args.skills) ? args.skills.map(String) : undefined;
+  const correlationKey =
+    typeof args.correlation_key === "string" && args.correlation_key.trim().length > 0
+      ? args.correlation_key.trim()
+      : undefined;
+  const surface = args.surface === true;
+  if (args.await !== undefined && args.await !== "result" && args.await !== "none") {
+    return `Error: invalid await value ${JSON.stringify(args.await)} — use "result" or "none".`;
+  }
+  const awaitMode: "result" | "none" = args.await === "none" ? "none" : "result";
+  const timeoutMs = 5 * 60 * 1000;
+
+  // Pre-side-effect terminal check, mirroring spawnSubagentTool: the
+  // serialized re-check inside spawnSubagent's mutateState is the
+  // authoritative guard; this is the cheap early-exit.
+  const stateNow = readState(config.instance);
+  const spawningTask = stateNow.tasks.find((t) => t.id === taskId);
+  if (spawningTask && isTerminalTaskStatus(spawningTask.status)) {
+    return `Error: spawn_task skipped because the spawning task is already ${spawningTask.status}.`;
+  }
+
+  // The child container hangs off the spawning run's container. A run with
+  // no container (imperative CLI task, parent-delegated subagent helper) has
+  // no parent thread for the child to mirror into.
+  const parentContainerId = spawningTask?.chatSessionId;
+  if (!parentContainerId || !stateNow.chatSessions.some((s) => s.id === parentContainerId)) {
+    return "Error: spawn_task requires the spawning run to be bound to a container. Use spawn_subagent for in-run delegation from a container-less run.";
+  }
+
+  // Depth caps, pre-flight so the model gets a clean error instead of a
+  // generic tool exception. Task-chain walk first (same as spawn_subagent) …
+  const helperDepth = subagentDepth(stateNow, taskId);
+  if (helperDepth >= MAX_SUBAGENT_DEPTH) {
+    appendTrace(config.instance, taskId, {
+      type: "error",
+      message: "spawn_task rejected: subagent depth cap reached",
+      data: { depth: helperDepth, cap: MAX_SUBAGENT_DEPTH, title }
+    });
+    return `Error: max_subagent_depth_exceeded (current depth ${helperDepth}, cap ${MAX_SUBAGENT_DEPTH}). Refusing to spawn '${title}'.`;
+  }
+  // … then the container-chain walk, so nesting through fresh containers
+  // (whose runs are depth-clean on the task walk) is capped too.
+  const chainDepth = containerChainDepth(stateNow, parentContainerId);
+  if (chainDepth >= MAX_SUBAGENT_DEPTH) {
+    appendTrace(config.instance, taskId, {
+      type: "error",
+      message: "spawn_task rejected: container depth cap reached",
+      data: { depth: chainDepth, cap: MAX_SUBAGENT_DEPTH, title }
+    });
+    return `Error: max_task_depth_exceeded (container chain already at depth ${chainDepth}, cap ${MAX_SUBAGENT_DEPTH}). Refusing to spawn '${title}'.`;
+  }
+
+  // ONE mutateState owns the create-or-dedup decision so two concurrent
+  // spawns with the same correlation_key can't both mint. The audit rides
+  // in the same mutation.
+  const decision = await mutateState(config.instance, (state: RuntimeState) => {
+    const item = findTask(state, taskId);
+    if (correlationKey) {
+      const existing = findChildContainerByCorrelationKey(state, parentContainerId, correlationKey);
+      if (existing) {
+        // Latest run in the existing child, for the dedup result payload.
+        const latest = [...existing.taskIds]
+          .reverse()
+          .map((id) => state.tasks.find((t) => t.id === id))
+          .find((t) => t !== undefined);
+        addAudit(
+          state,
+          {
+            actor: "agent",
+            action: "task.spawn.deduped",
+            target: existing.id,
+            risk: "low",
+            taskId: item.id,
+            runId: item.runId,
+            evidence: { correlationKey, containerId: existing.id, title }
+          },
+          { taskId: item.id }
+        );
+        item.updatedAt = now();
+        return {
+          deduped: true as const,
+          containerId: existing.id,
+          latestRunStatus: latest?.status,
+          summary: latest?.summary
+        };
+      }
+    }
+    const parentSession = state.chatSessions.find((s) => s.id === parentContainerId);
+    const child = createTaskContainer(state, {
+      agentId: item.agentId ?? parentSession?.agentId,
+      title,
+      parentChatSessionId: parentContainerId,
+      spawnedByTaskId: item.id,
+      ...(correlationKey ? { correlationKey } : {}),
+      ...(surface ? { surfaced: true } : {})
+    });
+    addAudit(
+      state,
+      {
+        actor: "agent",
+        action: "task.spawn",
+        target: child.id,
+        risk: "medium",
+        taskId: item.id,
+        runId: item.runId,
+        evidence: { title, promptBytes: prompt.length, correlationKey, surface, awaitMode, toolsets, skills, depth: chainDepth }
+      },
+      { taskId: item.id }
+    );
+    item.updatedAt = now();
+    return { deduped: false as const, containerId: child.id };
+  });
+
+  if (decision.deduped) {
+    appendTrace(config.instance, taskId, {
+      type: "tool",
+      message: `spawn_task deduped to existing child container`,
+      data: { correlationKey, containerId: decision.containerId, latestRunStatus: decision.latestRunStatus }
+    });
+    return JSON.stringify({
+      deduped: true,
+      containerId: decision.containerId,
+      latestRunStatus: decision.latestRunStatus ?? null,
+      ...(decision.summary ? { summary: decision.summary } : {})
+    });
+  }
+  const containerId = decision.containerId;
+
+  appendTrace(config.instance, taskId, {
+    type: "tool",
+    message: `Spawning child task '${title}'`,
+    data: { containerId, correlationKey, surface, awaitMode, toolsets, skills }
+  });
+
+  // Execution composes with the subagent machinery (the fan-out-worker
+  // precedent in jobs/index.ts): the child task is submitted INTO the child
+  // container, so its blocks/transcript land there and mirror one level up
+  // into the parent thread via resolveEmitContext.
+  let subagentId: string;
+  let childTaskId: string;
+  try {
+    const created = await spawnSubagent(config, {
+      name: title,
+      prompt,
+      goal,
+      context,
+      toolsets,
+      skills,
+      parentTaskId: taskId,
+      chatSessionId: containerId
+    });
+    subagentId = created.id;
+    childTaskId = created.taskId;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // Remove the just-minted container so a failed spawn doesn't leave an
+    // empty child behind — with a correlation_key that orphan would win
+    // every future dedup lookup and permanently mask the retry.
+    // Known dedup window: a concurrent same-key spawn can dedup onto this
+    // containerId between the mint above and this delete, leaving that
+    // caller holding an id that no longer resolves. The next spawn with the
+    // key re-mints cleanly.
+    await mutateState(config.instance, (state: RuntimeState) => {
+      if (state.chatSessions.some((s) => s.id === containerId)) deleteChatSession(state, containerId);
+    });
+    if (message.startsWith("Cannot spawn subagent: parent task ")) {
+      appendTrace(config.instance, taskId, {
+        type: "task",
+        message: `spawn_task skipped: spawning task is terminal`,
+        data: { message }
+      });
+      return `Error: spawn_task skipped because the spawning task became terminal between pre-check and spawn.`;
+    }
+    appendTrace(config.instance, taskId, {
+      type: "error",
+      message: `spawn_task failed: ${message}`,
+      data: { title }
+    });
+    return `Error: ${message}`;
+  }
+
+  // Land the brief in the child thread (durable user row + render block) so
+  // the thread is self-contained: the thread IS the context its runs used.
+  // Tagged with the child task id so the child's own run 1 doesn't replay it
+  // (it already carries the prompt as task input) while follow-up runs in
+  // the container do.
+  await mutateState(config.instance, (state: RuntimeState) => {
+    if (!state.chatSessions.some((s) => s.id === containerId)) return;
+    createChatMessage(state, { sessionId: containerId, role: "user", content: prompt, taskId: childTaskId });
+  });
+  try {
+    insertChatBlock(config.instance, {
+      kind: "user_text",
+      sessionId: containerId,
+      text: prompt,
+      taskId: childTaskId
+    });
+  } catch (error) {
+    appendTrace(config.instance, taskId, {
+      type: "task",
+      message: "spawn_task brief block insert failed",
+      data: { containerId, error: error instanceof Error ? error.message : String(error) }
+    });
+  }
+
+  if (awaitMode === "none") {
+    // Watch mode: the child keeps running in its own container; the spawning
+    // run moves on with the ids.
+    return JSON.stringify({ containerId, taskId: childTaskId, status: "running" });
+  }
+
+  // Reflect the parent's currentStep so the UI shows what we're waiting on.
+  await mutateState(config.instance, (state: RuntimeState) => {
+    const item = findTask(state, taskId);
+    item.currentStep = `Waiting on child task ${title}`;
+    item.updatedAt = now();
+  });
+
+  const final = await waitForSpawnedChildResult(config, subagentId, childTaskId, timeoutMs, taskId);
+
+  appendTrace(config.instance, taskId, {
+    type: "tool",
+    message: `Child task '${title}' settled`,
+    data: { containerId, childTaskId, status: final.status, hasSummary: Boolean(final.summary), hasError: Boolean(final.error) }
+  });
+
+  return JSON.stringify({
+    containerId,
+    taskId: childTaskId,
+    status: final.status,
+    summary: final.summary ?? null,
+    error: final.error ?? null,
+    ...(final.needsInput ? { needsInput: final.needsInput } : {})
+  });
+}
+
 // Validate a create_job / update_job `deliveryTargets` payload against
 // the dispatchable messaging bridges — telegram / discord, the only
 // kinds the job finalizer (src/jobs/finalize.ts) can send to. A demo
@@ -1626,6 +1894,15 @@ async function createJobTool(
       throw new Error("Invalid input: oneShot must be a boolean.");
     }
     oneShot = args.oneShot;
+  }
+  // Delivery policy fast-path check; the authoritative validation (enum +
+  // the silent × oneShot rejection) lives in createScheduledJob.
+  let deliveryPolicy: "always" | "on_findings" | "silent" | undefined;
+  if (args.deliveryPolicy !== undefined && args.deliveryPolicy !== null) {
+    if (args.deliveryPolicy !== "always" && args.deliveryPolicy !== "on_findings" && args.deliveryPolicy !== "silent") {
+      throw new Error("Invalid input: deliveryPolicy must be one of \"always\" | \"on_findings\" | \"silent\".");
+    }
+    deliveryPolicy = args.deliveryPolicy;
   }
   // Per-job auto-approve envelope. Same validation shape as
   // `createScheduledJob` so the agent gets a typed rejection (which the
@@ -1753,6 +2030,7 @@ async function createJobTool(
       // to avoid double-posting the final answer.
       chatSessionId: invokedFromChat ? originatingSessionId : undefined,
       oneShot,
+      deliveryPolicy,
       // Skill attachments pass through verbatim — createScheduledJob is the
       // single validation choke point (shape + enabled-skill resolution),
       // and its typed `Invalid input: …` surfaces back as a tool error.
@@ -1806,6 +2084,7 @@ async function createJobTool(
           cronExpression,
           cronTimezone,
           oneShot,
+          deliveryPolicy: job.deliveryPolicy,
           skillNames: job.skillNames,
           chatSessionId,
           jobId: job.id,
@@ -1834,6 +2113,7 @@ async function createJobTool(
       cronExpression,
       cronTimezone,
       oneShot,
+      deliveryPolicy: job.deliveryPolicy,
       skillNames: job.skillNames,
       chatSessionId,
       preRunHookHandlerId: job.preRunHook?.handlerId,
@@ -1982,6 +2262,7 @@ async function updateJobTool(
     "timeoutSeconds",
     "autoApproveCommands",
     "dangerouslyAutoApprove",
+    "deliveryPolicy",
     "skillNames"
   ] as const;
   for (const key of passthrough) {
@@ -1994,17 +2275,24 @@ async function updateJobTool(
   // `[]` is the documented "clear" signal and passes through.
   const deliveryTargetsPatch = parseDeliveryTargets(config, args.deliveryTargets);
   if (deliveryTargetsPatch !== undefined) patch.deliveryTargets = deliveryTargetsPatch;
-  // oneShot lives on the JobRecord but isn't part of `updateJob`'s patch
-  // contract — apply it directly inside the same mutateState so the audit
-  // row reflects every field the agent touched. We forward it via
-  // `mutateState` below after `updateJob` returns. Validate up-front so
-  // we fail before any persistence happens.
+  // oneShot lives on the JobRecord but isn't part of `updateJob`'s HTTP
+  // patch contract — it is forwarded as a separate parameter so the
+  // assignment and the silent × one-shot guards run inside `updateJob`'s
+  // single mutateState, atomically with every sibling field. Validate
+  // up-front so we fail before any persistence happens.
   let oneShotPatch: boolean | undefined;
   if (args.oneShot !== undefined && args.oneShot !== null) {
     if (typeof args.oneShot !== "boolean") {
       throw new Error("Invalid input: oneShot must be a boolean.");
     }
     oneShotPatch = args.oneShot;
+  }
+  // Same-call silent × one-shot pre-flight: reject the combination before
+  // ANY persistence so a refused call can't leave the job half-patched
+  // (policy committed, oneShot refused, channel hidden). The serialized
+  // guards inside `updateJob` remain authoritative under concurrent flips.
+  if (oneShotPatch === true && patch.deliveryPolicy === "silent") {
+    throw new Error(`Invalid input: deliveryPolicy "silent" is not allowed on one-shot reminder jobs`);
   }
   // Delivery rebind. Same enum as create_job's deliverTo; applied via
   // `rebindJobDelivery` (one mutateState write) after the field patch so a
@@ -2069,30 +2357,8 @@ async function updateJobTool(
   // earlier lock-free `readState` pre-check is kept as a fast path /
   // error-message-quality improvement; this is the authoritative
   // serialization point.
-  if (hasFieldPatch && Object.keys(patch).length > 0) {
-    await updateJob(config, jobId, patch, taskId);
-  }
-  if (oneShotPatch !== undefined) {
-    // The inline oneShot mutation has no shared mutator function, so we
-    // do the same atomic parent-task re-check inline.
-    await mutateState(config.instance, (state) => {
-      const parent = state.tasks.find((t) => t.id === taskId);
-      // Match the narrower predicate used by the shared job mutators in
-      // src/jobs/index.ts (createScheduledJob, updateJob, updateJobStatus,
-      // removeJob): refuse only on `cancelled`/`failed`. `completed`
-      // parents are permitted to manage jobs (e.g. a completed task's
-      // final action may be a job cleanup or follow-up). Using the wider
-      // `isTerminalTaskStatus` predicate here would diverge from the
-      // sibling patches in this same update_job call and silently reject
-      // the oneShot field while the schedule/name/prompt patch landed.
-      if (parent && (parent.status === "cancelled" || parent.status === "failed")) {
-        throw new Error(`Cannot update job: parent task ${taskId} is already ${parent.status}.`);
-      }
-      const job = state.jobs.find((candidate) => candidate.id === jobId);
-      if (!job) throw new Error(`Job not found: ${jobId}`);
-      job.oneShot = oneShotPatch;
-      job.updatedAt = now();
-    });
+  if (hasFieldPatch) {
+    await updateJob(config, jobId, patch, taskId, oneShotPatch);
   }
   if (statusPatch !== undefined) {
     await updateJobStatus(config, jobId, statusPatch, taskId);
@@ -3135,7 +3401,7 @@ async function cancelTaskTool(
   if (isTerminalTaskStatus(target.status)) {
     return `Task ${targetTaskId} is already ${target.status}; no action taken.`;
   }
-  const cancelled = await cancelTask(config, targetTaskId, callerTaskId);
+  const cancelled = await cancelTask(config, targetTaskId, { parentTaskId: callerTaskId });
   await mutateState(config.instance, (state) => {
     const item = findTask(state, callerTaskId);
     addAudit(
@@ -3452,6 +3718,73 @@ async function waitForSubagentTerminal(
     await Bun.sleep(pollMs);
   }
   return { status: "timeout", error: `Subagent ${subagentId} did not finish within ${timeoutMs}ms.` };
+}
+
+// spawn_task's awaited-result wait. Mirrors waitForSubagentTerminal —
+// including the bubble-up return when the child completed carrying an
+// unanswerable question — plus child-task-specific park branches: a child
+// task that PARKS on its own needs_input gate (unlike a helper it has a real
+// thread, so ask_user parks there instead of bubbling) surfaces to the
+// spawning run as status:"needs_input" immediately rather than pinning this
+// dispatch until timeout, and a child parked waiting_approval on a pending
+// Authorization surfaces as status:"waiting_approval" the same way. The
+// child stays parked in its own thread; the user answers/approves it there.
+// The stamped waiting_approval arm covers the GINI_NEEDS_INPUT_STATUS=0
+// compat park, whose needsInput stamp still lands.
+async function waitForSpawnedChildResult(
+  config: RuntimeConfig,
+  subagentId: string,
+  childTaskId: string,
+  timeoutMs: number,
+  parentTaskId: string
+): Promise<{ status: string; summary?: string; error?: string; needsInput?: Task["needsInput"] }> {
+  const deadline = Date.now() + Math.max(1000, timeoutMs);
+  // Poll granularity is read at call time so tests (and slow CI) can shrink
+  // the dead-wait between a child going terminal and the awaiting parent
+  // observing it. Defaults to 100ms; mirrors GINI_PAIR_POLL_MS.
+  const pollMs = Number(process.env.GINI_SPAWN_POLL_MS) || 100;
+  while (Date.now() < deadline) {
+    const state = readState(config.instance);
+    const sub = state.subagents.find((item) => item.id === subagentId);
+    if (!sub) return { status: "missing", error: `Subagent ${subagentId} disappeared.` };
+    if (sub.status === "completed" || sub.status === "failed" || sub.status === "cancelled") {
+      if (sub.resultNeedsInput) {
+        return {
+          status: "needs_input",
+          summary: sub.resultSummary ?? sub.summary,
+          needsInput: sub.resultNeedsInput
+        };
+      }
+      return {
+        status: sub.status,
+        summary: sub.resultSummary ?? sub.summary,
+        error: sub.resultError ?? sub.error
+      };
+    }
+    const child = state.tasks.find((t) => t.id === childTaskId);
+    if (child?.needsInput && (child.status === "needs_input" || child.status === "waiting_approval")) {
+      return { status: "needs_input", needsInput: child.needsInput };
+    }
+    // An Authorization-parked child (no needsInput stamp) would otherwise
+    // spin this wait until timeout: the gate is settled by the user on the
+    // confirm card in the child's own thread, so surface the park to the
+    // spawning run immediately instead.
+    if (
+      child?.status === "waiting_approval" &&
+      state.authorizations.some((a) => a.taskId === childTaskId && a.status === "pending")
+    ) {
+      return {
+        status: "waiting_approval",
+        summary: "Child task is waiting for the user to approve a gated action in its own thread."
+      };
+    }
+    const parent = state.tasks.find((t) => t.id === parentTaskId);
+    if (parent?.status === "cancelled" || parent?.status === "failed") {
+      return { status: parent.status, error: `Parent task was ${parent.status} while the child task was running.` };
+    }
+    await Bun.sleep(pollMs);
+  }
+  return { status: "timeout", error: `Child task ${childTaskId} did not finish within ${timeoutMs}ms.` };
 }
 
 function isTextLike(path: string): boolean {
@@ -4183,12 +4516,15 @@ async function requestConnectorTool(
 
 // ask_user tool. Mints a chat.choice SetupRequest whose payload carries the
 // question + options; the chat-task loop's pending handler emits a
-// setup_requested block and the web chat renders the single-select choice
-// card (which adds its own "Other" freeform input and Skip affordance — they
-// are not tool params). POST /api/setup-requests/<id>/complete resumes the
-// loop with the user's pick; /cancel (Skip) resumes with a skip fallback
-// instead of failing the task. Unlike connector.request, no approval_reason
-// assistant bubble is persisted — the question lives in the card itself.
+// setup_requested block and the web chat renders the question as the agent's
+// own message with the single-select options beneath (the UI adds its own
+// "Other" freeform input and Skip affordance — they are not tool params).
+// The tool is options-only: an option-less call gets a graceful error that
+// steers the model to ask open-ended questions in plain message text instead
+// of parking. POST /api/setup-requests/<id>/complete resumes the loop with
+// the user's pick; /cancel (Skip) resumes with a skip fallback instead of
+// failing the task. Unlike connector.request, no approval_reason assistant
+// bubble is persisted — the question lives in the setup block itself.
 // See docs/adr/user-choice-prompt.md.
 async function askUserTool(
   config: RuntimeConfig,
@@ -4203,11 +4539,25 @@ async function askUserTool(
       result: JSON.stringify({ ok: false, error: "ask_user needs a non-empty `question` string." })
     };
   }
-  const rawOptions = args.options;
-  if (!Array.isArray(rawOptions) || rawOptions.length < 2 || rawOptions.length > 6) {
+  // `options` is required: this tool exists only to present a concrete
+  // choice. An option-less call is rejected with a steer back to plain
+  // message text instead of minting an empty choice card — no park, no
+  // SetupRequest. The steer deliberately doesn't promise who replies: in a
+  // chat the user's answer arrives as the next message, but a subagent
+  // child has no user and its final text bubbles up to the parent instead.
+  // Historical option-less rows stay answerable through the existing
+  // /complete and message-answer paths; only new mints are gated here.
+  const rawOptions = args.options ?? [];
+  if (!Array.isArray(rawOptions) || rawOptions.length === 0) {
     return {
       kind: "sync",
-      result: JSON.stringify({ ok: false, error: "ask_user needs `options`: an array of 2-6 entries, each { label, description? }." })
+      result: JSON.stringify({ ok: false, error: "ask_user only presents choices — `options` (2-6 entries of { label, description? }) is required. For an open-ended question, state the question in your message text instead." })
+    };
+  }
+  if (rawOptions.length < 2 || rawOptions.length > 6) {
+    return {
+      kind: "sync",
+      result: JSON.stringify({ ok: false, error: "ask_user `options` must be an array of 2-6 entries, each { label, description? }." })
     };
   }
   const options: Array<{ label: string; description?: string }> = [];
@@ -4240,33 +4590,40 @@ async function askUserTool(
 
   // Surface guard — same rationale as requestConnectorTool. The choice card
   // is React UI rendered only in the web chat; a task running over a
-  // messaging bridge or in a headless job session would park in
-  // waiting_approval with no way to answer. Fail synchronously so the agent
-  // asks the question as a regular message instead.
+  // messaging bridge or in a headless container would park on a question
+  // with no way to answer. Fail synchronously so the agent asks the
+  // question as a regular message instead. Surfaced (non-headless)
+  // containers are allowed even when `origin === "job"`: a scheduled run's
+  // thread is listable in the web chat, so its question parks as a
+  // needs_input the user can answer — only headless containers (a watch
+  // job's invisible working thread) can never stall on user input.
   const surfaceState = readState(config.instance);
   const surfaceTask = findTask(surfaceState, taskId);
   const surfaceSession = surfaceTask.chatSessionId
     ? surfaceState.chatSessions.find((s) => s.id === surfaceTask.chatSessionId)
     : undefined;
   const surfaceKind = surfaceSession?.source?.kind ?? surfaceSession?.outboundMirror?.kind;
-  if (!surfaceSession || surfaceSession.origin === "job" || surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (!surfaceSession || surfaceSession.headless === true || surfaceKind === "telegram" || surfaceKind === "discord") {
     // A subagent child has no chat surface of its own (it runs with no
     // chatSessionId), so the question can't be answered here. Bubble it up:
     // return a STRUCTURED marker the subagent loop carries to its terminal
     // result, and stamp it onto the task so syncSubagentFromTask mirrors it
     // onto the SubagentRecord. The parent's spawn_subagent tool result then
     // surfaces the question, and the parent — which DOES have a topic/chat
-    // session — re-asks via its own ask_user. See ADR
-    // chat-topics-tasks-subagents.md (the "additional input needed" return).
+    // session — re-asks via its own ask_user. The option labels ride along
+    // so the parent can re-ask with the same choices instead of inventing
+    // its own. See ADR chat-topics-tasks-subagents.md (the "additional
+    // input needed" return).
     if (surfaceTask.subagentId) {
+      const optionLabels = options.map((o) => o.label);
       await mutateState(config.instance, (mutable: RuntimeState) => {
         const item = findTask(mutable, taskId);
-        item.needsInput = { question };
+        item.needsInput = { question, options: optionLabels };
         item.updatedAt = now();
       });
       return {
         kind: "sync",
-        result: JSON.stringify({ ok: false, needsInput: true, question })
+        result: JSON.stringify({ ok: false, needsInput: true, question, options: optionLabels })
       };
     }
     return {

@@ -3,7 +3,7 @@
 // assertions hold under any test-runner locale.
 
 import { describe, expect, test } from "bun:test";
-import { formatMessageTimestamp, formatRelativeTime } from "./relative-time";
+import { formatMessageTimestamp, formatRecentTimestamp, formatRelativeTime } from "./relative-time";
 
 describe("formatRelativeTime", () => {
   test("returns empty for unparseable or non-positive inputs", () => {
@@ -30,6 +30,26 @@ describe("formatRelativeTime", () => {
     const ts = Date.now() - 35 * 86_400_000;
     const expected = new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
     expect(formatRelativeTime(new Date(ts).toISOString())).toBe(expected);
+  });
+});
+
+describe("formatRecentTimestamp", () => {
+  test("returns empty for unparseable or non-positive inputs", () => {
+    expect(formatRecentTimestamp("garbage")).toBe("");
+    expect(formatRecentTimestamp(0)).toBe("");
+  });
+
+  test("same-day timestamps render the clock time only", () => {
+    const now = Date.now();
+    const expected = new Date(now).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    expect(formatRecentTimestamp(now)).toBe(expected);
+  });
+
+  test("older timestamps render the short month/day only", () => {
+    const old = new Date();
+    old.setDate(old.getDate() - 2);
+    const expected = old.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    expect(formatRecentTimestamp(old.toISOString())).toBe(expected);
   });
 });
 

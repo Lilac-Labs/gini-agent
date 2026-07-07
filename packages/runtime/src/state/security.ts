@@ -73,14 +73,3 @@ export function assertInsideWorkspaceNoSymlinkEscape(workspaceRoot: string, targ
   return target;
 }
 
-export function hashSecret(value: string): string {
-  const digest = new Bun.CryptoHasher("sha256").update(value).digest("hex");
-  return `sha256:${digest}`;
-}
-
-export function randomPairingCode(): string {
-  return Array.from(crypto.getRandomValues(new Uint8Array(6)))
-    .map((value) => String(value % 10))
-    .join("")
-    .replace(/^(.{3})(.{3})$/, "$1-$2");
-}

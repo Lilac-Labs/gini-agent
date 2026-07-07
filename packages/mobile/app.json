@@ -16,7 +16,6 @@
       "supportsTablet": true,
       "bundleIdentifier": "ai.lilaclabs.gini.mobile",
       "deploymentTarget": "16.4",
-      "associatedDomains": ["applinks:*.gini-relay.lilaclabs.ai"],
       "infoPlist": {
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true
@@ -59,7 +58,7 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Gini uses the camera to scan pairing QR codes and to capture photos for chat.",
+          "cameraPermission": "Gini uses the camera to capture photos for chat.",
           "barcodeScannerEnabled": true,
           "recordAudioAndroid": false
         }

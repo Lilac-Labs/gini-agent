@@ -21,7 +21,16 @@ import {
   submitChatMessage,
   submitThreadReply
 } from "./chat";
+import { settleSubmittedChatMessage } from "./chat-test-support";
 import type { RuntimeConfig, Task } from "../types";
+
+// Submit + settle: the echo-first ack resolves before the routing verdict, so
+// the queue-vs-run outcome these tests pin only exists once the dispatch
+// continuation lands in state.
+async function submitAndSettle(config: RuntimeConfig, sessionId: string, content: string) {
+  const result = await submitChatMessage(config, sessionId, { content });
+  return settleSubmittedChatMessage(config, sessionId, result, content);
+}
 
 function buildConfig(workspaceRoot: string, instance: string): RuntimeConfig {
   return {
@@ -133,7 +142,7 @@ describe("chat message queue", () => {
     stubTurn(config);
     const chat = await createChat(config, { title: "idle" });
 
-    const result = await submitChatMessage(config, chat.id, { content: "hello" });
+    const result = await submitAndSettle(config, chat.id, "hello");
 
     expect("queued" in result).toBe(false);
     if ("queued" in result) throw new Error("unexpected queued result");
@@ -149,7 +158,7 @@ describe("chat message queue", () => {
     await seedInFlightTask(config, chat.id);
     const tasksBefore = readState(config.instance).tasks.length;
 
-    const result = await submitChatMessage(config, chat.id, { content: "queued one" });
+    const result = await submitAndSettle(config, chat.id, "queued one");
 
     expect("queued" in result && result.queued).toBe(true);
     if (!("queued" in result)) throw new Error("expected queued result");
@@ -203,7 +212,7 @@ describe("chat message queue", () => {
       if (s) s.pendingMessages = [{ id: "pending_existing", content: "first", createdAt: new Date().toISOString() }];
     });
 
-    const result = await submitChatMessage(config, chat.id, { content: "second" });
+    const result = await submitAndSettle(config, chat.id, "second");
 
     expect("queued" in result && result.queued).toBe(true);
     const pending = session(config, chat.id)?.pendingMessages ?? [];
@@ -218,8 +227,8 @@ describe("chat message queue", () => {
     const chat = await createChat(config, { title: "dispatch" });
     // Queue two messages behind an in-flight task.
     const inFlight = await seedInFlightTask(config, chat.id);
-    await submitChatMessage(config, chat.id, { content: "alpha" });
-    await submitChatMessage(config, chat.id, { content: "beta" });
+    await submitAndSettle(config, chat.id, "alpha");
+    await submitAndSettle(config, chat.id, "beta");
     expect((session(config, chat.id)?.pendingMessages ?? []).map((p) => p.content)).toEqual([
       "alpha",
       "beta"
@@ -261,7 +270,7 @@ describe("chat message queue", () => {
     // would otherwise start the queued message as a second concurrent turn.
     const paused = await seedInFlightTask(config, chat.id);
     await settleTask(config, paused, "waiting_approval");
-    await submitChatMessage(config, chat.id, { content: "queued during approval" });
+    await submitAndSettle(config, chat.id, "queued during approval");
     expect((session(config, chat.id)?.pendingMessages ?? []).map((p) => p.content)).toEqual([
       "queued during approval"
     ]);
@@ -370,7 +379,7 @@ describe("chat message queue", () => {
     stubTurn(config);
     const chat = await createChat(config, { title: "main-drain" });
     const inFlight = await seedInFlightTask(config, chat.id);
-    await submitChatMessage(config, chat.id, { content: "plain main message" });
+    await submitAndSettle(config, chat.id, "plain main message");
     expect((session(config, chat.id)?.pendingMessages ?? [])[0]?.threadId).toBeUndefined();
     const tasksBefore = readState(config.instance).tasks.length;
     await settleTask(config, inFlight, "completed");
@@ -393,8 +402,8 @@ describe("chat message queue", () => {
     const config = buildConfig(workspaceRoot, "queue-remove");
     const chat = await createChat(config, { title: "remove" });
     await seedInFlightTask(config, chat.id);
-    const first = await submitChatMessage(config, chat.id, { content: "keep me" });
-    const second = await submitChatMessage(config, chat.id, { content: "remove me" });
+    const first = await submitAndSettle(config, chat.id, "keep me");
+    const second = await submitAndSettle(config, chat.id, "remove me");
     if (!("queued" in first) || !("queued" in second)) throw new Error("expected queued results");
 
     const removed = await removePendingChatMessageById(config, chat.id, second.pendingId);
@@ -415,13 +424,13 @@ describe("chat message queue", () => {
     const chat = await createChat(config, { title: "e2e" });
 
     // First message runs immediately.
-    const first = await submitChatMessage(config, chat.id, { content: "first turn" });
+    const first = await submitAndSettle(config, chat.id, "first turn");
     if ("queued" in first) throw new Error("first submit should run now");
 
     // Second posted while the first turn is in flight enqueues. The submitTask
     // .finally chokepoint drains it once the first turn settles, so poll for
     // the second user message to appear.
-    const second = await submitChatMessage(config, chat.id, { content: "second turn" });
+    const second = await submitAndSettle(config, chat.id, "second turn");
 
     if ("queued" in second) {
       // Auto-dispatch fires on the first turn's terminal transition; wait for

@@ -9,7 +9,8 @@ import type { Task, TaskStatus } from "@runtime/types";
 export const LIVE_STATUSES: ReadonlySet<TaskStatus> = new Set([
   "queued",
   "running",
-  "waiting_approval"
+  "waiting_approval",
+  "needs_input"
 ]);
 
 export function isLive(status: TaskStatus): boolean {

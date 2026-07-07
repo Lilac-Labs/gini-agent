@@ -50,7 +50,15 @@ const RECENT_ASSISTANT_PREVIEW_CHARS = 160;
 export async function routeChatMessage(
   config: RuntimeConfig,
   chatSessionId: string,
-  content: string
+  content: string,
+  options?: {
+    // Block id of the message being routed itself (inserted as an echo before
+    // routing under the echo-first ack). Excluded from the recent-conversation
+    // section so the classifier doesn't see the message twice — once as the
+    // final "User:" line and once as "Message:" — which would skew the
+    // continuation signal.
+    excludeBlockId?: string;
+  }
 ): Promise<RouteDecision> {
   const state = readState(config.instance);
   const chatSession = state.chatSessions.find((item) => item.id === chatSessionId);
@@ -61,7 +69,11 @@ export async function routeChatMessage(
     (session) =>
       session.agentId === agentId &&
       session.kind === "topic" &&
-      !session.archivedAt
+      !session.archivedAt &&
+      // Headless containers (a watch job's invisible working thread) stay out
+      // of ALL chrome, including the router's candidate list — a user message
+      // must never be dispatched into one. See ADR task-containers-and-runs.md.
+      !session.headless
   );
   const candidates = await selectCandidates(config, content, topics);
   // The Chat's recent transcript is the key follow-up signal: a question about
@@ -69,7 +81,7 @@ export async function routeChatMessage(
   // one. Best-effort — a block-read failure leaves the section empty.
   let recentConversation = "";
   try {
-    recentConversation = buildRecentConversation(config, chatSessionId);
+    recentConversation = buildRecentConversation(config, chatSessionId, options?.excludeBlockId);
   } catch {
     recentConversation = "";
   }
@@ -179,10 +191,14 @@ export function buildUserPrompt(
 // router sees the conversational thread a follow-up continues — and which topic
 // was most recently discussed. A forwarded answer (a Topic result mirrored into
 // Chat) is labeled with its topic so the model can tie the follow-up back to it.
-export function buildRecentConversation(config: RuntimeConfig, chatSessionId: string): string {
+export function buildRecentConversation(
+  config: RuntimeConfig,
+  chatSessionId: string,
+  excludeBlockId?: string
+): string {
   const blocks = listChatBlocks(config.instance, chatSessionId)
     .filter((b): b is UserTextBlock | AssistantTextBlock =>
-      b.kind === "user_text" || b.kind === "assistant_text"
+      (b.kind === "user_text" || b.kind === "assistant_text") && b.id !== excludeBlockId
     )
     .slice(-RECENT_CONTEXT_BLOCKS);
   return blocks.map(transcriptLine).join("\n");

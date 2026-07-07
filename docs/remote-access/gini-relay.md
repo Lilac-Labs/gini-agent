@@ -18,15 +18,15 @@ https://<subdomain>.gini-relay.lilaclabs.ai
 
 The subdomain is keyed to this device, so reconnects and gateway restarts keep the **same URL**. A persisted `connected` tunnel is resumed automatically on boot.
 
-## Trust and pairing
+## Trust
 
-Relay subdomains are trusted by the gateway automatically — no configuration. The first browser to visit the URL is redirected to `/pair` and must be approved once (from the operator's tunnel popover, or any already-paired session). Paired sessions are owner-equivalent; pair only devices you fully trust.
+Relay subdomains are trusted by the gateway automatically — no configuration. A trusted front is **owner-equivalent**: any browser reaching the URL gets the same access as loopback, with no per-device pairing gate (see ADR [owner-token-auth.md](../adr/owner-token-auth.md)). Share the URL only with devices you fully trust, or use the hosted edge for multi-user access.
 
 ## Confirm it's live
 
 - The sidebar pill reads `Live / gini-relay` with a green dot.
 - `gini tunnel` shows `status: "connected"` plus the `url`.
-- A page request to the URL answers `302 → /pair` until the device is paired, then serves the app.
+- A page request to the URL serves the app.
 
 ## Privacy
 

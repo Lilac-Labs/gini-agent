@@ -232,6 +232,25 @@ export function renderEphemeralContext(emittedIdentity?: string, recalledContext
   return parts.join("\n\n");
 }
 
+// Container-aware handoff framing for runs inside a surfaced task container
+// (session kind "topic"/"channel", non-headless, non-subagent). Generic
+// "prefer ask_user" instructions lose to chat-conversational habits because
+// they read as style advice; the load-bearing signal is CONTEXTUAL — in a
+// handed-off task container the user is watching home rows, not the thread,
+// so a prose question reaches them only as the finished run's outcome line.
+// The push toward ask_user carries an explicit carve-out for user-authored
+// content (mirroring the tool description and INSTRUCTIONS.md): ask_user is
+// options-only, and inventing options for substance only the user can author
+// would misrepresent them. Injected per-container by the chat-task prompt
+// assembly (INSTRUCTIONS.md cannot be conditional on container kind); the
+// root agent Chat (the user IS in the thread) and headless channels (no user
+// surface; ask_user is excluded there) never carry it. Constant bytes keep
+// the per-session system prefix stable.
+export const TASK_CONTAINER_HANDOFF_BLOCK =
+  "This run executes a task the user handed off; they are not watching this thread. " +
+  "If you need their input, call the ask_user tool with your best concrete options (its UI adds a free-text Other) — it parks the task as needs-input on their home screen, while a question asked in prose just ends the run, reaching them only as the finished task's outcome line. " +
+  "Exception: when only the user can author the substance (their words, their voice, a decision between alternatives you cannot name), do NOT invent options — offer genuine direction options if any exist; otherwise end the run with the question as your final text so it becomes that outcome line.";
+
 // Date-only line for the byte-stable system prefix (message 0). DATE
 // granularity — not a timestamp — is the load-bearing choice: it keeps
 // message 0 byte-identical across every turn within a local calendar day,

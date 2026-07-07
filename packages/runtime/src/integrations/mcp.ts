@@ -4,6 +4,7 @@ import { spawn } from "bun";
 import { bindingsForCredentials, envBindingsForProviders, resolveConnectorSecret } from "./connectors";
 import { listProviders } from "./connectors/registry";
 import { httpMcpCallTool, httpMcpInitialize, httpMcpListTools, resolveHeaderValue } from "./mcp-http";
+import { captureMcpToolCall } from "./posthog";
 
 export async function addMcpServer(config: RuntimeConfig, input: Record<string, unknown>) {
   const name = String(input.name ?? "");
@@ -97,6 +98,7 @@ export async function invokeMcpTool(
   if (server.status !== "configured") throw new Error(`MCP server is not configured: ${idOrName}`);
   if (server.exposedTools.length > 0 && !server.exposedTools.includes(toolName)) throw new Error(`MCP tool is not exposed: ${toolName}`);
   let result: { ok: boolean; message?: string; stdout?: string; stderr?: string; exitCode?: number };
+  const startedMs = performance.now();
   if (server.transport === "http") {
     if (!server.url) throw new Error(`MCP server has no url: ${idOrName}`);
     const headers = await resolveMcpHeaders(config, server, options.taskId);
@@ -114,6 +116,21 @@ export async function invokeMcpTool(
     // is intentionally out of scope for this PR.
     result = await runMcpProbe(config, server.command, [...server.args, JSON.stringify(input)]);
   }
+  // Masked MCP analytics. Only safe metadata and coarse size/count numbers are
+  // passed in — the chat-derived `input` and `result.stdout` are reduced to a
+  // parameter count and a byte length here so no chat content ever reaches the
+  // analytics module. Best-effort and non-throwing. See ADR posthog-mcp-analytics.md.
+  captureMcpToolCall({
+    instance: config.instance,
+    serverName: server.name,
+    transport: server.transport ?? "stdio",
+    toolName,
+    ok: result.ok,
+    durationMs: Math.round(performance.now() - startedMs),
+    parameterCount: Object.keys(input).length,
+    responseBytes: result.stdout ? result.stdout.length : 0,
+    taskId: options.taskId
+  });
   await mutateState(config.instance, (state) => {
     const ctx = options.taskId ? { taskId: options.taskId } : { system: true as const };
     addAudit(

@@ -3,6 +3,7 @@
 - **Status:** Accepted (2026-06-26; shipped across 10 commits on the implementing branch)
 - **Date:** 2026-06-25
 - **Supersedes / reverses:** [One Chat Per Agent, Threads, And Job Channels](./agent-chat-threads-and-channels.md) (threads-as-tags and one-canonical-chat are reversed)
+- **Superseded in part by:** [Task Containers And Runs](./task-containers-and-runs.md) — the container side of the hierarchy is unified into one task-container primitive (topic = a container the user pinned), and the Task tier's "needs-input as a structured return value" became the persisted `needs_input` status with `spawn_task` child containers for user-facing delegation. The routing, forwarding, and per-topic context-isolation decisions here still stand.
 - **Updates:** [Bounded Chat Context Window](./chat-context-window.md) (per-session soft thread-priority packing becomes per-topic hard isolation)
 - **See also:** [ChatBlock Protocol](./chat-block-protocol.md), [Agent Loop With Native Tool Calling](./agent-loop-tool-calling.md), [Per-Agent Memory Isolation](./agent-memory-isolation.md)
 
@@ -115,6 +116,12 @@ unchanged.
 
 ### Task / Subagent
 
+> **Superseded** (2026-07-03) by ADR task-containers-and-runs.md: `needs_input` is now
+> a persisted `TaskStatus` (a reclassification of the `ask_user` park, not a new record
+> layer), and agent-created user-facing work is a **child task container** minted via
+> `spawn_task` — "subagent" now refers only to invisible in-run helpers. The
+> no-new-record-layer reasoning below is preserved as context.
+
 - **The Task tier is the existing parent-`Task` + `spawnSubagent` edge** — a Topic turn *is*
   the Task; `spawnSubagent` produces a constrained child Task. No new `TaskRecord` table and
   no new persisted `TaskStatus`/`SubagentStatus` member is added (either would fork
@@ -166,6 +173,14 @@ already-streamed blocks). A structured classifier is used instead of agent contr
 because the decision must precede context loading and a forced structured output is more
 reliable than hoping the agent calls a tool. The new-vs-existing-vs-inline bias lives in
 the router's own prompt, not in hard-coded heuristics.
+
+"At intake" bounds the verdict against the *turn* (no run/task/context exists until it
+lands), not against the POST: the router is a model call, so making the HTTP ack wait on
+it put ~1s+ of dead air on every message a user sends. The submit path acknowledges and
+renders the message first, then obtains the verdict off the request path (see ADR
+chat-message-queue.md, "Echo-first instant ack"). The router's classifier prompt excludes
+the just-inserted echo block from its recent-conversation section so routing sees the same
+inputs it saw when it ran pre-ack.
 
 ## Jobs → Topics
 
@@ -275,6 +290,8 @@ layer that must preserve the `subagentDepth` chain.
   value** (a subagent's `ask_user` wall bubbles to its parent, which re-asks via the existing
   `ask_user`→forward path), plus optional `goal`/`context` framing fields and forwarding a Topic
   turn's pending gate cards into Chat. No new persisted `TaskStatus`/`SubagentStatus` members.
+  *(Superseded: `needs_input` is now a persisted `TaskStatus` and `spawn_task` mints child task
+  containers — see ADR task-containers-and-runs.md. The helper bubble-up path itself is unchanged.)*
 - **Mobile native-only behavior** (a real push-notification tap, RN touch/gesture on the new Topic
   rows + forwarded chip) is covered by unit tests + typecheck but not yet exercised on a simulator.
 

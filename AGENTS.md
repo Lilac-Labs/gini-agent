@@ -86,9 +86,11 @@ After a UI-related change or new feature, verify it end-to-end by driving the re
 
 Don't stop at typecheck — "it compiles" and "the screen loaded" are not "it works." Native RN behavior in particular often differs from RN Web (e.g. `selectable` on `<Text>` is a no-op on web because browser text is selectable by default), so a web-only check can pass while the native build is still broken.
 
-**A gateway that isn't running is not a blocker — start it yourself.** Never report "I couldn't test end-to-end because the gateway/dev server was down." Bring it up with the Tmux pattern below (`tmux new-session -d -A -s gini-<instance> "bun run gini run --instance <instance>"`), confirm it's listening with `bun run gini status --instance <instance>`, then drive the change through the real surface. It boots in seconds.
+**A gateway that isn't running is not a blocker — start it yourself.** Never report "I couldn't test end-to-end because the gateway/dev server was down." Bring it up with the check-then-create Tmux pattern below (`tmux has-session -t gini-<instance> 2>/dev/null || tmux new-session -d -s gini-<instance> "bun run gini run --instance <instance>"`), confirm it's listening with `bun run gini status --instance <instance>`, then drive the change through the real surface. It boots in seconds.
 
-**Always test on the worktree's own instance — the same one the user sees in Conductor.** That instance is the worktree root's basename, which is exactly Conductor's `gini-<instance>` tmux session and the `--instance` value its Run script passes. Use it — never `default`, never an invented throwaway. Always drive the runtime with `bun run gini …` from the worktree root so you exercise *this* checkout's code, and pass `--instance "$instance"` explicitly. Never use the bare `gini` on `PATH`: its installer wrapper does `cd ~/.gini/runtime` and `export GINI_INSTANCE=default`, so it silently runs the *installed* copy against the `default` instance — testing neither your code nor your instance, even when the command looks correct. Resolution precedence is `--instance` flag > `GINI_INSTANCE` env > worktree basename.
+**The tmux session is the *only* sanctioned way to start the runtime — so the user always has a single visible process they can watch and kill.** Never launch the long-lived `gini run` any other way: not backgrounded from a shell (`bun run gini run … &`, or the Bash tool's `run_in_background`), not via `gini start` (daemon/launchd) mode, and never under a session name other than `gini-<instance>`. Each of those detaches the runtime from the session the user sees, so when they later click Run in Conductor `tmux new-session -A` finds no matching session, starts a *second* runtime, and closing that one leaves yours running invisibly. One instance ⇒ one `gini-<instance>` tmux session, no exceptions.
+
+**Always test on the worktree's own instance — the same one the user sees in Conductor.** That instance is the workspace slug — reliably the trailing segment of the current git branch (`basename "$(git rev-parse --abbrev-ref HEAD)"`), which Conductor also uses to name the `gini-<instance>` tmux session and the `--instance` its Run script passes. Prefer the branch slug over the directory basename: a Conductor workspace rename leaves the *old* directory beside the new one, so one worktree becomes reachable by two paths and a raw `basename "$PWD"` can resolve to a stale, wrong instance — spawning a second, invisible runtime (see the Tmux section). Use it — never `default`, never an invented throwaway. Always run `bun run gini …` commands from the worktree root so you exercise *this* checkout's code, and pass `--instance "$instance"` explicitly (the long-lived `gini run` server itself is started *only* through the tmux session — see the rule above — while every *other* `gini` subcommand you run directly). Never use the bare `gini` on `PATH`: its installer wrapper does `cd ~/.gini/runtime` and `export GINI_INSTANCE=default`, so it silently runs the *installed* copy against the `default` instance — testing neither your code nor your instance, even when the command looks correct. Resolution precedence is `--instance` flag > `GINI_INSTANCE` env > worktree basename.
 
 For runtime / agent changes (tools, dispatch, providers, memory, skills), "the affected surface" is a **real chat turn**, not a unit test — and you verify it the way the user does: **open the running web app in a browser (`agent-browser`), start a fresh chat, type the bare message into the composer**, wait for the turn to finish (`--load networkidle`), and judge from what actually **renders** that the agent picked the right tool and produced the right result. The CLI path (`bun run gini chat new`/`chat send`, which post to `/api/chat/<id>/messages`) and reading the task's `recentToolCalls` or `/api/chat/<id>/blocks` are only a **fallback for genuinely headless contexts and a supplement for confirming which tool fired — never a substitute for the browser turn**: rendering (chips, narration folding, draft cards, tool-group collapsing) lives client-side and never appears in the API payload, so an API-only check can pass while the user-visible result is broken. Unit tests verify the mechanism; the chat turn verifies the model actually reaches for it. Test against the worktree's own instance, never `default`.
 
@@ -120,6 +122,10 @@ tail -n 200 ~/.gini/instances/$INSTANCE/logs/runtime.jsonl
 `bun run gini run` is launched inside a tmux session named `gini-<instance>`
 so the user can watch the live process and the agent
 can restart it without disturbing what the user sees in their terminal.
+**This tmux session is the only place the runtime may be started** (see the rule
+under Verification above): never background `gini run` in a shell, never use
+`gini start` daemon mode, and never pick a different session name — otherwise the
+runtime outlives the user's view of it and becomes an orphan they can't see or kill.
 
 ```bash
 SESSION=gini-$(basename "$(pwd)")
@@ -128,18 +134,34 @@ tmux send-keys -t $SESSION C-c              # stop the running app (gini run wil
 tmux send-keys -t $SESSION "bun run gini run --instance $(basename "$(pwd)")" Enter   # restart
 ```
 
-If `tmux has-session -t gini-<instance>` returns non-zero, the run script
-isn't up yet. Start it yourself with the same pattern Conductor uses —
-`tmux new-session -A` attaches to an existing session or creates a new one,
-so it's safe to call unconditionally:
+If `tmux has-session -t gini-<instance>` returns non-zero, the runtime isn't up
+yet — start it yourself. Resolve `<instance>` to the **branch slug** (see *Always
+test on the worktree's own instance* above — not the raw directory basename, which
+a Conductor rename can make stale), then **check-then-create**, the only
+headless-safe form:
 
 ```bash
-instance=$(basename "$(pwd)")
-tmux new-session -d -A -s "gini-$instance" "bun run gini run --instance $instance"
+instance=$(basename "$(git rev-parse --abbrev-ref HEAD)"); session="gini-$instance"
+tmux has-session -t "$session" 2>/dev/null || tmux new-session -d -s "$session" "bun run gini run --instance $instance"
 ```
 
-(Conductor's workspace `conductor.json` run script uses the same flag, so
-this matches what the user sees when they click Run.)
+Do NOT use `tmux new-session -A` from an agent shell. When the session already
+exists, `-A` takes the *attach* path (even with `-d`), which needs a tty — so in
+a non-interactive agent shell it fails with `open terminal failed: not a terminal`
+(exit 1). It spawns no duplicate, but an agent can misread the failure and fall
+back to backgrounding `gini run`, producing the invisible orphan this doc forbids.
+The guarded form above never attaches: it creates the session detached when
+missing and is a clean no-op (exit 0) when it already exists. Conductor's `run`
+script *does* use `-A` (no `-d`) on purpose — it runs in the user's interactive
+terminal and *wants* to attach. For Run to land on the agent's session, both must
+resolve the **same instance name** — which is why the block above uses the branch
+slug, not `basename "$PWD"`. A Conductor workspace *rename* leaves the old directory
+(`.../singapore-v1`) beside the new one (`.../orphaned-instance-cleanup`), so the
+*same* worktree is reachable by two paths; a raw `basename` would make the agent
+start `singapore-v1` while Run starts `orphaned-instance-cleanup` — two live
+instances. The branch slug tracks the workspace across renames, so both sides
+converge. Before starting anything, confirm nothing is already up under the real
+name (`pgrep -af 'gini run --instance'`, or `bun run gini status --instance "$instance"`).
 
 Prefer reading the log files above for historical output; use
 `capture-pane` only when you need exactly what's on screen right now.

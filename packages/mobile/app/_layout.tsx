@@ -23,8 +23,6 @@ import { View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { mirrorCachedCredentialsToSharedContainer, primeCredentials, useAuth } from "@/src/auth";
-import { primeClientId } from "@/src/client-id";
-import { primePendingPair } from "@/src/pending-pair";
 import { LinkContextMenuHost } from "@/src/components/chat/linkContextMenu";
 import { FilePreviewProvider } from "@/src/components/FilePreview";
 import { ImagePreviewProvider } from "@/src/components/ImagePreview";
@@ -74,15 +72,6 @@ export default function RootLayout() {
     // registerForPushAsync.
     (async () => {
       await primeCredentials();
-      // Mint-or-rehydrate the stable per-install client id before any pairing
-      // request can fire, so the X-Gini-Client-ID header is in place and device
-      // identity keys on it (two phones on one relay subdomain don't evict each
-      // other on re-pair).
-      await primeClientId();
-      // Warm the pending-pair breadcrumb before the first render so the auth
-      // gate (app/index.tsx) can synchronously resume an interrupted pairing
-      // instead of bouncing to /setup on a cold relaunch.
-      await primePendingPair();
       await primeDeviceTokenFromStorage();
       // Device token is primed now, so mirror the rehydrated credentials
       // (with that token folded in) into the App Group container — an

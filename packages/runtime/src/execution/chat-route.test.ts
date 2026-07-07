@@ -27,7 +27,16 @@ import {
 import { createChatSession, createTopic, insertChatBlock, listChatBlocks, mutateState, readState } from "../state";
 import type { ChatSessionRecord, RuntimeConfig, Task } from "../types";
 import { submitChatMessage } from "./chat";
+import { settleSubmittedChatMessage } from "./chat-test-support";
 import { buildRecentConversation, buildUserPrompt, selectCandidates } from "./chat-route";
+
+// Submit + settle: the echo-first ack resolves before the routing verdict, so
+// the routing outcome these tests pin (chat-direct vs topic dispatch) only
+// exists once the dispatch continuation lands in state.
+async function submitAndSettle(config: RuntimeConfig, sessionId: string, content: string) {
+  const result = await submitChatMessage(config, sessionId, { content });
+  return settleSubmittedChatMessage(config, sessionId, result, content);
+}
 
 let scratchHome: string;
 let prevHome: string | undefined;
@@ -118,7 +127,7 @@ describe("chat intake router", () => {
     setEchoStructuredResponse("chat-route", { decision: "chat" });
     setEchoToolCallingResponse({ provider, text: "It's 72 degrees.", toolCalls: [], finishReason: "stop" });
 
-    const result = await submitChatMessage(config, chatId, { content: "what's the weather?" });
+    const result = await submitAndSettle(config, chatId, "what's the weather?");
     if ("queued" in result) throw new Error("expected run-now submission, got queued");
     if ("topicId" in result) throw new Error("expected chat-direct submission, got topic dispatch");
     const finished = await waitForTerminal(config, result.taskId);
@@ -160,9 +169,7 @@ describe("chat intake router", () => {
       finishReason: "stop"
     });
 
-    const result = await submitChatMessage(config, chatId, {
-      content: "my dad and I want to fly to SF for a world cup game"
-    });
+    const result = await submitAndSettle(config, chatId, "my dad and I want to fly to SF for a world cup game");
     if ("queued" in result) throw new Error("expected run-now dispatch, got queued");
     if (!("topicId" in result)) throw new Error("expected a topic dispatch result");
     const finished = await waitForTerminal(config, result.taskId);
@@ -181,6 +188,12 @@ describe("chat intake router", () => {
     // The new topic's routing/retrieval descriptor is seeded with the
     // originating user message so a later follow-up can match it by content.
     expect(topic.topicSummary).toBe("my dad and I want to fly to SF for a world cup game");
+    // Router-minted containers are UNPINNED (pinned serializes as false on
+    // every topic mint) — pinning is a user gesture, so the container
+    // surfaces on home, not in the sidebar, until the user pins it. And
+    // nothing the router mints is ever headless.
+    expect(topic.pinned).toBe(false);
+    expect(topic.headless).toBeUndefined();
 
     // The turn ran in the Topic (replay-authoritative records live there).
     const topicAnswers = state.chatMessages.filter(
@@ -229,7 +242,7 @@ describe("chat intake router", () => {
       finishReason: "stop"
     });
 
-    const result = await submitChatMessage(config, chatId, { content: "book the game tickets" });
+    const result = await submitAndSettle(config, chatId, "book the game tickets");
     if ("queued" in result) throw new Error("expected run-now dispatch, got queued");
     if (!("topicId" in result)) throw new Error("expected a topic dispatch result");
     expect(result.topicId).toBe(topicId);
@@ -273,7 +286,7 @@ describe("chat intake router", () => {
     setEchoStructuredResponse("chat-route", { decision: "existing_topic", topicId: "nonexistent" });
     setEchoToolCallingResponse({ provider, text: "Sure thing.", toolCalls: [], finishReason: "stop" });
 
-    const result = await submitChatMessage(config, chatId, { content: "do the thing" });
+    const result = await submitAndSettle(config, chatId, "do the thing");
     if ("queued" in result) throw new Error("expected run-now submission, got queued");
     // The bad topicId must NOT dispatch to a topic — it downgrades to chat-direct.
     if ("topicId" in result) throw new Error("expected chat-direct downgrade, got topic dispatch");
@@ -296,6 +309,41 @@ describe("chat intake router", () => {
     rmSync(workspaceRoot, { recursive: true, force: true });
   });
 
+  test("headless containers are excluded from router candidates", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "gini-chat-route-ws-"));
+    const config = buildConfig(workspaceRoot, `chat-route-headless-${basename(workspaceRoot)}`);
+    const provider = normalizeProvider(config.provider);
+
+    const { chatId, headlessId } = await mutateState(config.instance, (state) => {
+      const chat = createChatSession(state, "Messages", undefined, undefined, undefined, "agent");
+      const headless = createTopic(state, {
+        agentId: chat.agentId,
+        title: "Email watch worker",
+        parentChatSessionId: chat.id,
+        headless: true
+      });
+      return { chatId: chat.id, headlessId: headless.id };
+    });
+
+    // The model picks the headless container — but it was never a candidate,
+    // so the decision downgrades to chat-direct instead of dispatching a user
+    // message into an invisible working thread.
+    setEchoStructuredResponse("chat-route", { decision: "existing_topic", topicId: headlessId });
+    setEchoToolCallingResponse({ provider, text: "Answered in chat.", toolCalls: [], finishReason: "stop" });
+
+    const result = await submitAndSettle(config, chatId, "anything new?");
+    if ("queued" in result) throw new Error("expected run-now submission, got queued");
+    if ("topicId" in result) throw new Error("expected chat-direct downgrade, got topic dispatch");
+    const finished = await waitForTerminal(config, result.taskId);
+    expect(finished.status).toBe("completed");
+
+    // Nothing ran in the headless container.
+    const state = readState(config.instance);
+    expect(state.tasks.some((t) => t.chatSessionId === headlessId)).toBe(false);
+
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  });
+
   test("hardening: new_topic with an empty title gets a content-derived stub", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "gini-chat-route-ws-"));
     const config = buildConfig(workspaceRoot, `chat-route-empty-title-${basename(workspaceRoot)}`);
@@ -309,9 +357,7 @@ describe("chat intake router", () => {
     setEchoStructuredResponse("chat-route", { decision: "new_topic", title: "" });
     setEchoToolCallingResponse({ provider, text: "On it.", toolCalls: [], finishReason: "stop" });
 
-    const result = await submitChatMessage(config, chatId, {
-      content: "plan a birthday party for my sister"
-    });
+    const result = await submitAndSettle(config, chatId, "plan a birthday party for my sister");
     if ("queued" in result) throw new Error("expected run-now dispatch, got queued");
     if (!("topicId" in result)) throw new Error("expected a topic dispatch result");
     await waitForTerminal(config, result.taskId);
@@ -344,7 +390,7 @@ describe("chat intake router", () => {
     setEchoStructuredResponse("chat-route", { decision: "new_topic", title: "Should Not Apply" });
     setEchoToolCallingResponse({ provider, text: "Done in place.", toolCalls: [], finishReason: "stop" });
 
-    const result = await submitChatMessage(config, topicId, { content: "continue here" });
+    const result = await submitAndSettle(config, topicId, "continue here");
     if ("queued" in result) throw new Error("expected run-now submission, got queued");
     const finished = await waitForTerminal(config, result.taskId);
     expect(finished.status).toBe("completed");
@@ -382,7 +428,7 @@ describe("chat intake router", () => {
     setEchoToolCallingResponse({ provider, text: "On it.", toolCalls: [], finishReason: "stop" });
 
     const longContent = "x".repeat(300);
-    const result = await submitChatMessage(config, chatId, { content: longContent });
+    const result = await submitAndSettle(config, chatId, longContent);
     if ("queued" in result) throw new Error("expected run-now dispatch, got queued");
     if (!("topicId" in result)) throw new Error("expected a topic dispatch result");
     await waitForTerminal(config, result.taskId);

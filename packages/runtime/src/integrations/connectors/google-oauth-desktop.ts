@@ -1,40 +1,36 @@
 import type { ProviderModule } from "./types";
 import { readGoogleAccounts } from "../../state/google-accounts";
 
-// Google OAuth Desktop client provider. The user creates a Desktop OAuth
-// app in their own Google Cloud project (Cloud Console → Credentials →
-// OAuth client ID → Desktop app) and pastes the resulting Client ID +
-// Client Secret into the Add Connector / Connect dialog. The runtime
-// binds the two values into the `gws` CLI's expected env vars so the
-// downstream `gws auth login` flow can run without a `client_secret.json`
-// file on disk.
+// Google Workspace OAuth credential provider (hosted). In the hosted product
+// every guest ships with its Google Workspace credential already in place: the
+// host bakes the OAuth client + tokens into the guest at provisioning time and
+// registers the primary Google account when the guest boots. The Workspace API
+// skills therefore find a satisfied credential from the first turn — there is no
+// local desktop install, no `gcloud`, no OAuth-loopback grant, and no in-product
+// setup flow for the user to run.
 //
-// No probe — there is no remote endpoint that can validate an OAuth
-// client's id/secret pair without running the full OAuth code grant
-// flow (which requires a user interaction). The next step in the setup
-// skill (`gws auth login`) is the real validation: if the credentials
-// are wrong, the CLI fails with a clear error from Google's OAuth
-// server. Health falls back to the configured-status check via
-// `checkConnector`'s presence-only branch (see
-// src/integrations/connectors/index.ts around the probe dispatch).
+// This module still exists as the canonical handle for the workspace
+// credential: its `credentialName` is the name the Workspace skills declare, and
+// `credentialExternallySatisfied` is the gate that flips those skills ACTIVE
+// once the boot-registered account is present. The `fields`/`secrets`/env
+// bindings describe the shape of the OAuth client id/secret pair so the gws CLI
+// env can be populated on the paths that need it; they are baked by the host
+// rather than collected through a Connect dialog.
 export const googleOauthDesktopProvider: ProviderModule = {
   id: "google-oauth-desktop",
-  label: "Google OAuth Desktop client",
+  label: "Google Workspace OAuth",
   description:
-    "Client ID and secret for a Desktop OAuth app in your Google Cloud project. Used by gws for Workspace API authentication.",
-  // Help page surfaced as a "how to obtain these" link under the Connect /
-  // manual-entry forms — covers creating the Desktop OAuth client in Cloud
-  // Console (Step 5) and the common pitfalls (Desktop vs Web app, no card
-  // needed). Rendered inline as a doc slide-over via DocReference.
+    "OAuth client for Google Workspace API access. Provisioned into the hosted guest; used by gws for Workspace API authentication.",
+  // Help page surfaced as a "how these credentials work" reference under the
+  // connector detail view. Rendered inline as a doc slide-over via DocReference.
   docsUrl: "https://gini.lilaclabs.ai/docs/connectors/google-services/set-up",
   fields: [
     {
-      // Marked secret so the request_connector dialog routes it into
-      // `secrets` (→ a secretRef under purpose "client_id") rather than
-      // dropping it as a non-secret metadata field. The OAuth client id is a
-      // credential component the runtime resolves into the gws CLI env, so it
-      // must survive the dialog→/complete seam alongside client_secret. It is
-      // stored encrypted like every other secret.
+      // Marked secret so the credential id/secret pair is stored encrypted like
+      // every other secret. The OAuth client id is a credential component the
+      // runtime resolves into the gws CLI env, so it is kept in `secrets` (→ a
+      // secretRef under purpose "client_id") rather than as a non-secret
+      // metadata field.
       name: "client_id",
       label: "Client ID",
       description: "Looks like 1234567890-abcdef.apps.googleusercontent.com",
@@ -58,29 +54,19 @@ export const googleOauthDesktopProvider: ProviderModule = {
       GOOGLE_WORKSPACE_CLI_CLIENT_SECRET: "client_secret"
     }
   },
-  // Canonical credential handle skills + the migration reference by name. NOT
-  // the module id ("google-oauth-desktop"): the LOCKED name is the workspace
-  // handle so a fresh UI-created credential, the request /complete path, and
-  // the migration output all agree (surfaced through canonicalCredentialName
-  // in connectors/registry.ts).
+  // Canonical credential handle the Workspace skills reference by name. NOT the
+  // module id ("google-oauth-desktop"): the LOCKED name is the workspace handle
+  // so the skills, the credential resolver, and the connector registry all agree
+  // (surfaced through canonicalCredentialName in connectors/registry.ts).
   credentialName: "google-workspace-oauth",
-  // A registered machine-global Google account (ADR google-multi-account.md)
-  // satisfies the workspace credential without any connector record. For the
-  // read/operate Workspace skills each account's config dir carries its own
-  // OAuth client + tokens, so the gws CLI needs no client env vars on that
-  // path — which is why `bindingsForCredentials` is untouched. The exception
-  // is google-account-login's fresh-login flow, which mints a NEW config dir
-  // and still needs this connector's GOOGLE_WORKSPACE_CLI_CLIENT_ID/_SECRET
-  // bindings. Presence-only by design: sign-in expiry is handled by the
-  // skill recipes at run time (`gws auth status` / re-login guidance), not
-  // by this gate.
-  credentialExternallySatisfied: () => readGoogleAccounts().length > 0,
-  // The setup flow is non-trivial — install gws, install gcloud, gcloud
-  // auth login, project provisioning, APIs enable, THEN capture the
-  // OAuth client credentials. The `google-workspace-setup` skill owns
-  // the full walkthrough and calls `request_connector` at the end. The
-  // runtime advertises this skill in the "skills that need connection"
-  // system-prompt block so the model invokes the setup skill instead of
-  // dropping a bare Connect form on the user.
-  setupSkill: "google-workspace-setup"
+  // The boot-registered Google account (ADR google-multi-account.md) satisfies
+  // the workspace credential without any connector record. In hosted this
+  // account is always present: the host registers the guest's primary Google
+  // account at boot, so `readGoogleAccounts()` is non-empty from the first turn
+  // and the Workspace API skills stay ACTIVE. Each account's config dir carries
+  // its own OAuth client + tokens, so the gws CLI needs no client env vars on
+  // that path — which is why `bindingsForCredentials` is untouched. Presence-only
+  // by design: sign-in expiry is handled by the skill recipes at run time (`gws
+  // auth status`), not by this gate.
+  credentialExternallySatisfied: () => readGoogleAccounts().length > 0
 };

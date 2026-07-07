@@ -126,14 +126,6 @@ export default function SetupScreen() {
             )}
           </TouchableOpacity>
 
-          <TouchableOpacity
-            disabled={busy}
-            onPress={() => router.push("/pair")}
-            style={styles.pairLink}
-          >
-            <Text style={styles.pairLinkText}>Have a Gini link? Pair this device instead</Text>
-          </TouchableOpacity>
-
           <Text style={styles.footnote}>
             On a real device, replace localhost with the runtime host's LAN
             IP (e.g. http://192.168.1.42:7421). The simulator/emulator can
@@ -206,16 +198,6 @@ const styles = StyleSheet.create({
     color: theme.buttonText,
     fontFamily: family("HankenGrotesk", 600),
     fontSize: 16
-  },
-  pairLink: {
-    marginTop: 14,
-    alignItems: "center",
-    justifyContent: "center"
-  },
-  pairLinkText: {
-    color: theme.accent,
-    fontFamily: family("HankenGrotesk", 600),
-    fontSize: 14
   },
   footnote: {
     color: theme.subtle,

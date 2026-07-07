@@ -95,7 +95,7 @@ of attribution available in scope:
   audits use the source id their owning record carries
 - agent lifecycle audits (`agent.created`, `agent.activated`,
   `agent.deleted`) attribute to the agent itself
-- instance-level rows (devices, pairing, snapshots, promotions, MCP,
+- instance-level rows (push devices, snapshots, promotions, MCP,
   messaging bridges, connectors, relays, imports, toolsets, skills)
   declare `system: true` so they remain unattributed and surface only
   under the activity feed's "All agents" view

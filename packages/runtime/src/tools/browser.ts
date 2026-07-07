@@ -34,6 +34,7 @@ import { join } from "node:path";
 import { isIP } from "node:net";
 import { lookup } from "node:dns/promises";
 import { browserTracesDir, downloadsDir, instanceRoot } from "../paths";
+import { resolveBrowserHeadless } from "../lib/container-env";
 import { launchSpawnedChrome } from "./chrome-launch";
 import { generateAuxText, generateVisionAnalysis } from "../provider";
 import { resolveImageByteLimit, resolveProviderModality } from "../provider-capabilities";
@@ -431,12 +432,18 @@ let spawnChrome: typeof launchSpawnedChrome = launchSpawnedChrome;
 const spawnedSessionProvider: BrowserSessionProvider = {
   kind: "spawned",
   async connect(_record) {
-    // Launch our OWN branded Chrome (headless) against the per-instance profile
-    // dir on a free debug port, over Playwright's pipe transport. The user's
-    // :9222 is never touched; the debug port is free-picked above it (and is
-    // the endpoint the sign-in modal attaches to over CDP).
+    // Launch our OWN branded Chrome against the per-instance profile dir on a
+    // free debug port, over Playwright's pipe transport. The user's :9222 is
+    // never touched; the debug port is free-picked above it (and is the
+    // endpoint the sign-in modal attaches to over CDP).
+    //
+    // Headless by default (the historical value). A container running Xvfb
+    // sets GINI_BROWSER_HEADLESS=false so Chrome launches HEADED against the
+    // virtual display (DISPLAY=:99) — a real headed Chrome under Xvfb presents
+    // fewer automation signals than --headless=new, complementing the stealth
+    // identity. See ADR docker-xvfb-deployment.md.
     const profileDir = spawnedProfileDir();
-    const { context, port } = await spawnChrome({ profileDir, headless: true });
+    const { context, port } = await spawnChrome({ profileDir, headless: resolveBrowserHeadless() });
     return { kind: "spawned", context, port, profileDir };
   },
   async disconnect(handle) {

@@ -52,8 +52,12 @@ import {
 import { mergeShellPath, readLoginShellPath, type LoginShellReader } from "../runtime/path-bootstrap";
 // Shared with the openclaw migrator and the CLI setup readback so all
 // three call sites agree on how to decode the value half of a
-// secrets.env line.
-import { unquoteSecretsValue } from "../state/secrets-env";
+// secrets.env line. parseSecretsEnv lives in src/state/secrets-env.ts
+// (next to unquoteSecretsValue, which it uses, and the writer whose form
+// it inverts); re-exported below so existing importers of it against
+// src/cli/autostart keep resolving.
+import { parseSecretsEnv } from "../state/secrets-env";
+export { parseSecretsEnv } from "../state/secrets-env";
 
 // Re-export the shared launchd primitives so existing imports against
 // src/cli/autostart keep resolving (CLI commands, tests). New runtime
@@ -451,25 +455,6 @@ function readSecretsEnvFile(home: string): string | null {
     return null;
   }
 }
-
-// Parse a shell-format `KEY=VALUE` file (the same shape writeKeyToSecretsFile
-// produces). Supports `export KEY=value`, bare `KEY=value`, single-quoted,
-// double-quoted, and unquoted values. Comments and blank lines are skipped.
-// Values are returned in their final unescaped form, ready to drop into
-// launchd's EnvironmentVariables.
-export function parseSecretsEnv(body: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const rawLine of body.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-    if (!match) continue;
-    const key = match[1]!;
-    out[key] = unquoteSecretsValue(match[2] ?? "");
-  }
-  return out;
-}
-
 
 function isGiniAgentCheckout(dir: string, fileExists: (path: string) => boolean): boolean {
   const pkg = join(dir, "package.json");

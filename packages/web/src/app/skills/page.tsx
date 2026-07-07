@@ -149,34 +149,6 @@ export default function SkillsPage() {
     onError: (error: Error) => toast.error(error.message)
   });
 
-  // "Set up via chat": some skills (notably the Google Workspace family)
-  // can't be wired up by entering a credential into a connector dialog —
-  // setup is an interactive CLI flow the agent walks the user through.
-  // For those, the right UX is to hand the user off to a fresh chat with
-  // a pre-sent prompt so the agent can drive the install + auth from
-  // there. We POST the session, send the seed message, then navigate.
-  const setupViaChat = useMutation({
-    mutationFn: async (skill: SkillRecord) => {
-      const session = await api<ChatSession>("/chat", {
-        method: "POST",
-        body: JSON.stringify({ title: `Set up ${skill.name}` })
-      });
-      await api(`/chat/${session.id}/messages`, {
-        method: "POST",
-        body: JSON.stringify({
-          content: `Please help me set up the ${skill.name} skill.`,
-          client: "web"
-        })
-      });
-      return session;
-    },
-    onSuccess: (session) => {
-      invalidate(["chat", "tasks"]);
-      router.push(`/chat?session=${session.id}`);
-    },
-    onError: (error: Error) => toast.error(error.message)
-  });
-
   // "Set up via chat" for a credential with NO registered provider module.
   // There is no Add Connector dialog to open at such a credential (no fields,
   // no probe), so the canonical path is agent-driven: the seed message names
@@ -223,20 +195,6 @@ export default function SkillsPage() {
     () => providerByCredentialNameMap(providers.data ?? []),
     [providers.data]
   );
-  const setupSkillProviders = useMemo(
-    () => setupSkillProvidersMap(providers.data ?? []),
-    [providers.data]
-  );
-  // For the currently displayed setup skill (e.g. google-workspace-setup),
-  // resolve its provider's credential template and whether that credential is
-  // already configured — gates the manual "Enter ID & secret" affordance so we
-  // don't offer to create a connector that already exists.
-  const setupProvider = detail ? setupSkillProviders.get(detail.name) : undefined;
-  const setupCredentialName = setupProvider?.credentialTemplate?.name;
-  const setupConfigured = Boolean(
-    setupCredentialName &&
-    (connectors.data ?? []).some((c) => c.name === setupCredentialName && c.status === "configured")
-  );
 
   return (
     <>
@@ -281,7 +239,7 @@ export default function SkillsPage() {
                     <div className="flex items-center justify-between gap-2">
                       <span className="line-clamp-1 text-sm font-medium">{skill.name}</span>
                       <ActivationPill
-                        activation={deriveActivation(skill, byName, providersById, providerByCredentialName, setupSkillProviders)}
+                        activation={deriveActivation(skill, byName, providersById, providerByCredentialName)}
                       />
                     </div>
                     {skill.description ? (
@@ -313,7 +271,7 @@ export default function SkillsPage() {
                     ) : null}
                   </div>
                   <ActivationPill
-                    activation={deriveActivation(detail, byName, providersById, providerByCredentialName, setupSkillProviders)}
+                    activation={deriveActivation(detail, byName, providersById, providerByCredentialName)}
                   />
                 </div>
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -346,7 +304,6 @@ export default function SkillsPage() {
                   byName={byName}
                   providersById={providersById}
                   providerByCredentialName={providerByCredentialName}
-                  setupSkillProviders={setupSkillProviders}
                 />
                 <div className="flex flex-wrap gap-2">
                   <Button size="sm" disabled={action.isPending} onClick={() => action.mutate({ id: detail.id, op: "test" })}>Test</Button>
@@ -359,22 +316,6 @@ export default function SkillsPage() {
                     Rollback
                   </Button>
                 </div>
-                {setupProvider?.credentialTemplate && !setupConfigured ? (
-                  <Section title="Already have an OAuth client?">
-                    <div className="space-y-2">
-                      <p className="text-xs text-muted-foreground">
-                        Enter your Google OAuth Client ID and secret to skip the Cloud Console setup and go straight to sign-in.
-                      </p>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setManualProvider(setupProvider)}
-                      >
-                        Enter ID &amp; secret
-                      </Button>
-                    </div>
-                  </Section>
-                ) : null}
                 {detail.allowedTools ? (
                   <Section title="Allowed tools (from SKILL.md frontmatter)">
                     <p className="font-mono text-[11px] text-muted-foreground">{detail.allowedTools}</p>
@@ -497,38 +438,17 @@ export default function SkillsPage() {
                                   </div>
                                 );
                               })()
-                            ) : needsChatSetup(provider) ? (
-                              // OAuth-style or multi-field providers (e.g.
-                              // google-oauth-desktop with client_id +
-                              // client_secret) require real out-of-band
-                              // setup — Google Cloud Console clicks, CLI
-                              // installs, OAuth consent. Defer to the
-                              // agent in chat instead of popping a form
-                              // the user can't fill in. When the provider
-                              // carries a credential template, also offer
-                              // manual entry for users who already minted
-                              // an OAuth client.
-                              <div className="flex items-center gap-1.5">
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  className="h-6 px-2 text-[10px]"
-                                  disabled={setupViaChat.isPending}
-                                  onClick={() => setupViaChat.mutate(detail)}
-                                >
-                                  {setupViaChat.isPending ? "Opening chat…" : "Set up via chat"}
-                                </Button>
-                                {provider.credentialTemplate ? (
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="h-6 px-2 text-[10px]"
-                                    onClick={() => setManualProvider(provider)}
-                                  >
-                                    Enter ID &amp; secret
-                                  </Button>
-                                ) : null}
-                              </div>
+                            ) : provider.externallySatisfied ? (
+                              // The credential is satisfied out-of-band with no
+                              // connector record — in hosted the guest ships
+                              // with its Google Workspace credential already in
+                              // place (baked by the host, registered at boot),
+                              // so there's nothing for the user to set up. Show
+                              // it as provisioned rather than offering a setup
+                              // affordance the hosted product doesn't need.
+                              <Badge variant="outline" className="text-[10px] text-emerald-600">
+                                provisioned
+                              </Badge>
                             ) : (
                               // Simple secret-only providers (e.g. linear
                               // PAT). Original credential dialog works
@@ -744,16 +664,14 @@ function ActivationRow({
   skill,
   byName,
   providersById,
-  providerByCredentialName,
-  setupSkillProviders
+  providerByCredentialName
 }: {
   skill: SkillRecord;
   byName: Map<string, ConnectorRecord[]>;
   providersById: Map<string, ProviderDescriptor>;
   providerByCredentialName: Map<string, ProviderDescriptor>;
-  setupSkillProviders: Map<string, ProviderDescriptor>;
 }) {
-  const activation = deriveActivation(skill, byName, providersById, providerByCredentialName, setupSkillProviders);
+  const activation = deriveActivation(skill, byName, providersById, providerByCredentialName);
   return (
     <div className="flex items-center gap-2 text-xs">
       <ActivationPill activation={activation} />
@@ -762,16 +680,6 @@ function ActivationRow({
       ) : null}
     </div>
   );
-}
-
-// Provider setup is "chat-grade" when it owns a setup skill (the gws/gcloud
-// walkthrough), or it requires non-secret config the user can't just paste
-// from a settings page. The credential dialog only handles "paste one
-// secret", so anything beyond that gets routed to the agent instead. The
-// setup-skill check matters now that google-oauth-desktop's fields are all
-// secret (so the field-shape heuristic alone would miss it).
-function needsChatSetup(provider: ProviderDescriptor): boolean {
-  return Boolean(provider.hasSetupSkill) || provider.fields.some((f) => !f.secret);
 }
 
 // Index connectors by their credential NAME (skills reference credentials by
@@ -797,7 +705,8 @@ function providersByIdMap(providers: ProviderDescriptor[]): Map<string, Provider
 // Reverse of the provider credential template: credential NAME → the provider
 // whose template owns it (linear → LINEAR_API_KEY, google-oauth-desktop →
 // google-workspace-oauth). Lets the page route a required credential name to
-// its provider's setup flow even before any connector record exists. Mirrors
+// its provider — and, for the hosted Google credential, read its
+// `externallySatisfied` bit — even before any connector record exists. Mirrors
 // providerForCredentialName in connectors/registry.ts.
 function providerByCredentialNameMap(providers: ProviderDescriptor[]): Map<string, ProviderDescriptor> {
   const map = new Map<string, ProviderDescriptor>();
@@ -807,19 +716,6 @@ function providerByCredentialNameMap(providers: ProviderDescriptor[]): Map<strin
   }
   return map;
 }
-
-// Setup-skill NAME → the provider that owns it (google-workspace-setup →
-// google-oauth-desktop). Lets deriveActivation recognize a setup skill's own
-// card so its pill reflects sign-in liveness instead of the unconditional
-// "active" it would get from declaring no requiredCredentials.
-function setupSkillProvidersMap(providers: ProviderDescriptor[]): Map<string, ProviderDescriptor> {
-  const map = new Map<string, ProviderDescriptor>();
-  for (const p of providers) {
-    if (p.setupSkill && !map.has(p.setupSkill)) map.set(p.setupSkill, p);
-  }
-  return map;
-}
-
 
 function countDependentSkills(skills: SkillRecord[], credentialName: string): number {
   let count = 0;

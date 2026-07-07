@@ -227,7 +227,12 @@ export async function proxyRequest(
   // compresses regardless, leaving a stale header) — see
   // PASSTHROUGH_RESPONSE_HEADERS; the two work together.
   headers.set("accept-encoding", "identity");
-  const init: RequestInit = { method: request.method, headers };
+  // Never follow gateway redirects server-side: the Google login round trip
+  // (/api/google/login/*) answers browser top-level navigations with 302s —
+  // out to accounts.google.com and back into the app — and a followed
+  // redirect would fetch Google's consent HTML as the BFF instead of
+  // navigating the user's tab. The 3xx passes through below.
+  const init: RequestInit = { method: request.method, headers, redirect: "manual" };
   const signal = options.signal ?? request.signal;
   if (signal) init.signal = signal;
   if (!["GET", "HEAD"].includes(request.method)) {
@@ -258,6 +263,22 @@ export async function proxyRequest(
     if (signal?.aborted) throw err;
     logGatewayUnreachable(target, err);
     return gatewayUnreachableResponse();
+  }
+  // Redirect passthrough (see the `redirect: "manual"` note above): forward
+  // the status + Location and nothing else — a redirect's other headers are
+  // hop-local. A relative Location resolves in the browser against the
+  // BFF-visible URL, which is exactly where the app lives. Scoped to the
+  // Google login round trip — the only gateway surface that legitimately
+  // redirects the browser. Any other 3xx falls through to the generic
+  // branches, whose header allowlist drops Location, so a future gateway
+  // route reflecting a caller-influenced Location can't become an open
+  // redirect through the BFF.
+  if (upstream.status >= 300 && upstream.status < 400 && canonical[0] === "google" && canonical[1] === "login") {
+    const location = upstream.headers.get("location");
+    return new Response(null, {
+      status: upstream.status,
+      headers: location ? { location } : {}
+    });
   }
   const isStream = upstream.headers.get("content-type")?.includes("text/event-stream");
   if (isStream) {
@@ -410,11 +431,11 @@ export function isLoopbackHost(host: string): boolean {
 //   so the allowlist/loopback check still catches it.
 //
 // The guard runs on every request, not just the prior PRIVILEGED_POST_ROUTES
-// list — readable surfaces like /state and the bare /pairing/claim POST
-// that mints device tokens were previously un-guarded and DNS-rebindable.
+// list — readable surfaces like /state were previously un-guarded and
+// DNS-rebindable.
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-export function guardCsrf(request: Request, _pathSegments: string[]): Response | null {
+export function guardCsrf(request: Request, pathSegments: string[]): Response | null {
   const forbidden = () => Response.json({ error: "Forbidden" }, { status: 403 });
   const origin = request.headers.get("origin");
   const isUnsafe = UNSAFE_METHODS.has(request.method);
@@ -470,7 +491,18 @@ export function guardCsrf(request: Request, _pathSegments: string[]): Response |
 
   const fetchSite = request.headers.get("sec-fetch-site");
   if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") {
-    return forbidden();
+    // The Google login callback is the one legitimately cross-site request on
+    // this surface: the browser reaches it by top-level 302 FROM
+    // accounts.google.com, so Fetch Metadata stamps the navigation
+    // `cross-site` (the redirect chain contains Google's origin). Its side
+    // effect is guarded by the gateway's single-use state nonce — minted
+    // per-flow, matched against module memory, TTL-bounded — which is the
+    // per-endpoint CSRF defense this header check exists to approximate, so
+    // the exemption reopens nothing. GET-only and exact-path so no other
+    // route inherits it.
+    const isGoogleLoginCallback =
+      request.method === "GET" && pathSegments.join("/") === "google/login/callback";
+    if (!isGoogleLoginCallback) return forbidden();
   }
 
   return null;

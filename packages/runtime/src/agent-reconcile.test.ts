@@ -110,8 +110,27 @@ describe("reconcileInFlightTasks", () => {
     expect(dispatch.ids).toEqual([id]);
   });
 
-  test("leaves a waiting_approval task untouched", async () => {
+  test("leaves a waiting_approval task with a pending gate untouched", async () => {
+    // A real park always has a pending gate — durable state waiting on the
+    // user. (A gate-less park with no resume snapshot is a different shape:
+    // an unrecoverable failure-path artifact the reconcile fails honestly —
+    // pinned in chat-needs-input.test.ts.)
     const id = await seed({ status: "waiting_approval", mode: "chat", updatedAt: OLD });
+    await mutateState(config.instance, (state) => {
+      state.authorizations.push({
+        id: "auth_pending",
+        instance: state.instance,
+        status: "pending",
+        createdAt: OLD,
+        updatedAt: OLD,
+        taskId: id,
+        action: "terminal.exec",
+        target: "echo hi",
+        risk: "high",
+        reason: "test gate",
+        payload: {}
+      });
+    });
     const dispatch = fakeDispatch();
 
     const result = await reconcileInFlightTasks(config, { cutoffIso: now(), dispatch: dispatch.fn });

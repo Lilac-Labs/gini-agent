@@ -522,10 +522,21 @@ describe("per-turn AbortSignal", () => {
     await waitFor(() => existsSync(marker));
 
     await cancelTask(config, task.id);
-    // Let the approve path unwind (the killed proc resolves, the abort audit
-    // and the row settle land).
+    // decideApproval returns at decision durability (execution detached),
+    // so awaiting it does NOT mean the killed proc unwound — wait for the
+    // abort's own observables: the terminal.exec_aborted audit row and the
+    // gated row settling off `running`.
     await approving;
     await waitFor(() => isTerminalTaskStatus(readState(config.instance).tasks.find((t) => t.id === task.id)?.status ?? "running"));
+    await waitFor(() =>
+      readState(config.instance).audit.some((a) => a.action === "terminal.exec_aborted" && a.taskId === task.id)
+    );
+    await waitFor(() => {
+      const row = listChatBlocks(config.instance, session.id).find(
+        (b) => b.kind === "tool_call" && b.callId === "call_sleep"
+      );
+      return row?.kind === "tool_call" && row.status !== "running";
+    });
 
     const blocks = listChatBlocks(config.instance, session.id);
     const sleepRow = blocks.find((b) => b.kind === "tool_call" && b.callId === "call_sleep");
@@ -631,8 +642,20 @@ describe("per-turn AbortSignal", () => {
     await waitFor(() => __inFlightSnapshot(config.instance).some((e) => e.taskId === seeded.taskId));
 
     await cancelTask(config, seeded.taskId);
+    // Same detached-approve contract as above: wait for the abort's own
+    // observables (the messaging.send audit row + the gated row settle),
+    // not the returned promise.
     await approving;
     await waitFor(() => isTerminalTaskStatus(readState(config.instance).tasks.find((t) => t.id === seeded.taskId)?.status ?? "running"));
+    await waitFor(() =>
+      readState(config.instance).audit.some((a) => a.action === "messaging.send" && a.taskId === seeded.taskId)
+    );
+    await waitFor(() => {
+      const row = listChatBlocks(config.instance, seeded.sessionId).find(
+        (b) => b.kind === "tool_call" && b.callId === "call_msg"
+      );
+      return row?.kind === "tool_call" && row.status !== "running";
+    });
 
     const blocks = listChatBlocks(config.instance, seeded.sessionId);
     const msgRow = blocks.find((b) => b.kind === "tool_call" && b.callId === "call_msg");

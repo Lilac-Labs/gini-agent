@@ -31,6 +31,7 @@ import {
   findChromePath,
   resolveBrowserLaunchTarget
 } from "./chrome-discovery";
+import { containerChromeArgs } from "../lib/container-env";
 import { ensureChromiumInstalled } from "./chrome-install";
 
 // First port we probe for the spawned Chrome's debug endpoint. Deliberately well
@@ -177,11 +178,17 @@ export async function launchSpawnedChrome(options: LaunchSpawnedChromeOptions): 
     // a caller-supplied `args` (or headless/executablePath/userAgent) can never
     // silently drop the stealth flags or the --remote-debugging-port the
     // screencast bridge attaches to.
+    // containerChromeArgs() is empty off a normal host; inside a container
+    // (GINI_CHROME_NO_SANDBOX set) it appends --no-sandbox +
+    // --disable-dev-shm-usage, which Chrome needs to start under a default
+    // container's restricted sandbox and 64MB /dev/shm. Neither is
+    // web-observable, so the stealth identity is unaffected. See ADR
+    // docker-xvfb-deployment.md.
     return {
       ...(options.extraOptions ?? {}),
       headless,
       executablePath: execPath,
-      args: [...CHROME_LAUNCH_ARGS, `--remote-debugging-port=${port}`],
+      args: [...CHROME_LAUNCH_ARGS, ...containerChromeArgs(), `--remote-debugging-port=${port}`],
       ...(userAgent ? { userAgent } : {})
     };
   };

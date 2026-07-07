@@ -1,5 +1,14 @@
 # ADR: Subagent Delegation
 
+> **Note (2026-07-03):** In the unified task model, "subagent" means ONLY the
+> invisible **in-run helper** this ADR describes: spawned by a run, reporting one
+> hop back to the spawning run as a tool result, never surfacing to the task,
+> home, or the user. Durable or user-facing delegation is a **child task** minted
+> via `spawn_task` — its own thread, lifecycle, and derived attention. Choosing
+> between the two: `spawn_subagent` for work whose only consumer is the current
+> run; `spawn_task` for work the user may see or answer. See ADR
+> task-containers-and-runs.md.
+
 > **Note (2026-05-13):** Subagent toolset filtering now intersects with
 > the parent **agent's** toolsets (not the global enabled set) before
 > the subagent's own `toolsetIds` narrows further. Provider and memory

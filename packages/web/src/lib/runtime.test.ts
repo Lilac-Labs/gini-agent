@@ -152,7 +152,7 @@ describe("guardCsrf — relay-agnostic BFF", () => {
 
   test("relay-subdomain Origin POST is refused at the BFF", () => {
     const res = guardCsrf(
-      makeReq({ method: "POST", origin: `https://${SUB}`, host: SUB, url: `https://${SUB}/api/runtime/tunnel` }),
+      makeReq({ method: "POST", origin: `https://${SUB}`, host: SUB, url: `https://${SUB}/api/runtime/status` }),
       []
     );
     expect(res).not.toBeNull();
@@ -160,7 +160,7 @@ describe("guardCsrf — relay-agnostic BFF", () => {
   });
 
   test("relay-subdomain Host no-Origin GET is refused at the BFF", () => {
-    const res = guardCsrf(makeReq({ method: "GET", host: SUB, url: `https://${SUB}/api/runtime/tunnel` }), []);
+    const res = guardCsrf(makeReq({ method: "GET", host: SUB, url: `https://${SUB}/api/runtime/status` }), []);
     expect(res).not.toBeNull();
     expect(res!.status).toBe(403);
   });
@@ -178,6 +178,106 @@ describe("guardCsrf — Sec-Fetch-Site", () => {
     );
     expect(res).not.toBeNull();
     expect(res!.status).toBe(403);
+  });
+
+  // The OAuth callback lands as a top-level navigation 302'd from
+  // accounts.google.com, which Fetch Metadata stamps cross-site; the
+  // gateway's single-use state nonce carries the CSRF defense there.
+  test("GET google/login/callback with sec-fetch-site=cross-site → pass (OAuth redirect landing)", () => {
+    const res = guardCsrf(
+      makeReq({
+        method: "GET",
+        host: "127.0.0.1:7777",
+        secFetchSite: "cross-site",
+        url: "http://127.0.0.1:7777/api/runtime/google/login/callback?code=c&state=s"
+      }),
+      ["google", "login", "callback"]
+    );
+    expect(res).toBeNull();
+  });
+
+  test("the callback exemption is GET-only and exact-path", () => {
+    const post = guardCsrf(
+      makeReq({
+        method: "POST",
+        host: "127.0.0.1:7777",
+        origin: "http://127.0.0.1:7777",
+        secFetchSite: "cross-site",
+        url: "http://127.0.0.1:7777/api/runtime/google/login/callback"
+      }),
+      ["google", "login", "callback"]
+    );
+    expect(post).not.toBeNull();
+    expect(post!.status).toBe(403);
+    const otherPath = guardCsrf(
+      makeReq({ method: "GET", host: "127.0.0.1:7777", secFetchSite: "cross-site" }),
+      ["google", "login", "start"]
+    );
+    expect(otherPath).not.toBeNull();
+    expect(otherPath!.status).toBe(403);
+  });
+});
+
+describe("proxyRequest — gateway redirects", () => {
+  test("a gateway 302 passes through un-followed with only Location forwarded", async () => {
+    let seenRedirectMode: RequestRedirect | undefined;
+    const fetcher = (async (_url: string | URL | Request, init?: RequestInit) => {
+      seenRedirectMode = init?.redirect;
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: "https://accounts.google.com/o/oauth2/v2/auth?x=1",
+          "set-cookie": "hop-local=1"
+        }
+      });
+    }) as unknown as typeof fetch;
+    const req = new Request("http://127.0.0.1:7777/api/runtime/google/login/start", {
+      method: "GET",
+      headers: { host: "127.0.0.1:7777" }
+    });
+    const res = await proxyRequest(req, ["google", "login", "start"], {
+      runtimeUrl: "http://127.0.0.1:9999",
+      token: "t",
+      fetcher
+    });
+    expect(seenRedirectMode).toBe("manual");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("https://accounts.google.com/o/oauth2/v2/auth?x=1");
+    expect(res.headers.get("set-cookie")).toBeNull();
+    expect(await res.text()).toBe("");
+  });
+
+  test("a 3xx from a non-login route never forwards Location", async () => {
+    const fetcher = (async () =>
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://evil.example/phish" }
+      })) as unknown as typeof fetch;
+    const req = new Request("http://127.0.0.1:7777/api/runtime/state", {
+      method: "GET",
+      headers: { host: "127.0.0.1:7777" }
+    });
+    const res = await proxyRequest(req, ["state"], {
+      runtimeUrl: "http://127.0.0.1:9999",
+      token: "t",
+      fetcher
+    });
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  test("a 3xx without a Location still passes the status through", async () => {
+    const fetcher = (async () => new Response(null, { status: 304 })) as unknown as typeof fetch;
+    const req = new Request("http://127.0.0.1:7777/api/runtime/state", {
+      method: "GET",
+      headers: { host: "127.0.0.1:7777" }
+    });
+    const res = await proxyRequest(req, ["state"], {
+      runtimeUrl: "http://127.0.0.1:9999",
+      token: "t",
+      fetcher
+    });
+    expect(res.status).toBe(304);
+    expect(res.headers.get("location")).toBeNull();
   });
 });
 

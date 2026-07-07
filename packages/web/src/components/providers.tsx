@@ -42,14 +42,16 @@ if (!(console.error as WrappedConsoleError).__giniNextThemesFilter) {
 }
 
 export function Providers({ children }: { children: ReactNode }) {
-  // The /pair page is shown to an UNPAIRED device with no session. The global
-  // SSE bridge opens an EventSource to /api/runtime/events/stream, which 401s
-  // (and auto-retries) over the relay until the device is paired — pure console
-  // noise on the pairing screen. Skip it on /pair; every other route mounts it.
+  // The /login page is shown before a session exists. The global SSE bridge
+  // opens an EventSource to /api/runtime/events/stream, which 401s (and
+  // auto-retries) until authenticated — pure console noise on a pre-auth
+  // screen. Skip it there; every other route mounts it.
   const pathname = usePathname();
-  // Exact /pair (or subpaths) only — a broad prefix would also match a future
-  // route like /pairing.
-  const onPairPage = pathname === "/pair" || (pathname?.startsWith("/pair/") ?? false);
+  // Exact /login (or subpaths) only — a broad prefix would also match a
+  // future route like /logins.
+  const onLoginPage =
+    pathname === "/login" ||
+    (pathname?.startsWith("/login/") ?? false);
   const [client] = useState(() => new QueryClient({
     defaultOptions: {
       // SSE-driven invalidation (via RuntimeStreamBridge) handles freshness.
@@ -61,20 +63,20 @@ export function Providers({ children }: { children: ReactNode }) {
   return (
     <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false} disableTransitionOnChange>
       <QueryClientProvider client={client}>
-        {!onPairPage && <RuntimeStreamBridge />}
+        {!onLoginPage && <RuntimeStreamBridge />}
         {/* Reconnecting pill rides the same shared stream the bridge opens; it
-            is a passive observer, so /pair (which mounts neither) stays
+            is a passive observer, so /login (which mounts neither) stays
             silent. */}
-        {!onPairPage && <ConnectionBanner />}
+        {!onLoginPage && <ConnectionBanner />}
         {/* Provider-fallback pill reads /status; shown when the selected
             provider is unconfigured but a configured fallback is serving turns.
-            Skipped on /pair like the reconnecting pill. */}
-        {!onPairPage && <ProviderFallbackBanner />}
+            Skipped on /login like the reconnecting pill. */}
+        {!onLoginPage && <ProviderFallbackBanner />}
         {/* The update gate blurs the app while a self-update applies. It needs
-            /status, so skip it on the pre-auth /pair screen (same as the
+            /status, so skip it on the pre-auth /login screen (same as the
             stream bridge); Toaster stays outside it so error toasts render
             above the blur. */}
-        {onPairPage ? children : <UpdateGateProvider>{children}</UpdateGateProvider>}
+        {onLoginPage ? children : <UpdateGateProvider>{children}</UpdateGateProvider>}
         <Toaster richColors position="bottom-right" />
       </QueryClientProvider>
     </ThemeProvider>

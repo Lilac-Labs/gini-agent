@@ -24,6 +24,28 @@ export function isLoopbackHost(host: string): boolean {
   return hostnameOnly === "localhost" || hostnameOnly === "127.0.0.1" || hostnameOnly === "[::1]";
 }
 
+// True when a connection's REAL peer address is the local loopback. This is the
+// network fact behind "the local operator" — it cannot be forged by a Host
+// header. On the default loopback bind every accepted connection is loopback,
+// so this is always true and changes nothing. It matters only when the gateway
+// binds a non-loopback interface (GINI_BIND_HOST=0.0.0.0, the container case):
+// there a remote peer arrives over the network (e.g. Docker's bridge gateway,
+// 172.x) with an attacker-controlled `Host: localhost`, and trusting the Host
+// alone would hand it the loopback-operator lane. Loopback-Host trust is
+// therefore gated on this. `address` comes from Bun's server.requestIP (the
+// kernel-reported socket peer), never from a forgeable header like
+// X-Forwarded-For. A null/absent address (no socket info) is treated as
+// loopback so the in-process/test path — which never binds a non-loopback
+// interface — keeps its historical behavior.
+//
+// IPv6 note: Bun reports the peer family explicitly. ::1 is loopback;
+// IPv4-mapped loopback (::ffff:127.0.0.1) is normalized before the check.
+export function isLoopbackPeer(address: string | null | undefined): boolean {
+  if (address === null || address === undefined || address.length === 0) return true;
+  const normalized = address.startsWith("::ffff:") ? address.slice("::ffff:".length) : address;
+  return normalized === "127.0.0.1" || normalized === "::1" || normalized.startsWith("127.");
+}
+
 // A host that is the gini-relay domain or one of its per-device subdomains. The
 // relay routes each random subdomain only to its owner's frpc tunnel and owns
 // that DNS, so a `*.<relayDomain>` Host can only be present on a request that

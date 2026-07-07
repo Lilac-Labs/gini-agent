@@ -178,6 +178,20 @@ describe("buildAgentSystemContext", () => {
     expect(out).toContain("not a citable source of external fact");
   });
 
+  test("bundled default instructions steer user-only decisions to ask_user options, not prose", () => {
+    // A model that asks for missing details in plain text and completes the
+    // run leaves a "done"-looking task on home with the question buried in
+    // the thread. Pin the clauses that steer it to ask_user with concrete
+    // options (which parks the run as needs_input and surfaces the question
+    // on home) — and that open-ended asks with no options go in the model's
+    // own message text, never through the tool.
+    const out = getDefaultGiniInstructions();
+    expect(out).toContain("information only the user can supply");
+    expect(out).toContain("`ask_user` tool call offering your best 2-6 concrete options");
+    expect(out).toContain("parks the run as needs-input");
+    expect(out).toContain("never takes a question without options");
+  });
+
   test("instructionsOverride wins over the bundled defaults", () => {
     const out = buildAgentSystemContext({
       instructionsOverride: "Custom rules only."

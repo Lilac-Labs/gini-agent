@@ -60,6 +60,7 @@ import { materializeUpload } from "../capabilities/attachments-materialize-core"
 import { classifyFormat, extractText } from "../capabilities/attachment-extract";
 import {
   SOUL_SOFT_CAP_CHARS,
+  TASK_CONTAINER_HANDOFF_BLOCK,
   USER_SOFT_CAP_CHARS,
   buildAgentSystemContext,
   buildBoundJobsBlock,
@@ -205,6 +206,15 @@ const MAX_INLINE_SKILL_SCRIPT_ROWS = 40;
 const MAX_IDENTICAL_TOOL_REPEATS = 3;
 const MAX_SAME_ACTION_REPEATS = 6;
 const MAX_NAVIGATION_WITHOUT_ACTION = 8;
+// Whether an all-chat.choice park exposes the `needs_input` task status.
+// GINI_NEEDS_INPUT_STATUS=0 is a one-release compat escape hatch for clients
+// whose status renderers lag behind the TaskStatus expansion (mobile): the
+// park still stamps Task.needsInput and resume accepts both statuses — only
+// the exposed status stays `waiting_approval`. Read at call time so tests
+// can toggle it without re-importing the module.
+function needsInputStatusEnabled(): boolean {
+  return process.env.GINI_NEEDS_INPUT_STATUS !== "0";
+}
 // How many recent navigation targets the guard remembers. A navigation to a URL
 // inside this window is a repeat/oscillation (climb); a navigation to a URL
 // outside it is fresh progress (reset). Sized to catch ping-ponging between a
@@ -928,6 +938,23 @@ export async function runChatTask(config: RuntimeConfig, taskId: string): Promis
   // these fields.
   if (subagent?.goal) sections.push(`## Goal\n${subagent.goal}`);
   if (subagent?.context) sections.push(`## Context\n${subagent.context}`);
+  // Container-aware ask_user framing: only for surfaced non-chat task
+  // containers. A Topic/Channel run executes handed-off work the user tracks
+  // from home rows, so a prose question dies with the run — the model needs
+  // that context, not another style rule, to reach for ask_user. The root
+  // agent Chat (the user IS in the thread), headless channels (no user
+  // surface; ask_user is excluded there), and subagent override prompts
+  // never carry it. See TASK_CONTAINER_HANDOFF_BLOCK.
+  if (!subagent) {
+    const promptSession = state.chatSessions.find((s) => s.id === resolveChatSessionId(state, task));
+    if (
+      promptSession &&
+      (promptSession.kind === "topic" || promptSession.kind === "channel") &&
+      promptSession.headless !== true
+    ) {
+      sections.push(TASK_CONTAINER_HANDOFF_BLOCK);
+    }
+  }
   if (skillsBlock) sections.push(skillsBlock);
   if (inactiveSkillsBlock) sections.push(inactiveSkillsBlock);
   if (connectedAccountsBlock) sections.push(connectedAccountsBlock);
@@ -2338,6 +2365,23 @@ async function runLoop(
         void enqueueFlush();
       }
     };
+    // Native (server-side) web search runs inside the provider call and never
+    // reaches the tool-dispatch loop, so the user would otherwise have no signal
+    // it happened. Surface each search as a display-only "Web search" chip the
+    // moment it completes: the provider fires this mid-stream, BEFORE the
+    // assistant message streams, so the chip's block lands ahead of the answer
+    // block (born lazily on the first text delta). Ordering matters for more than
+    // aesthetics — a chip trailing the answer pushes the answer out of its
+    // standalone bubble in group-exchanges (it folds into the collapsed tool
+    // group). Status goes straight to "ok": the search already ran on the
+    // provider, there's nothing to await or dispatch. See ADR web-search-connectors.md.
+    let webSearchSeq = 0;
+    const onWebSearch = (query: string): void => {
+      if (!emitCtx) return;
+      const callId = `websearch_${taskId}_${iterations}_${webSearchSeq++}`;
+      emitToolCallRunning(emitCtx, { toolName: "web_search", callId, args: { query } });
+      emitToolCallStatus(emitCtx, { callId, status: "ok" });
+    };
 
     // Re-check terminal status under the lock that flips
     // currentStep to "Thinking" so a cancel queued between the
@@ -2541,7 +2585,8 @@ async function runLoop(
           providerTools,
           onDelta,
           providerOverride,
-          turnSignal
+          turnSignal,
+          onWebSearch
         );
       } catch (error) {
         // Turn-abort: cancelTask aborted the in-flight model call. Drain any
@@ -2896,6 +2941,10 @@ async function runLoop(
 
     const pendingApprovals: PendingToolCall[] = [];
     const toolResultMessages: ToolCallingMessage[] = [];
+    // setup_requested block ids for chat.choice gates minted this iteration,
+    // keyed by SetupRequest id. The park below stamps the newest one onto
+    // Task.needsInput.blockId so clients can deep-link to the question card.
+    const choiceBlockIdBySetupId = new Map<string, string>();
 
     // Append a tool result to this turn's working set AND persist it as a
     // durable transcript row in one step. Every place that resolves a tool
@@ -3306,11 +3355,14 @@ async function runLoop(
                 const reasonBlock = emitAssistantTextStart(emitCtx, setupRow.reason);
                 if (reasonBlock?.id) finalizeAssistantText(emitCtx, reasonBlock.id, setupRow.reason);
               }
-              emitSetupRequested(emitCtx, {
+              const setupBlock = emitSetupRequested(emitCtx, {
                 setupRequestId: setupRow.id,
                 action: setupRow.action,
                 summary: setupRow.reason ?? setupRow.target
               });
+              if (setupRow.action === "chat.choice" && setupBlock?.id) {
+                choiceBlockIdBySetupId.set(setupRow.id, setupBlock.id);
+              }
             }
           }
           // Approval-gated tools haven't actually run yet, but from the
@@ -3379,10 +3431,48 @@ async function runLoop(
         const item = findTask(state, taskId);
         // Respect a prior terminal status so a cancel that fired
         // during the tool-dispatch span doesn't get overwritten by
-        // `waiting_approval`.
+        // the park.
         if (isTerminalTaskStatus(item.status)) return item;
-        item.status = "waiting_approval";
-        item.currentStep = "Waiting for approval";
+        // Classify the park. When EVERY gate this turn paused on is a
+        // pending `chat.choice` SetupRequest (ask_user), the run is waiting
+        // on the user's ANSWER, not an approval decision: status
+        // `needs_input`, with the question payload stamped on the task so
+        // read surfaces render it without re-joining the gate rows. Any
+        // other gate mix (Authorizations, credential cards, or a mixed
+        // turn) keeps `waiting_approval` exactly as before. This is a
+        // reclassification of the park, not new machinery — resume accepts
+        // both statuses.
+        const choiceGates = pendingApprovals.map((p) =>
+          state.setupRequests.find(
+            (s) => s.id === p.approvalId && s.status === "pending" && s.action === "chat.choice"
+          )
+        );
+        const parkedOnQuestion = choiceGates.every((gate) => gate !== undefined);
+        if (parkedOnQuestion) {
+          const gate = choiceGates[0]!;
+          const payload = gate.payload as { question?: unknown; options?: unknown };
+          const options = Array.isArray(payload.options)
+            ? payload.options
+                .map((o) => (o && typeof o === "object" ? String((o as { label?: unknown }).label ?? "") : ""))
+                .filter((label) => label.length > 0)
+            : undefined;
+          const blockId = choiceBlockIdBySetupId.get(gate.id);
+          item.needsInput = {
+            question: typeof payload.question === "string" ? payload.question : gate.target,
+            ...(options && options.length > 0 ? { options } : {}),
+            setupRequestId: gate.id,
+            ...(blockId ? { blockId } : {})
+          };
+          // GINI_NEEDS_INPUT_STATUS=0 is a one-release compat escape hatch
+          // for clients whose status renderers lag (mobile): the internal
+          // machinery above still runs — only the exposed status stays
+          // `waiting_approval`.
+          item.status = needsInputStatusEnabled() ? "needs_input" : "waiting_approval";
+          item.currentStep = "Waiting for your answer";
+        } else {
+          item.status = "waiting_approval";
+          item.currentStep = "Waiting for approval";
+        }
         item.toolCallState = snapshot;
         // Persist the partial cost up to this pause so it isn't lost if
         // the approval is denied (failTask reads the row as-is) or the
@@ -3391,7 +3481,7 @@ async function runLoop(
         item.updatedAt = now();
         appendEvent(
           state,
-          { kind: "task", action: "task.waiting_approval", target: item.id, taskId: item.id, risk: "medium", summary: "task.waiting_approval" },
+          { kind: "task", action: `task.${item.status}`, target: item.id, taskId: item.id, risk: "medium", summary: `task.${item.status}` },
           { taskId: item.id }
         );
         return item;
@@ -3705,7 +3795,9 @@ async function stageResume(
 }> {
   return mutateState(config.instance, (state) => {
     const item = findTask(state, taskId);
-    if (item.status !== "waiting_approval") {
+    // Both park statuses resume identically: `needs_input` is the
+    // all-chat.choice reclassification of the same pause.
+    if (item.status !== "waiting_approval" && item.status !== "needs_input") {
       // Distinguish actually-terminal (legitimate bail) from
       // not-yet-waiting (race-window — caller should retry).
       const truly = isTerminalTaskStatus(item.status);
@@ -3730,6 +3822,23 @@ async function stageResume(
   });
 }
 
+// In-flight resume registry. Durable state cannot distinguish "the answer
+// persisted and its DETACHED resume is running right now" from "the answer
+// persisted and the process died before the resume ran" — both look like a
+// parked task whose gates are all terminal. The settled-park heal
+// (safe-resume.ts resumeParkIfGatesSettled) consults this registry so it only
+// treats the second shape as wedged: a resume that is live in THIS process
+// registers here for its whole span, and a crash clears the registry with the
+// process, which is exactly when the heal should engage. Counted (not a Set)
+// because a multi-gate park sees one resumeChatTask call per gate, and an
+// early caller's exit must not unmark a later caller still in flight. Nested
+// per-instance Map for the same collision reason as turn-abort.ts.
+const inFlightResumes = new Map<string, Map<string, number>>();
+
+export function isChatTaskResumeInFlight(instance: string, taskId: string): boolean {
+  return (inFlightResumes.get(instance)?.get(taskId) ?? 0) > 0;
+}
+
 // Resume a paused chat task after one of its tool approvals resolved.
 // `toolResult` is the textual result (stdout, file write status, etc.)
 // captured by agent.executeApprovedAction. The runtime calls this with the
@@ -3741,6 +3850,28 @@ async function stageResume(
 //   - Once all results are in, appends them as `tool` messages and
 //     re-enters the loop from the next iteration.
 export async function resumeChatTask(
+  config: RuntimeConfig,
+  taskId: string,
+  toolCallId: string,
+  toolResult: string
+): Promise<Task> {
+  let counts = inFlightResumes.get(config.instance);
+  if (!counts) {
+    counts = new Map();
+    inFlightResumes.set(config.instance, counts);
+  }
+  counts.set(taskId, (counts.get(taskId) ?? 0) + 1);
+  try {
+    return await resumeChatTaskInner(config, taskId, toolCallId, toolResult);
+  } finally {
+    const remaining = (counts.get(taskId) ?? 1) - 1;
+    if (remaining > 0) counts.set(taskId, remaining);
+    else counts.delete(taskId);
+    if (counts.size === 0) inFlightResumes.delete(config.instance);
+  }
+}
+
+async function resumeChatTaskInner(
   config: RuntimeConfig,
   taskId: string,
   toolCallId: string,
@@ -3823,9 +3954,47 @@ export async function resumeChatTask(
     return stage.task;
   }
 
-  // Stage 2: pull the snapshot, append tool result messages, and continue
-  // the loop.
+  // Stage 2: claim the park, then append tool result messages and continue
+  // the loop. The snapshot is pulled BEFORE the claim (the claim clears
+  // toolCallState on the task), but all transcript/block writes wait until
+  // AFTER it — the flip admits exactly one resumer, and a losing concurrent
+  // resumer that had already persisted transcript rows and emitted
+  // tool_result blocks would leave duplicates behind its claimed:false bail.
+  // The claim itself needs nothing from that loop; it only reads the task's
+  // park status.
   const snapshot = stage.task.toolCallState!;
+
+  const stageTwo = await mutateState(config.instance, (state) => {
+    const item = findTask(state, taskId);
+    // The park→running flip IS the resume claim: exactly one caller may
+    // re-enter the loop. A terminal status set between `resumeChatTask`
+    // entry and this lock acquisition wins as before (no loop re-entry on a
+    // cancelled task), and a task that is no longer parked was claimed by a
+    // concurrent resumer (e.g. two settled-park heal entry points racing the
+    // same task) — re-entering here would run the turn twice.
+    if (item.status !== "waiting_approval" && item.status !== "needs_input") {
+      return { item, claimed: false };
+    }
+    item.status = "running";
+    item.currentStep = "Thinking";
+    item.toolCallState = undefined;
+    // The park-stamped question payload is consumed by this resume. The
+    // subagent bubble-up marker (question-only, no setupRequestId) must
+    // survive to syncSubagentFromTask, so only the park shape is cleared.
+    if (item.needsInput?.setupRequestId) item.needsInput = undefined;
+    item.updatedAt = now();
+    return { item, claimed: true };
+  });
+  const resumed = stageTwo.item;
+  if (!stageTwo.claimed) {
+    appendTrace(config.instance, taskId, {
+      type: "task",
+      message: `Resume aborted: task is already ${resumed.status}`,
+      data: { status: resumed.status }
+    });
+    return resumed;
+  }
+
   const messages = (snapshot.messages as ToolCallingMessage[]).slice();
   // Resolve the emit context once for the chat-block flips below. Tasks
   // without a chat session (subagent children) skip emission, matching
@@ -3857,27 +4026,6 @@ export async function resumeChatTask(
     if (typeof entry.result === "string") {
       emitToolResult(resumeEmitCtx, { callId: entry.toolCallId, result: entry.result });
     }
-  }
-
-  const resumed = await mutateState(config.instance, (state) => {
-    const item = findTask(state, taskId);
-    // A terminal status set between `resumeChatTask` entry and this
-    // lock acquisition wins. Skip the resume so the loop doesn't
-    // re-enter a cancelled task.
-    if (isTerminalTaskStatus(item.status)) return item;
-    item.status = "running";
-    item.currentStep = "Thinking";
-    item.toolCallState = undefined;
-    item.updatedAt = now();
-    return item;
-  });
-  if (isTerminalTaskStatus(resumed.status)) {
-    appendTrace(config.instance, taskId, {
-      type: "task",
-      message: `Resume aborted: task is already ${resumed.status}`,
-      data: { status: resumed.status }
-    });
-    return resumed;
   }
 
   appendTrace(config.instance, taskId, {

@@ -12,10 +12,11 @@ import { spawn } from "bun";
 // the *user session* token from `gws auth login` is still valid — lives
 // here instead.
 //
-// `gws auth status` prints JSON to stdout, e.g.:
-//   { "client_config_exists": true, "token_valid": false,
-//     "token_error": "reauth related error (invalid_rapt)",
+// `gws auth status` prints JSON to stdout, e.g. after a Google-side revoke:
+//   { "client_config_exists": false, "token_valid": false,
+//     "token_error": "Token has been expired or revoked.",
 //     "has_refresh_token": true, ... }
+// (a reauth challenge instead reads "reauth related error (invalid_rapt)").
 // signedIn := token_valid === true; clientConfigured := client_config_exists.
 
 export interface GwsSessionStatus {
@@ -25,6 +26,13 @@ export interface GwsSessionStatus {
   clientConfigured: boolean;
   // Whether the user session token is currently valid (the live signal).
   signedIn: boolean;
+  // Whether the gws token was actively revoked (vs never signed in). True when
+  // signedIn is false AND gws still holds a refresh token that no longer yields
+  // a session (has_refresh_token with a token_error), or token_error matches a
+  // known revoke/reauth signal. This separates a revoked/expired grant (the user
+  // must re-authenticate) from a never-signed-in account (no refresh token yet).
+  // Always set by parseGwsAuthStatus.
+  tokenRevoked?: boolean;
   // Per-service grant derived from the granted OAuth scopes, keyed by the
   // google-* skill suffix. A partial consent (e.g. only Gmail) is still
   // signedIn:true but lights up only its own keys.
@@ -81,6 +89,19 @@ export function parseGwsAuthStatus(stdout: string): GwsSessionStatus {
   const obj = parsed as Record<string, unknown>;
   const clientConfigured = obj.client_config_exists === true;
   const signedIn = obj.token_valid === true;
+  const tokenError = typeof obj.token_error === "string" ? obj.token_error : "";
+  // A stored refresh token that no longer yields a session means the grant was
+  // revoked (or expired) and the user must re-authenticate. gws reports why in
+  // token_error — "Token has been expired or revoked." after a Google-side
+  // revoke, "reauth related error (invalid_rapt)" for a reauth challenge. Match
+  // structurally (a present-but-dead refresh token gws explained) so detection
+  // doesn't hinge on Google's exact wording, and keep the known error strings as
+  // a fallback for any gws build that omits has_refresh_token.
+  const hasRefreshToken = obj.has_refresh_token === true;
+  const tokenRevoked =
+    !signedIn &&
+    ((hasRefreshToken && tokenError.length > 0) ||
+      /invalid_grant|invalid_rapt|expired or revoked/i.test(tokenError));
   // gws reports `scopes` only for a live session; when signed out it's absent,
   // so every service resolves false.
   const scopes = Array.isArray(obj.scopes)
@@ -91,12 +112,13 @@ export function parseGwsAuthStatus(stdout: string): GwsSessionStatus {
     installed: true,
     clientConfigured,
     signedIn,
+    tokenRevoked,
     services: servicesFromScopes(scopes),
     scopes,
     ...(email ? { email } : {}),
     message: signedIn
       ? "Signed in to Google"
-      : clientConfigured
+      : tokenRevoked || clientConfigured
       ? "Google sign-in expired — re-auth needed"
       : "Google sign-in needed"
   };
@@ -107,6 +129,7 @@ function notInstalled(): GwsSessionStatus {
     installed: false,
     clientConfigured: false,
     signedIn: false,
+    tokenRevoked: false,
     services: servicesFromScopes([]),
     scopes: [],
     message: "gws not installed"

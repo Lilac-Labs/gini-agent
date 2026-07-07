@@ -5,6 +5,7 @@ const TONES: Record<string, string> = {
   queued: "bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 border-zinc-500/30",
   running: "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30",
   waiting_approval: "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30",
+  needs_input: "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30",
   pending: "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30",
   completed: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30",
   approved: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30",

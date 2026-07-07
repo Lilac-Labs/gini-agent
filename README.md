@@ -17,6 +17,7 @@ It's also built to be a product, not plumbing. When the agent needs you, it hand
 - [Runtime Capabilities](docs/runtime-capabilities.md): current CLI/API capability map and verification commands
 - [Model Providers](docs/providers/README.md): per-provider setup guides (credentials, prerequisites, CLI/web config) for OpenAI, Anthropic, Bedrock, Azure, OpenRouter, DeepSeek, Codex, and Local
 - [Operations](docs/operations.md): install, start, stop, smoke, diagnostics, and cleanup
+- [Docker Deployment](docs/deployment-docker.md): run an instance headless in a container with a real browser under Xvfb
 - [Remote Access](docs/remote-access.md): tunnel modes and confirmation, plus a self-contained guide per tunnel provider — [Gini Relay](docs/remote-access/gini-relay.md), [Tailscale](docs/remote-access/tailscale.md), [ngrok](docs/remote-access/ngrok.md), [Cloudflare](docs/remote-access/cloudflare.md) — the same pages the app opens inline
 - [Releases](docs/releases.md): versioning, CHANGELOG conventions, and the release process
 - [Migrating from openclaw](docs/migration-from-openclaw.md): import an existing openclaw install into gini

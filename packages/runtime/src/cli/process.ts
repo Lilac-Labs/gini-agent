@@ -251,18 +251,15 @@ export async function start(config: RuntimeConfig, options: WebOptions): Promise
     ? { started: true, url: url(config), instance: config.instance }
     : { running: true, url: url(config), instance: config.instance };
   // Advertise the GATEWAY origin as the operator's Web link, not the inner
-  // Next port: the gateway is the single front that serves the UI AND natively
-  // handles /api/pairing/* for every relay/remote front. (The inner Next port
-  // bridges /api/pairing/* to the gateway only for loopback — see
-  // web/src/lib/pairing-proxy.ts — so the gateway origin is the one that works
-  // everywhere.) The inner port is kept only for liveness detection (webUrlValue).
+  // Next port: the gateway is the single front that serves the UI for every
+  // front. The inner port is kept only for liveness detection (webUrlValue).
   if (webUrlValue) banner.webUrl = operatorWebUrl(config);
   if (foreground) banner.foreground = true;
   return { runtimeStarted, banner, children };
 }
 
 // The web URL shown to the operator: the GATEWAY origin (it reverse-proxies the
-// UI and natively serves /api/pairing/*), not the inner Next port. localhost is
+// UI), not the inner Next port. localhost is
 // friendlier than 127.0.0.1 and resolves to the loopback the gateway binds.
 export function operatorWebUrl(config: RuntimeConfig): string {
   return `http://localhost:${config.port}`;
@@ -537,12 +534,24 @@ async function canListen(port: number): Promise<boolean> {
   // (different addresses, kernel doesn't refuse). On v4-only
   // hosts (CI), the ::1 probe is skipped — a v6 squatter can't
   // exist on a host that doesn't have v6 enabled.
+  //
+  // Probe SEQUENTIALLY, not in parallel. On Linux the kernel refuses a
+  // wildcard 0.0.0.0:N bind while 127.0.0.1:N is held, so a parallel
+  // Promise.all batch has the 127.0.0.1 probe collide with the sibling
+  // 0.0.0.0 probe on the SAME port — every candidate then fails and the
+  // walk exhausts (observed in a Linux container; macOS's permissive
+  // dual-stack binding masked it). Binding and closing each address in
+  // turn removes the self-collision while still detecting a real squatter
+  // on any address. The cost is a few extra serial binds per candidate,
+  // each sub-millisecond on a free port.
   const ipv6Available = await ipv6AvailablePromise;
-  const probes = ipv6Available
-    ? [probe(port, "127.0.0.1"), probe(port, "::1"), probe(port, "0.0.0.0")]
-    : [probe(port, "127.0.0.1"), probe(port, "0.0.0.0")];
-  const results = await Promise.all(probes);
-  return results.every(Boolean);
+  const hosts = ipv6Available
+    ? ["127.0.0.1", "::1", "0.0.0.0"]
+    : ["127.0.0.1", "0.0.0.0"];
+  for (const host of hosts) {
+    if (!(await probe(port, host))) return false;
+  }
+  return true;
 }
 
 function probe(port: number, host: string): Promise<boolean> {
@@ -755,7 +764,7 @@ export async function doctor(config: RuntimeConfig, options: WebOptions) {
 export async function waitForTask(config: RuntimeConfig, taskId: string): Promise<void> {
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const detail = await api(config, `/api/tasks/${taskId}`);
-    if (["completed", "failed", "waiting_approval"].includes(detail.task.status)) return;
+    if (["completed", "failed", "waiting_approval", "needs_input"].includes(detail.task.status)) return;
     await Bun.sleep(100);
   }
   throw new Error(`Task did not settle: ${taskId}`);

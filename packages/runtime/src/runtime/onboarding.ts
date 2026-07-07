@@ -1,0 +1,417 @@
+// Browser-facing web onboarding endpoints (ADR web-onboarding-flow.md).
+//
+// The webapp's /onboarding first-run flow drives four endpoints, all thin
+// delegations from src/http.ts into this module:
+//
+//   - GET  /api/onboarding          → getOnboarding (grandfathering on first
+//     read; staleness guard for a running scan orphaned by a restart)
+//   - PATCH /api/onboarding         → patchOnboarding (timezone/theme/completed)
+//   - POST /api/onboarding/scan     → startOnboardingScan (kick off the
+//     deterministic profile scan; idempotent; no_account when Gmail is
+//     unreachable)
+//   - POST /api/onboarding/routines → applyOnboardingRoutines (idempotent
+//     replace of the starter routine jobs via the jobs module)
+//
+// The record itself persists at ~/.gini/instances/<instance>/onboarding.json
+// (src/state/onboarding.ts). The scan is a deterministic in-runtime pipeline
+// (src/runtime/onboarding-scan.ts): one `gws auth export` mints a Gmail access
+// token, direct parallel Gmail HTTP reads fetch the mailbox with no model and
+// no tool loop, then two parallel structured model calls synthesize the
+// profile and the suggested tasks. startOnboardingScan runs it in the
+// background and finalizes the record + pushes an `onboarding` event over the
+// events stream (the browser is notified instead of polling). Validation
+// errors throw with the "Invalid input:" prefix the gateway maps to a 400.
+
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+import { assertSkillNamesResolve, createScheduledJob, removeJob } from "../jobs";
+import { appendEvent, mutateState, readState } from "../state";
+import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../state/google-accounts";
+import { now } from "../state/ids";
+import { defaultOnboardingRecord, readOnboarding, writeOnboarding } from "../state/onboarding";
+import { runProfileScan } from "./onboarding-scan";
+import type { ChatSessionRecord, JobRecord, OnboardingProfile, OnboardingRecord, OnboardingScan, RuntimeConfig, Task } from "../types";
+
+// A running scan older than this is treated as orphaned by a runtime restart
+// (the background pipeline died with the process) and flipped to failed on the
+// next GET, so the web's "Try again" resubmits it. The deterministic pipeline
+// (one parallel HTTP fetch window + two parallel model calls) settles well
+// within this.
+const SCAN_STALE_MS = 5 * 60_000;
+
+// Read the record, applying the two lazy side effects the contract assigns to
+// GET: (a) grandfathering — an instance with existing USER usage (any
+// user-attributable chat session, task, or scheduled job) on FIRST read is
+// marked completed immediately, so existing users are never funneled into the
+// first-run flow;
+// (b) a "running" scan orphaned by a runtime restart (older than SCAN_STALE_MS)
+// is flipped to failed so the web can resubmit it. A genuinely fresh instance
+// gets the default record WITHOUT persisting it; the first PATCH/scan write
+// creates the file.
+export function getOnboarding(config: RuntimeConfig): OnboardingRecord {
+  const record = readOnboarding(config.instance);
+  if (!record) {
+    const fresh = defaultOnboardingRecord();
+    const state = readState(config.instance);
+    // Scheduled jobs count as user evidence too: an existing instance may
+    // hold nothing but jobs (every session job-origin, every task
+    // jobId-stamped). Onboarding-created jobs can't feed back into this
+    // check — the record file is persisted before any routine job exists.
+    if (state.chatSessions.some(isUserSession) || state.tasks.some(isUserTask) || state.jobs.length > 0) {
+      fresh.completed = true;
+      fresh.completedAt = now();
+      writeOnboarding(config.instance, fresh);
+    }
+    return fresh;
+  }
+  failStaleScan(config, record);
+  return record;
+}
+
+// Grandfathering keys on user-attributable usage only: the runtime creates
+// sessions and tasks of its own accord — job-spawned channel sessions (the
+// daily skill-review digest), feature-stamped channels, cron-fired job tasks
+// and their subagent children — and none of those mean a human has ever used
+// this instance.
+function isUserSession(session: ChatSessionRecord): boolean {
+  if (session.origin === "job" || session.feature !== undefined) return false;
+  // Auto-materialized canonical chats are empty: reading an agent's chat
+  // creates its kind:"agent" session as a GET side effect. Only a session
+  // with actual content (messages or tasks) is evidence a human used it.
+  return (session.messageIds?.length ?? 0) > 0 || (session.taskIds?.length ?? 0) > 0;
+}
+
+function isUserTask(task: Task): boolean {
+  return task.jobId === undefined && task.parentTaskId === undefined;
+}
+
+// Staleness guard: a scan whose background pipeline was orphaned by a runtime
+// restart stays "running" forever (the in-process pipeline died with the
+// process). Flip a running scan older than SCAN_STALE_MS to failed so the web's
+// "Try again" resubmits it; a genuinely in-flight scan (younger, or with no
+// startedAt) is left untouched — it finalizes itself via the background
+// pipeline's event push. Mutates + persists the record in place.
+function failStaleScan(config: RuntimeConfig, record: OnboardingRecord): void {
+  if (record.scan.status !== "running") return;
+  const startedAt = record.scan.startedAt ? Date.parse(record.scan.startedAt) : NaN;
+  if (!Number.isFinite(startedAt) || Date.now() - startedAt < SCAN_STALE_MS) return;
+  record.scan = { ...record.scan, status: "failed", error: "Scan interrupted — please try again.", finishedAt: now() };
+  writeOnboarding(config.instance, record);
+}
+
+// PATCH body: { timezone?, theme?, completed? }. Each field is validated
+// before any write; completed:true stamps completedAt once.
+export function patchOnboarding(config: RuntimeConfig, payload: Record<string, unknown>): OnboardingRecord {
+  const record = getOnboarding(config);
+  if (payload.timezone !== undefined) {
+    record.timezone = validateTimezone(payload.timezone);
+  }
+  if (payload.theme !== undefined) {
+    if (payload.theme !== "light" && payload.theme !== "dark") {
+      throw new Error(`Invalid input: theme must be "light" or "dark" (got ${String(payload.theme)})`);
+    }
+    record.theme = payload.theme;
+  }
+  if (payload.completed !== undefined) {
+    if (typeof payload.completed !== "boolean") {
+      throw new Error(`Invalid input: completed must be a boolean (got ${String(payload.completed)})`);
+    }
+    record.completed = payload.completed;
+    if (payload.completed) record.completedAt ??= now();
+    else delete record.completedAt;
+  }
+  writeOnboarding(config.instance, record);
+  return record;
+}
+
+// Kick off the Gmail profile scan. A completed record is returned untouched:
+// a completed user mounts /onboarding just long enough for the gate to
+// redirect home, and that mount must never spawn a scan (defense in depth
+// behind the web-side idle guard). Otherwise idempotent: a scan that is still
+// running (a second POST is a no-op — the first pipeline is the only one) or
+// already ready is returned as-is. With no detectable Google access the scan
+// lands in "no_account" without running the pipeline; idle/failed/no_account
+// all (re)submit, so a retry after connecting an account just works.
+//
+// The deterministic pipeline (mint a Gmail token via gws auth export →
+// parallel HTTP mailbox fetch → two parallel structured model calls) runs in
+// the BACKGROUND: the record is flipped to "running" and returned immediately,
+// and finalizeScan writes the terminal record + pushes an `onboarding` event
+// when it settles.
+export async function startOnboardingScan(config: RuntimeConfig): Promise<OnboardingRecord> {
+  const record = getOnboarding(config);
+  if (record.completed) return record;
+  if (record.scan.status === "running" || record.scan.status === "ready") return record;
+  if (!hasGoogleAccess()) {
+    record.scan = { status: "no_account" };
+    writeOnboarding(config.instance, record);
+    return record;
+  }
+  record.scan = { status: "running", startedAt: now() };
+  writeOnboarding(config.instance, record);
+  const configDir = resolveScanConfigDir();
+  // Fire-and-forget: run the pipeline off the request, then finalize. Any
+  // pipeline fault already resolves inside runProfileScan (never throws); the
+  // extra .catch is belt-and-suspenders so an unexpected throw still finalizes.
+  void runProfileScan(config, { ...(configDir ? { configDir } : {}) })
+    .catch((error): { status: "failed"; error: string } => ({
+      status: "failed",
+      error: error instanceof Error ? error.message : String(error)
+    }))
+    .then((outcome) => finalizeScan(config, outcome));
+  return record;
+}
+
+// Write the terminal scan record and push an `onboarding` event so the browser
+// refetches (no polling). Re-reads the record so a concurrent PATCH (theme/tz)
+// isn't clobbered, and only applies when the scan is still "running" — a
+// completed user or a resubmit that raced ahead wins. The event is
+// system-attributed (the scan has no agent owner).
+function finalizeScan(config: RuntimeConfig, outcome: { status: "ready"; profile: OnboardingProfile; suggestedTasks?: string[] } | { status: "failed"; error: string }): void {
+  const record = readOnboarding(config.instance);
+  if (!record || record.scan.status !== "running") return;
+  const scan: OnboardingScan =
+    outcome.status === "ready"
+      ? { ...record.scan, status: "ready", profile: outcome.profile, ...(outcome.suggestedTasks ? { suggestedTasks: outcome.suggestedTasks } : {}), finishedAt: now() }
+      : { ...record.scan, status: "failed", error: outcome.error, finishedAt: now() };
+  record.scan = scan;
+  writeOnboarding(config.instance, record);
+  void mutateState(config.instance, (state) => {
+    appendEvent(
+      state,
+      { kind: "onboarding", action: "onboarding.scan", target: "scan", risk: "low", summary: `Onboarding scan ${scan.status}` },
+      { system: true }
+    );
+  });
+}
+
+// Whether ANY Gmail credential is plausibly present: a registered account in
+// the machine-global registry (ADR google-multi-account.md), the hosted
+// provisioning credentials file, or a legacy default ~/.config/gws session
+// dir. Presence-only — sign-in liveness is the pipeline's problem.
+function hasGoogleAccess(): boolean {
+  if (readGoogleAccounts().length > 0) return true;
+  if (process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE) return true;
+  const home = process.env.HOME || homedir();
+  return existsSync(join(home, ".config", "gws"));
+}
+
+// The gws config dir the scan should target: the persisted primary account's
+// dir when it still names a registered row, else the first provisioned row,
+// else the first row, else undefined (default gws — the hosted baked credential
+// or a legacy ~/.config/gws session, both read without a config dir). Mirrors
+// effectivePrimaryAccountId's precedence but stays registry-only (no gws probe)
+// so kicking the scan off is cheap; the pipeline's own credential export +
+// token mint is the liveness gate.
+function resolveScanConfigDir(): string | undefined {
+  const accounts = readGoogleAccounts();
+  if (accounts.length === 0) return undefined;
+  const persisted = readPrimaryGoogleAccountId();
+  const primary =
+    (persisted ? accounts.find((a) => a.id === persisted) : undefined) ??
+    accounts.find((a) => a.provisioned) ??
+    accounts[0];
+  return primary?.configDir;
+}
+
+// POST /api/onboarding/routines body:
+//   { timezone?, autoInbox?: { enabled, labelNewMail, archiveUnimportant,
+//     assistScheduling, draftReplies }, morningBriefing?: { enabled,
+//     personalizedNews }, meetingBriefing?: { enabled } }
+// Idempotent replace: delete the jobs a previous pass created (ids that no
+// longer exist are ignored), then create one job per enabled routine via the
+// jobs module — the same createScheduledJob call POST /api/jobs makes.
+export async function applyOnboardingRoutines(
+  config: RuntimeConfig,
+  payload: Record<string, unknown>
+): Promise<{ record: OnboardingRecord; jobs: JobRecord[] }> {
+  const record = getOnboarding(config);
+  const timezone = payload.timezone !== undefined ? validateTimezone(payload.timezone) : (record.timezone ?? "UTC");
+  const specs = routineJobSpecs(payload, timezone);
+  // Every spec's skills must resolve BEFORE the previous jobs are deleted: a
+  // disabled Workspace skill then surfaces as a clean 400 with zero side
+  // effects, instead of createScheduledJob throwing mid-loop after the old
+  // routine jobs are already gone.
+  const state = readState(config.instance);
+  for (const spec of specs) {
+    assertSkillNamesResolve(state, spec.skillNames as string[]);
+  }
+  for (const jobId of record.routineJobIds) {
+    try {
+      await removeJob(config, jobId);
+    } catch {
+      // Already removed out-of-band (e.g. via DELETE /api/jobs) — ignore.
+    }
+  }
+  // Persist the tracked ids after every creation, so a job that lands before
+  // a later creation throws is never orphaned outside routineJobIds — the
+  // next apply's replace pass still deletes it.
+  record.routineJobIds = [];
+  writeOnboarding(config.instance, record);
+  const jobs: JobRecord[] = [];
+  for (const spec of specs) {
+    const job = await createScheduledJob(config, spec);
+    jobs.push(job);
+    record.routineJobIds.push(job.id);
+    writeOnboarding(config.instance, record);
+  }
+  return { record, jobs };
+}
+
+// Build the createScheduledJob payloads for the enabled routines. Prompts are
+// product-owned here (never composed in the browser) and the Auto-inbox
+// prompt is composed ONLY of the behaviors the user toggled on.
+function routineJobSpecs(payload: Record<string, unknown>, timezone: string): Record<string, unknown>[] {
+  const specs: Record<string, unknown>[] = [];
+  const autoInbox = payload.autoInbox;
+  if (flag(autoInbox, "enabled")) {
+    const behaviors: string[] = [];
+    if (flag(autoInbox, "labelNewMail")) {
+      behaviors.push("- Label new mail into sensible Gmail labels.");
+    }
+    if (flag(autoInbox, "archiveUnimportant")) {
+      behaviors.push("- Archive clearly-unimportant mail (promotions, notifications) — never anything personal or important.");
+    }
+    const assistScheduling = flag(autoInbox, "assistScheduling");
+    if (assistScheduling) {
+      behaviors.push("- Detect scheduling requests and propose times based on the user's calendar.");
+    }
+    if (flag(autoInbox, "draftReplies")) {
+      behaviors.push("- Draft (never send) replies to important emails awaiting a response.");
+    }
+    if (behaviors.length > 0) {
+      specs.push({
+        name: "Auto-inbox",
+        cronExpression: "*/30 * * * *",
+        cronTimezone: timezone,
+        skillNames: assistScheduling ? ["google-gmail", "google-calendar"] : ["google-gmail"],
+        prompt: [
+          "Tidy the user's Gmail inbox: work through mail that arrived since the last run.",
+          ...behaviors,
+          "Gini never sends email or messages without the user's review — save drafts only, never send."
+        ].join("\n")
+      });
+    }
+  }
+  if (flag(payload.morningBriefing, "enabled")) {
+    const personalizedNews = flag(payload.morningBriefing, "personalizedNews");
+    specs.push({
+      name: "Morning Briefing",
+      cronExpression: "0 8 * * *",
+      cronTimezone: timezone,
+      skillNames: ["google-gmail", "google-calendar"],
+      forwardToChat: true,
+      prompt: [
+        "Prepare the user's morning briefing: a brief digest of important unread email plus today's calendar.",
+        ...(personalizedNews
+          ? ["Add a short section of news relevant to the user's work, using what you know about them from memory and their profile."]
+          : [])
+      ].join("\n")
+    });
+  }
+  if (flag(payload.meetingBriefing, "enabled")) {
+    specs.push({
+      name: "Meeting Briefing",
+      cronExpression: "*/15 * * * *",
+      cronTimezone: timezone,
+      skillNames: ["google-calendar", "google-gmail"],
+      forwardToChat: true,
+      prompt:
+        "Check the user's calendar for meetings starting within the next hour that haven't been briefed yet. When one is found, prepare a prep note: attendees, recent email context with them, and the agenda. Otherwise do nothing and finish quietly."
+    });
+  }
+  return specs;
+}
+
+// Strict boolean read off an untyped sub-object: only `true` counts.
+function flag(section: unknown, key: string): boolean {
+  return !!section && typeof section === "object" && (section as Record<string, unknown>)[key] === true;
+}
+
+// Probe-validate an IANA timezone by constructing a formatter with it — Intl
+// throws a RangeError on unknown zones. A membership check against
+// Intl.supportedValuesOf("timeZone") would be wrong here: that list is
+// NARROWER than what Intl (and croner, which also resolves zones through
+// Intl) accepts — this runtime's ICU lists legacy aliases like Asia/Calcutta
+// while browsers report the modern canonical Asia/Kolkata, so real user
+// timezones would be rejected. A zone that passes the probe never fails job
+// creation. Used by both the PATCH and routines paths.
+function validateTimezone(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error("Invalid input: timezone must be a non-empty string");
+  }
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: value });
+  } catch {
+    throw new Error(`Invalid input: timezone "${value}" is not a valid IANA timezone`);
+  }
+  return value;
+}
+
+// Upper bounds folded over the scan deliverable. The deliverable is model
+// text derived from attacker-controllable email, and suggestedTasks render as
+// pre-checked one-click task seeds — so oversized output is clamped rather
+// than rejected (bounds are generous relative to the prompt's asks).
+const MAX_SUGGESTED_TASKS = 10;
+const MAX_PROFILE_SECTIONS = 12;
+const MAX_SECTION_BULLETS = 12;
+const MAX_LINE_CHARS = 300;
+const MAX_NOTE_CHARS = 1000;
+
+// Shape-check + clamp the profile call's structured deliverable
+// `{ profile: { displayName, sections[] } }`, returning the clamped profile or
+// undefined on an invalid shape. Reused as the profile synthesis call's
+// structured-output validator (src/runtime/onboarding-scan.ts).
+export function validateScanProfile(value: unknown): OnboardingProfile | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const profile = (value as { profile?: unknown }).profile;
+  if (!isProfile(profile)) return undefined;
+  return clampProfile(profile);
+}
+
+// Shape-check + clamp the tasks call's structured deliverable
+// `{ suggestedTasks: [...] }`, returning the clamped list (possibly empty once
+// invalid entries drop) or undefined when the field is missing/not an array.
+// Reused as the tasks synthesis call's structured-output validator.
+export function validateScanTasks(value: unknown): string[] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const rawTasks = (value as { suggestedTasks?: unknown }).suggestedTasks;
+  if (!Array.isArray(rawTasks)) return undefined;
+  return rawTasks
+    .filter((t): t is string => typeof t === "string" && t.trim().length > 0 && t.length <= MAX_LINE_CHARS)
+    .slice(0, MAX_SUGGESTED_TASKS);
+}
+
+// Truncate profile strings and cap section/bullet counts — keep what fits,
+// drop the rest.
+function clampProfile(profile: OnboardingProfile): OnboardingProfile {
+  return {
+    displayName: profile.displayName.slice(0, MAX_LINE_CHARS),
+    sections: profile.sections.slice(0, MAX_PROFILE_SECTIONS).map((section) => ({
+      title: section.title.slice(0, MAX_LINE_CHARS),
+      ...(section.bullets
+        ? { bullets: section.bullets.slice(0, MAX_SECTION_BULLETS).map((bullet) => bullet.slice(0, MAX_LINE_CHARS)) }
+        : {}),
+      ...(section.note !== undefined ? { note: section.note.slice(0, MAX_NOTE_CHARS) } : {})
+    }))
+  };
+}
+
+function isProfile(value: unknown): value is OnboardingProfile {
+  if (!value || typeof value !== "object") return false;
+  const o = value as Record<string, unknown>;
+  if (typeof o.displayName !== "string" || o.displayName.length === 0) return false;
+  if (!Array.isArray(o.sections)) return false;
+  return o.sections.every(isProfileSection);
+}
+
+function isProfileSection(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const o = value as Record<string, unknown>;
+  if (typeof o.title !== "string" || o.title.length === 0) return false;
+  if (o.bullets !== undefined && !(Array.isArray(o.bullets) && o.bullets.every((b) => typeof b === "string"))) return false;
+  if (o.note !== undefined && typeof o.note !== "string") return false;
+  return true;
+}

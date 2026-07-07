@@ -67,7 +67,7 @@ codex/echo — that is the explicit provider-*removal* path, not this.)
   are never selected as a fallback for a different provider.
 - The proxy's fail-open contract is unchanged: a failed `/api/setup/status` fetch
   (`null`) still means "no redirect"; only `providerConfigured === false`
-  redirects; `/setup`, `/pair`, `/api/*` stay exempt. Only the *value* of
+  redirects; `/setup` and `/api/*` stay exempt. Only the *value* of
   `providerConfigured` changed.
 - When the active agent is pinned to a configured provider but the instance
   default is unconfigured, setup-status reports `usingFallback` (so the proxy

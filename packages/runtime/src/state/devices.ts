@@ -9,11 +9,11 @@
 // registered to one credential at a time — re-registering rebinds the
 // row.
 //
-// "credential_id" semantics: the caller's identity as resolved by
-// governance/pairing.ts:authorizedBearer. For mobile clients that
-// completed the pairing flow it's the PairedDevice id; for the runtime
-// config token it's the literal string "owner". The APNs dispatcher
-// uses this to scope a fan-out to all iOS installs of the same human.
+// "credential_id" semantics: the caller's identity as resolved by the
+// owner-token bearer gate in src/http.ts — always the literal string
+// "owner" (one runtime, one human; see ADR owner-token-auth.md). The
+// APNs dispatcher uses this to scope a fan-out to all iOS installs of
+// the same human.
 
 import type { Instance } from "../types";
 import { now } from "./ids";

@@ -152,6 +152,48 @@ export function readSecretsEnvBody(): string | undefined {
   }
 }
 
+// Parse a shell-format `KEY=VALUE` file (the same shape writeKeyToSecretsEnv
+// produces). Supports `export KEY=value`, bare `KEY=value`, single-quoted,
+// double-quoted, and unquoted values. Comments and blank lines are skipped.
+// Values are returned in their final unescaped form (via unquoteSecretsValue),
+// ready to drop into launchd's EnvironmentVariables or process.env.
+export function parseSecretsEnv(body: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const rawLine of body.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!match) continue;
+    const key = match[1]!;
+    out[key] = unquoteSecretsValue(match[2] ?? "");
+  }
+  return out;
+}
+
+// Load ~/.gini/secrets.env into this process's own env so env-keyed provider
+// credentials (notably bedrock's AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY) are
+// present under EVERY launch path — including tmux `bun run gini run`, which
+// bypasses both the installed `gini` wrapper's `set -a; . secrets.env` and the
+// launchd plist's baked-in EnvironmentVariables.
+//
+// Fill-missing: a key is only set when process.env[KEY] is undefined or empty,
+// so an ambiently-exported value (e.g. a user who exports AWS_* incl.
+// AWS_SESSION_TOKEN themselves) always wins. Best-effort — never throws; an
+// absent or unreadable file yields []. Returns the keys it actually set.
+export function loadSecretsEnvIntoProcess(): string[] {
+  const body = readSecretsEnvBody();
+  if (body === undefined) return [];
+  const set: string[] = [];
+  for (const [key, value] of Object.entries(parseSecretsEnv(body))) {
+    const current = process.env[key];
+    if (current === undefined || current === "") {
+      process.env[key] = value;
+      set.push(key);
+    }
+  }
+  return set;
+}
+
 // Predicate: does ~/.gini/secrets.env already carry a NON-EMPTY value
 // for this env-var name? Used by callers that want to avoid silently
 // clobbering an existing key — `gini import apply openclaw` notably

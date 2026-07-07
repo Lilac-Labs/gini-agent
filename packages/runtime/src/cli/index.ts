@@ -3,6 +3,7 @@
 
 import "../hooks/builtins"; // registers trusted hook handlers (skill-script) so any in-process createScheduledJob path resolves isKnownHook
 import { defaultWebPort, loadConfig, parseInstance } from "../paths";
+import { loadSecretsEnvIntoProcess } from "../state/secrets-env";
 import type { RuntimeConfig } from "../types";
 import { applyGlobalEnvOverrides, flagValue, hasFlag, stripGlobalArgs } from "./args";
 import type { CliContext } from "./context";
@@ -19,7 +20,6 @@ import { job } from "./commands/jobs";
 import { email } from "./commands/email";
 import { connector } from "./commands/connectors";
 import { improvement } from "./commands/improvements";
-import { pairing, device } from "./commands/pairing";
 import { mobile } from "./commands/mobile";
 import { search } from "./commands/search";
 import { toolset } from "./commands/toolsets";
@@ -50,6 +50,14 @@ export async function run(): Promise<void> {
   const args = Bun.argv.slice(2);
   const cliArgs = stripGlobalArgs(args);
   const command = cliArgs[0] ?? "help";
+  // Populate this process's env from ~/.gini/secrets.env so CLI-local,
+  // single-process commands that read creds themselves (provider show, status,
+  // setup) report accurate health. Skip `run`/`start`: they spawn the Next.js
+  // web/BFF child with `env: {...process.env}`, and provider secrets must stay
+  // out of the web process (see docs/adr/bff-trust-boundary.md) — the gateway
+  // child self-loads them at its own boot instead. Skip `smoke`: it stays
+  // hermetic/offline. Fill-missing, so ambiently-exported vars still win.
+  if (command !== "run" && command !== "start" && command !== "smoke") loadSecretsEnvIntoProcess();
   const ephemeralSmoke = command === "smoke" && !hasFlag(args, "--instance") && !process.env.GINI_INSTANCE;
   // Smoke always runs headless unless the user explicitly opts in with --web.
   // Decoupled from the ephemeral-instance decision so `gini smoke --instance <x>` stays headless.
@@ -125,10 +133,6 @@ export async function run(): Promise<void> {
     case "connectors": await connector(ctx); break;
     case "improvement":
     case "improvements": await improvement(ctx); break;
-    case "pairing":
-    case "pair": await pairing(ctx); break;
-    case "device":
-    case "devices": await device(ctx); break;
     case "mobile": await mobile(ctx); break;
     case "search": await search(ctx); break;
     case "toolset":

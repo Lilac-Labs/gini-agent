@@ -111,12 +111,9 @@ async function runSmokeFlow(config: RuntimeConfig, ephemeral: boolean): Promise<
   // Exercise the validate command against every bundled SKILL.md so the
   // smoke trail surfaces drift between bundled skills and the spec rules.
   const validateReport = await api(config, "/api/skills/validate");
-  const pairingResult = await api(config, "/api/pairing", { method: "POST", body: JSON.stringify({ ttlSeconds: 300 }) });
-  const claimedDevice = await publicApi(config, "/api/pairing/claim", {
-    method: "POST",
-    body: JSON.stringify({ code: pairingResult.code, deviceName: "Smoke device" })
-  });
-  const mobileState = await apiWithToken(config, claimedDevice.token, "/api/mobile/bootstrap");
+  // The owner bearer is the only credential (see ADR owner-token-auth.md), so
+  // the mobile contract is exercised with it directly.
+  const mobileState = await apiWithToken(config, config.token, "/api/mobile/bootstrap");
   const searchResults = await api(config, "/api/search?q=Gini");
   await api(config, "/api/toolsets/mcp/enable", { method: "POST" });
   const subagentResult = await api(config, "/api/subagents", {
@@ -177,7 +174,6 @@ async function runSmokeFlow(config: RuntimeConfig, ephemeral: boolean): Promise<
     listTaskId: listTask.id,
     findTaskId: findTask.id,
     improvementId: proposal.id,
-    pairedDeviceId: claimedDevice.device.id,
     mobileTaskCount: mobileState.tasks.length,
     searchResults: searchResults.length,
     subagentId: subagentResult.id,

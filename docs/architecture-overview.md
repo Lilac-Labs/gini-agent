@@ -30,15 +30,16 @@ Gini's **runtime is the gateway**: a single Bun process per instance owns all du
                                             │
         ┌───────────────────────────────────┼───────────────────────────────────┐
         │                                   │                                   │
-        │ token server-side only            │ paired-device token               │ bearer token
-        │                                   │                                   │
+        │ token server-side only            │ Google OAuth via                  │ bearer token
+        │                                   │ hosted edge / owner               │
+        │                                   │ bearer (self-host)                │
 ┌───────┴───────┐                  ┌────────┴────────┐                  ┌───────┴────────┐
 │   Next.js     │                  │  Expo mobile    │                  │   CLI          │
 │   BFF + UI    │                  │  app            │                  │   scripts      │
 │               │                  │                 │                  │   MCP clients  │
-│   one per     │                  │  pair via relay │                  │                │
-│   instance    │                  │  link or paste  │                  │  direct API    │
-│   localhost   │                  │  URL + token    │                  │  client        │
+│   one per     │                  │  sign in with   │                  │                │
+│   instance    │                  │  Google via the │                  │  direct API    │
+│   localhost   │                  │  hosted edge    │                  │  client        │
 └───────┬───────┘                  └─────────────────┘                  └────────────────┘
         │
         │ HTML / JS / SSE
@@ -55,7 +56,7 @@ Gini's **runtime is the gateway**: a single Bun process per instance owns all du
 
 ### Gateway
 
-- Single source of truth for tasks, conversations, runs, jobs, memory, skills, authorizations, setup requests, audit, traces, and events.
+- Single source of truth for tasks, conversations, runs, jobs, memory, skills, authorizations, setup requests, audit, traces, and events. A task is a durable container (thread + lifecycle + derived attention) and a run is one agent-loop execution inside it — see [Task Containers And Runs](./adr/task-containers-and-runs.md).
 - One process per instance.
 - Authenticated HTTP API plus SSE event stream.
 - JSON state for broad runtime records and SQLite for memory.
@@ -80,7 +81,7 @@ Gini's **runtime is the gateway**: a single Bun process per instance owns all du
 
 ### Other Clients
 
-The Expo mobile app is a gateway client (it holds its own bearer token and can obtain one via relay-link pairing — see [Device-Pairing Authentication](adr/device-pairing-auth.md)). MCP, messaging bridges, and scripts connect through the same gateway contract. Clients that can safely hold a token may call the gateway directly; browser clients go through a BFF.
+The Expo mobile app is a gateway client: on the hosted deployment it signs in with Google via the edge and stores the edge session token as its bearer; against a self-hosted gateway it uses the owner bearer (see [Owner-Token-Only Authentication](adr/owner-token-auth.md)). MCP, messaging bridges, and scripts connect through the same gateway contract. Clients that can safely hold a token may call the gateway directly; browser clients go through a BFF.
 
 ## Why This Shape
 
@@ -120,9 +121,10 @@ The current capability map is in [Runtime Capabilities](./runtime-capabilities.m
 - `/api/status`, `/api/healthz`, `/api/state`
 - `/api/version`, `/api/update/check`, `/api/update`
 - `/api/tasks`, `/api/usage`, `/api/chat`, `/api/runs`, `/api/authorizations`, `/api/setup-requests`
+- `/api/home`, `/api/containers` (the home attention queue and task-container mutations)
 - `/api/memory/retain`, `/api/memory/recall`, `/api/memory/reflect`, `/api/memory/units`, `/api/memory/banks`, `/api/embedding/*`, `/api/reranker/status`
 - `/api/skills`, `/api/jobs`, `/api/connectors`, `/api/toolsets`
-- `/api/pairing`, `/api/pairing/request*` (relay device pairing), `/api/devices`, `/api/mobile/bootstrap`
+- `/api/mobile/bootstrap`
 - `/api/push/devices`, `/api/push/preview`, `/api/push/unwatch` (APNs registration, on-device NSE preview enrichment, watch-suppression beacon)
 - `/api/messaging`, `/api/mcp`, `/api/subagents`, `/api/agents`
 - `/api/tunnel`, `/api/tunnel/select`, `/api/tunnel/connect`, `/api/tunnel/cancel`, `/api/tunnel/disconnect`
@@ -135,7 +137,7 @@ On macOS a launchd-managed instance is supervised to stay up across crashes, cle
 
 ## Off-LAN Access
 
-Off-LAN access is available through **four runtime-driven tunnel providers** — gini-relay (the managed, zero-prerequisite default), Tailscale, ngrok, and Cloudflare. The user picks a provider and connects (`gini tunnel`, or the web tunnel panel over `/api/tunnel*`). For **gini-relay**, the gateway runs an OAuth-loopback login in a browser on the host, the relay assigns the device a session and a subdomain, and a supervised native `frpc` child exposes the instance's gateway port (the single origin fronting UI + API) at `https://<subdomain>.<relayDomain>` (`relayDomain` default `gini-relay.lilaclabs.ai`, overridable via `GINI_RELAY_DOMAIN`). `tailscale`, `ngrok`, and `cloudflare` are equally drivable when their host prerequisite is detected — the runtime runs `tailscale serve`, `ngrok http`, or a cloudflared tunnel itself; a connect attempt on a provider whose prerequisite is missing is rejected with the machine-readable `provider_unavailable` code, which the web UI uses to open that provider's self-contained guide inline (per-provider pages under [Remote Access](./remote-access.md)). The gateway owns the relay / runtime-tunnel / loopback / `GINI_TRUSTED_ORIGINS` trust decision for web-bound requests — a runtime-managed tunnel's connected URL is trusted automatically, exactly while connected — and rewrites `Host`/`Origin` to loopback before proxying, so the inner web child (BFF) stays relay-agnostic. On top of that host trust, a web request on a non-loopback front must also be **paired**: it needs a `gini_session` cookie minted through an operator-approved device-pairing handshake, or its page navigations are redirected to `/pair` and its `/api/runtime/*` calls 401. Loopback is trusted with no pairing. See [Tunnel Connectivity](./adr/tunnel-connectivity.md), [BFF Trust Boundary](./adr/bff-trust-boundary.md), and [Device-Pairing Authentication](./adr/device-pairing-auth.md).
+Off-LAN access is available through **four runtime-driven tunnel providers** — gini-relay (the managed, zero-prerequisite default), Tailscale, ngrok, and Cloudflare. The user picks a provider and connects (`gini tunnel`, or the web tunnel panel over `/api/tunnel*`). For **gini-relay**, the gateway runs an OAuth-loopback login in a browser on the host, the relay assigns the device a session and a subdomain, and a supervised native `frpc` child exposes the instance's gateway port (the single origin fronting UI + API) at `https://<subdomain>.<relayDomain>` (`relayDomain` default `gini-relay.lilaclabs.ai`, overridable via `GINI_RELAY_DOMAIN`). `tailscale`, `ngrok`, and `cloudflare` are equally drivable when their host prerequisite is detected — the runtime runs `tailscale serve`, `ngrok http`, or a cloudflared tunnel itself; a connect attempt on a provider whose prerequisite is missing is rejected with the machine-readable `provider_unavailable` code, which the web UI uses to open that provider's self-contained guide inline (per-provider pages under [Remote Access](./remote-access.md)). The gateway owns the relay / runtime-tunnel / loopback / `GINI_TRUSTED_ORIGINS` trust decision for web-bound requests — a runtime-managed tunnel's connected URL is trusted automatically, exactly while connected — and rewrites `Host`/`Origin` to loopback before proxying, so the inner web child (BFF) stays relay-agnostic. Those host/origin trust lanes are the whole gate: a trusted non-loopback front is owner-equivalent, exactly like loopback, so expose a front only to devices you fully trust (remote multi-user access is the hosted edge's job). See [Tunnel Connectivity](./adr/tunnel-connectivity.md), [BFF Trust Boundary](./adr/bff-trust-boundary.md), and [Owner-Token-Only Authentication](./adr/owner-token-auth.md).
 
 ## Mobile + Push
 

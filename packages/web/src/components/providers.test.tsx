@@ -1,10 +1,10 @@
 /// <reference lib="dom" />
 
 // Providers wires ThemeProvider + QueryClientProvider + Toaster and gates the
-// global RuntimeStreamBridge off the /pair route. These tests mock the heavy
+// global RuntimeStreamBridge off the /login route. These tests mock the heavy
 // children (next-themes, sonner's Toaster, RuntimeStreamBridge) and next/
 // navigation's usePathname to cover: the bridge mounts on a normal route and is
-// skipped on /pair, a null pathname coerces to "not on pair", and the
+// skipped on /login, a null pathname coerces to "not on login", and the
 // module-level console.error wrap both swallows the next-themes script-tag
 // warning and passes every other error through.
 //
@@ -51,7 +51,7 @@ beforeAll(async () => {
   }));
   // Same rationale as RuntimeStreamBridge: don't pull the real UpdateGate src
   // (and its query/mutation deps) into the coverage gate. The stub renders its
-  // children so the wrapped app still appears on non-/pair routes.
+  // children so the wrapped app still appears on non-/login routes.
   mock.module("./UpdateGate", () => ({
     UpdateGateProvider: ({ children }: { children: React.ReactNode }) => (
       <div data-testid="update-gate-stub">{children}</div>
@@ -86,8 +86,8 @@ describe("Providers", () => {
     expect(screen.queryByTestId("theme-provider")).not.toBeNull();
   });
 
-  test("/pair: skips the RuntimeStreamBridge, banner, and update gate but still renders children", () => {
-    pathname = "/pair";
+  test("/login: skips the RuntimeStreamBridge, banner, and update gate but still renders children", () => {
+    pathname = "/login";
     render(<Providers>{CHILD}</Providers>);
     expect(screen.queryByTestId("stream-bridge-stub")).toBeNull();
     expect(screen.queryByTestId("connection-banner-stub")).toBeNull();
@@ -95,7 +95,7 @@ describe("Providers", () => {
     expect(screen.queryByTestId("child")).not.toBeNull();
   });
 
-  test("null pathname is treated as not-on-pair and mounts the bridge", () => {
+  test("null pathname is treated as not-on-login and mounts the bridge", () => {
     pathname = null;
     render(<Providers>{CHILD}</Providers>);
     expect(screen.queryByTestId("stream-bridge-stub")).not.toBeNull();

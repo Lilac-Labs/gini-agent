@@ -22,18 +22,25 @@ import { createTask, listChatBlocks, mutateState, readState, upsertTask } from "
 import { listMainChatBlocks } from "../state/chat-blocks";
 import type { RuntimeConfig, Task } from "../types";
 import { createChat, submitChatMessage as submitChatMessageRaw } from "./chat";
+import { settleSubmittedChatMessage, type SettledDispatch } from "./chat-test-support";
 import { runChatTask } from "./chat-task";
 
-// These tests submit on idle sessions, which always run immediately. Narrow
-// the submit union to the run-now branch so the existing `.taskId` reads stay
-// typed (a queued result here is a test-setup bug). See ADR
-// chat-message-queue.md.
+// These tests submit on idle sessions, which always run immediately. Settle
+// the echo-first ack into the dispatched turn and narrow to the run-now
+// branch so the existing `.taskId` reads stay typed (a queued result here is
+// a test-setup bug). See ADR chat-message-queue.md.
 async function submitChatMessage(
   ...args: Parameters<typeof submitChatMessageRaw>
-): Promise<Extract<Awaited<ReturnType<typeof submitChatMessageRaw>>, { taskId: string }>> {
+): Promise<Extract<SettledDispatch, { taskId: string }>> {
   const result = await submitChatMessageRaw(...args);
-  if ("queued" in result) throw new Error("expected run-now submission, got queued");
-  return result;
+  const settled = await settleSubmittedChatMessage(
+    args[0],
+    args[1],
+    result,
+    String(args[2].content ?? "")
+  );
+  if ("queued" in settled) throw new Error("expected run-now submission, got queued");
+  return settled;
 }
 
 function buildConfig(workspaceRoot: string, instance: string): RuntimeConfig {

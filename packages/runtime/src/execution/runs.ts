@@ -96,7 +96,10 @@ function hydrateRun(state: ReturnType<typeof readState>, run: RunRecord) {
 }
 
 function taskToRunStatus(status: Task["status"]): RunStatus {
-  if (status === "waiting_approval") return "waiting_approval";
+  // needs_input is a Task-level refinement of the same park; RunRecord's
+  // union deliberately does NOT grow (rename staging — RunRecord is slated
+  // for consolidation, so its wire contract stays frozen).
+  if (status === "waiting_approval" || status === "needs_input") return "waiting_approval";
   return status;
 }
 

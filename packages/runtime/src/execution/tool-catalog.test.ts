@@ -78,7 +78,7 @@ function stateWithToolsets(toolsets: ToolsetRecord[]): RuntimeState {
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     tasks: [], authorizations: [], setupRequests: [], audit: [], skills: [], jobs: [],
-    connectors: [], improvements: [], skillOutcomes: [], learningFindings: [], pairingCodes: [], pairingRequests: [], devices: [],
+    connectors: [], improvements: [], skillOutcomes: [], learningFindings: [],
     promotions: [], snapshots: [], tools: [], toolsets, subagents: [],
     mcpServers: [], messagingBridges: [], importReports: [], agents: [],
     activeAgentId: undefined, relays: [], notifications: [], emailWatchers: [], events: [],
@@ -98,6 +98,10 @@ const ALWAYS_ON = new Set([
   "read_skill",
   "record_skill_feedback",
   "spawn_subagent",
+  // spawn_task rides alongside spawn_subagent: same non-default "subagents"
+  // toolset, same always-on rationale; the child-task path is depth-capped,
+  // dedup-keyed, and audited.
+  "spawn_task",
   "create_job",
   "list_jobs",
   "update_job",
@@ -482,6 +486,27 @@ describe("buildToolCatalog", () => {
       expect(desc).toContain("NEVER for ordinary text");
       expect(desc).toContain("you never see the values");
     });
+  });
+
+  test("ask_user is options-only and open-ended asks steer to plain message text", () => {
+    // The missing-substance contract: request_confirmation routes "you lack
+    // the substance" to a direct question in the model's own message text
+    // (the user's reply arrives as the next message), and ask_user's schema
+    // requires 2-6 options — the tool only presents concrete choices. Pin
+    // both descriptions so a rewrite can't reintroduce a free-text ask path.
+    const state = stateWithToolsets([]);
+    const catalog = buildToolCatalog(state);
+    const askUser = catalog.find((t) => t.function.name === "ask_user");
+    expect(askUser?.function.parameters.required).toEqual(["question", "options"]);
+    const askDesc = askUser?.function.description ?? "";
+    expect(askDesc).toContain("`options` is required");
+    expect(askDesc).toContain("ask directly in your plain message text");
+    expect(askDesc).toContain("NEVER invent multiple-choice options");
+    // The Other/Skip affordances stay UI-owned — never model-supplied.
+    expect(askDesc).toContain("do NOT include an \"Other\"");
+    const confirmDesc = catalog.find((t) => t.function.name === "request_confirmation")?.function.description ?? "";
+    expect(confirmDesc).toContain("ask for it directly in your message text");
+    expect(confirmDesc).not.toContain("question-only `ask_user`");
   });
 
   test("web_search description steers factual/lookup questions away from memory", () => {

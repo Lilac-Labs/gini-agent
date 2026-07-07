@@ -25,6 +25,23 @@ export function formatRelativeTime(input: string | number): string {
   return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+/**
+ * Format a home Recents row timestamp: same-day renders the clock time only
+ * ("12:19 PM"), anything older renders a short month/day ("Jul 1").
+ */
+export function formatRecentTimestamp(input: string | number): string {
+  const ts = typeof input === "string" ? Date.parse(input) : input;
+  if (!Number.isFinite(ts) || ts <= 0) return "";
+  const date = new Date(ts);
+  const now = new Date();
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+  if (sameDay) return date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 /** Format an ISO/ms timestamp for display next to a chat message. */
 export function formatMessageTimestamp(input: string | number): string {
   const ts = typeof input === "string" ? Date.parse(input) : input;

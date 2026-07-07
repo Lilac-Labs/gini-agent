@@ -45,28 +45,53 @@ Per-action behaviour:
   throws are also inside the lock so an aborted task with an
   invalid path emits the aborted row instead of bubbling a path
   error up to `failTask`.
-- **`terminal.exec`** — the executor races `proc.exited` against the
-  abort signal using `Promise.race`. The winner determines the
-  audit row name: "aborted" routes through `terminal.exec_aborted`
-  with `signal.reason` carrying the abort reason
-  (`task.cancelled` / `task.failed` / `sibling.denied`); "exited"
-  routes through the regular `terminal.exec`. Promise.race relies
-  on microtask ordering directly, so a same-tick "abort fires AND
-  `proc.exited` resolves" interleaving is decided deterministically
-  by whichever promise settled first (no side-flag indirection).
-  When the abort wins, the executor calls `proc.kill()` to SIGTERM
-  the immediate child. Process-group teardown is documented as a
-  known limitation: Bun's spawn does not expose a `detached` /
-  `setsid` option that turns the child into a session leader, so
-  `process.kill(-pid, signal)` would target a non-existent or our-
-  own process group and is unsafe. For commands that fork detached
-  children (`zsh -lc "sleep 30 & wait"`), the grandchildren survive
-  the cancel; auditors should treat `terminal.exec_aborted` as
-  "the runtime acknowledged the cancel" rather than "the entire
-  process tree was reaped." A pre-spawn `signal.aborted` check
-  covers the narrow window where the signal fires between the
-  claim mutateState and the `spawn()` call, emitting
-  `terminal.exec_aborted` with `evidence.spawnSkipped: true`.
+- **`terminal.exec`** — the spawn/race/kill mechanics live in the
+  bounded runner `packages/runtime/src/execution/exec-processes.ts`
+  (`runExecProcess`), shared by the approval executor and the
+  allowlist fast path. The command is spawned DETACHED (Bun spawn's
+  `detached: true`) so the child is its own process-group leader,
+  making `process.kill(-pid, signal)` a safe whole-tree kill. The
+  runner races `proc.exited` against the abort signal using
+  `Promise.race`; the winner determines the audit row name:
+  "aborted" routes through `terminal.exec_aborted` with
+  `signal.reason` carrying the abort reason (`task.cancelled` /
+  `task.failed` / `sibling.denied`); "exited" routes through the
+  regular `terminal.exec`. Promise.race relies on microtask
+  ordering directly, so a same-tick "abort fires AND `proc.exited`
+  resolves" interleaving is decided deterministically by whichever
+  promise settled first (no side-flag indirection). Aborts and the
+  `timeoutMs` budget (default 60s, matching the tool schema) both
+  kill the ENTIRE group — SIGTERM, escalating to SIGKILL after a
+  short grace — so forked grandchildren (`zsh -lc "sleep 30 &
+  wait"`) die with the shell instead of surviving as orphans.
+  Exception: with `pty: true` the `script` wrapper forkpty's the
+  command into its own session, so the group kill reaches only
+  `script` itself; the command usually dies via SIGHUP when the pty
+  master closes, but a SIGHUP-ignoring child can survive — the same
+  register as the `skill.run` process-group gap deferred below.
+  Streams are collected incrementally and the drain is BOUNDED once
+  the direct child has exited: a group escapee still holding the
+  pipe is SIGKILLed after a drain grace instead of wedging the
+  executor for its lifetime. A timed-out run keeps the regular
+  `terminal.exec` audit row (the command DID execute) with
+  `evidence.timedOut: true` + `evidence.timeoutMs`, and the tool
+  result states the budget and the kill. A pre-spawn
+  `signal.aborted` check covers the narrow window where the signal
+  fires between the claim mutateState and the `spawn()` call,
+  emitting `terminal.exec_aborted` with
+  `evidence.spawnSkipped: true`.
+
+  Beyond per-run kills, the runner tracks every live group: an
+  in-process registry lets the runtime shutdown drain
+  (`killTrackedExecProcesses`, wired in `src/server.ts`) TERM→KILL
+  all live executor groups so approved commands never outlive
+  `gini run`, and a per-execution sidecar record
+  (`<instanceRoot>/exec-live/<pid>.json`, written at spawn, cleared
+  on settle) lets the next boot reap groups orphaned by a crash
+  (`reapOrphanedExecProcesses`). The reap verifies process identity
+  before any kill — the pid must be alive AND the `ps` start time
+  and command line must match the spawn-time capture — so a
+  recycled pid is dropped, never killed.
 - **`browser.upload_file`** — Playwright's `setInputFiles` does not
   accept an `AbortSignal`. The executor calls `raceWithAbort(() =>
   browserUploadFileApproved(...), signal)`. The helper takes a
@@ -138,8 +163,10 @@ Per-action behaviour:
   `verdict.aborted` from that returned `result.aborted` (NOT the racy
   caller-side `signal.aborted`), so the gated tool_call row settles
   `denied` on a genuine kill and `ok` on a real success. Detached
-  grandchildren inside a shell script survive — the same SIGTERM-the-
-  immediate-proc limitation as `terminal.exec` below.
+  grandchildren inside a shell script survive — `invokeSkillScript`
+  still SIGTERMs only the immediate proc (it does not run through
+  the process-group runner `terminal.exec` uses); extending group
+  semantics to skill scripts is a follow-up.
 
 `cancelTask`, `failTask`, and `decideApproval-deny` each call
 `abortApprovalsForTask` from inside their own `mutateState` callback
@@ -268,21 +295,15 @@ follow-up.
   detaches the upload promise but the browser-side work continues;
   the `browser.upload_file_late_completion` audit row records the
   actual outcome.
-- True process-tree teardown for `terminal.exec` grandchildren. The
-  immediate proc gets SIGTERM via `proc.kill()`. Backgrounded /
-  detached children inside `zsh -lc cmd` survive the cancel. Fixing
-  this requires either a `setsid` wrap in `spawnArgs` (Linux-only)
-  or Bun adding a `detached` option to `spawn`. Tracked as a
-  follow-up.
+- Process-group teardown for `skill.run` scripts. `terminal.exec`
+  gained whole-group kills via the detached process-group runner
+  (`packages/runtime/src/execution/exec-processes.ts`);
+  `invokeSkillScript` still SIGTERMs only the immediate proc, so
+  backgrounded children inside a skill script survive a cancel.
+  Routing skill scripts through the same runner is the follow-up.
 - `code_exec` already routes through the `terminal.exec` approval
   (see `packages/runtime/src/execution/tool-dispatch.ts::requestCodeExec`), so it
-  inherits the SIGTERM behavior described above. The same
-  grandchildren limitation applies.
-- True process-tree teardown for `skill.run` grandchildren. The
-  script's immediate Bun process gets SIGTERM via the threaded
-  signal, but a shell script that backgrounds detached children
-  leaves them running, exactly as with `terminal.exec`. The same
-  `setsid`/`detached` fix would cover both.
+  inherits the process-group kill behavior described above.
 
 ## Audit action naming
 

@@ -81,12 +81,12 @@ export async function connector(ctx: CliContext): Promise<void> {
     }
 
     if (action === "add") {
-      // Adding a Google account requires the browser OAuth flow, which only
-      // the agent can drive (the google-account-login skill). The CLI can't
-      // open a browser and complete consent, so route the user into chat.
+      // On hosted, a Google account is connected at sign-in through the host —
+      // there is no in-chat setup flow and the CLI can't drive it. Point the
+      // user at the host sign-in instead.
       print({
         message:
-          "Adding a Google account needs the browser OAuth flow. Ask Gini in chat — e.g. \"connect another google account\" — and it runs the google-workspace-setup / google-account-login flow."
+          "On hosted, your Google account is connected at sign-in through the host — there is no in-chat setup flow. To add or reconnect a Google account, sign in through the host."
       });
       return;
     }

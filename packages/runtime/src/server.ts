@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
-import { createHandler, isWebProxyPath, proxyWebSocketUpgrade, relaySessionGateRequired, sessionCookieValue, webSocketProxyHandler, writePid } from "./http";
+import { createHandler, isWebProxyPath, proxyWebSocketUpgrade, webSocketProxyHandler, writePid } from "./http";
 import { webBoundRequestAllowed } from "./lib/origin-trust";
-import { resolveSessionFromCookie } from "./governance/pairing";
+import { resolveBindHost } from "./lib/container-env";
 import "./hooks/builtins"; // registers trusted hook handlers (skill-script) before the scheduler/backfill run
 import { runDueJobs } from "./jobs";
 import { runConnectorReprobe } from "./jobs/connector-reprobe";
@@ -14,17 +14,21 @@ import { isRunning } from "./cli/process";
 import { migrateIfNeeded } from "./memory";
 import { loadConfig, parseInstance, runtimePortPath } from "./paths";
 import { appendLog, backfillEmailWatcherJobs, healOrphanedStreamingBlocks, isTerminalTaskStatus, mutateState, now, readState } from "./state";
+import { loadSecretsEnvIntoProcess } from "./state/secrets-env";
 import { reconcileInFlightTasks } from "./agent";
+import { killTrackedExecProcesses, reapOrphanedExecProcesses } from "./execution/exec-processes";
 import { loadSkillsFromDisk } from "./capabilities/skill-loader";
 import { consumeAutostartRefresh } from "./runtime/autostart-refresh";
 import { reconcileAutostartPlistOnStartup } from "./runtime/autostart-reconcile";
 import { installCrashHandlers } from "./runtime/crash-handlers";
 import { maybeAskAboutCrashes } from "./runtime/crash-recovery";
 import { closeAll as closeBrowserSessions, setBrowserInstance, setBrowserRecording } from "./tools/browser";
+import { ensureHostedPrimaryAccount } from "./integrations/connectors/google-accounts";
 import { createTelegramPollerSupervisor } from "./integrations/telegram-poller";
 import { createDiscordPollerSupervisor } from "./integrations/discord-poller";
 import { createApnsDispatcher } from "./integrations/apns/dispatcher";
 import { reconcileTunnelOnStartup, refreshProviderDetection, stopAllTunnels } from "./integrations/tunnel";
+import { shutdownPosthog } from "./integrations/posthog";
 
 // Marks the moment this module finished loading (ms since process start), so
 // the runtime.started log can split total boot into module-load vs. the boot
@@ -47,6 +51,14 @@ const moduleLoadedMs = performance.now();
 // promptly unless a real job tick is genuinely mid-execution.
 const SERVER_DRAIN_GRACE_MS = 500;
 const SCHEDULER_DRAIN_TIMEOUT_MS = 5000;
+
+// Load ~/.gini/secrets.env into this gateway's own env before any boot work
+// or provider call. This process signs Bedrock requests, so it must carry the
+// env-keyed AWS creds under EVERY launch path — the tmux `bun run gini run`
+// path bypasses both the installed wrapper's `set -a; . secrets.env` and the
+// launchd plist's baked env. Trust-boundary safe: this is the gateway, never
+// the web/BFF process. Fill-missing, so ambiently-exported vars still win.
+loadSecretsEnvIntoProcess();
 
 const instance = parseInstance();
 const config = loadConfig(instance);
@@ -107,7 +119,7 @@ try {
     const status = tasksAtBoot.get(taskId);
     if (status === undefined) return true; // task pruned from state — orphan, safe.
     if (status === "running" || status === "queued") return false; // reconcile resumes these.
-    return isTerminalTaskStatus(status) || status === "waiting_approval";
+    return isTerminalTaskStatus(status) || status === "waiting_approval" || status === "needs_input";
   });
   if (healed > 0) {
     appendLog(config.instance, "chat.streaming.healed-orphans", { count: healed });
@@ -225,6 +237,30 @@ runConnectorDetection(config)
     });
   });
 
+// A hosted guest boots with an edge-provisioned Workspace credential baked at
+// the GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE path (ADR google-multi-account.md).
+// Register its directory as the trusted "primary" account once so the account
+// registry — and the web onboarding's sign-in/accounts steps — see the
+// signed-in account. Idempotent: an already-registered dir registers nothing,
+// though it may still backfill an unset primaryAccountId (the connector logs
+// that write against the instance passed here). A no-op without the hosted
+// markers, and best-effort: errors are absorbed so a registry problem can
+// never block startup.
+ensureHostedPrimaryAccount(config.instance)
+  .then((account) => {
+    if (account) {
+      appendLog(config.instance, "google.hosted_primary.registered", {
+        id: account.id,
+        configDir: account.configDir
+      });
+    }
+  })
+  .catch((error) => {
+    appendLog(config.instance, "google.hosted_primary.error", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
+
 // Back-fill MCP server registrations for any connectors that were already
 // healthy before the connector↔MCP bridge shipped. Idempotent and
 // best-effort: errors are absorbed so a malformed provider descriptor
@@ -270,7 +306,18 @@ const apnsDispatcher = createApnsDispatcher(config.instance);
 const httpHandler = createHandler(config);
 const server = Bun.serve({
   port: config.port,
-  hostname: "127.0.0.1",
+  // Loopback by default. A container sets GINI_BIND_HOST=0.0.0.0 so Docker's
+  // published-port forwarding (which targets the container's eth0, not
+  // loopback) reaches the gateway.
+  //
+  // SECURITY: a non-loopback bind means a remote peer can now open the socket
+  // AND forge `Host: localhost`. The gateway's local-operator trust is
+  // therefore NOT keyed on the Host header — it is keyed on the real socket
+  // peer (server.requestIP, threaded into the handler below). A forged
+  // loopback Host from a non-loopback peer gets no loopback bypass and must
+  // present the owner bearer, exactly like any remote caller.
+  // See ADR docker-xvfb-deployment.md and owner-token-auth.md.
+  hostname: resolveBindHost(),
   // Bun.serve defaults to a 10s idleTimeout. Several handlers can legitimately
   // exceed that — approval resolution for browser.connect does teardown+relaunch
   // of Chromium AND awaits resumeChatTask (which blocks on the agent's next
@@ -291,25 +338,20 @@ const server = Bun.serve({
       if (!webBoundRequestAllowed(request)) {
         return new Response("Forbidden", { status: 403 });
       }
-      // Relay session gate, mirroring the HTTP path: a non-loopback WS upgrade
-      // must carry a valid session cookie unless it targets a bootstrap path
-      // (Next HMR lives at /_next/webpack-hmr, which the unpaired /pair page
-      // needs in dev). Reject fully before bridging so no frame is accepted.
-      const wsPath = new URL(request.url).pathname;
-      const wsHost = request.headers.get("host") ?? new URL(request.url).host;
-      if (relaySessionGateRequired(wsHost, wsPath)
-          && !resolveSessionFromCookie(config, sessionCookieValue(request))) {
-        return new Response("Unauthorized", { status: 401 });
-      }
-      // The session is validated once here, at upgrade — there is deliberately no
-      // mid-stream re-validation/teardown on revocation (unlike the SSE path,
-      // which aborts on revoke). That asymmetry is safe because the ONLY WS that
-      // rides the relay is non-privileged Next HMR; all live application data
-      // (chat, events) flows over SSE, which IS torn down. Add WS re-validation
-      // only if a future app/runtime WebSocket ever carries privileged data.
+      // The only WS that rides this bridge is non-privileged Next HMR; all live
+      // application data (chat, events) flows over SSE through the bearer-gated
+      // /api surface. The host/origin trust gate above (webBoundRequestAllowed)
+      // is the whole admission check — auth is owner-token-only (see ADR
+      // owner-token-auth.md), and hosted fronts arrive through the edge, which
+      // authenticates before proxying.
       return proxyWebSocketUpgrade(request, server, config);
     }
-    return httpHandler(request);
+    // Pass the real socket peer address so the handler's loopback-operator
+    // trust is gated on where the connection actually came from, not the
+    // forgeable Host header. server.requestIP reports the kernel-level peer; it
+    // is null for closed/internal requests, which isLoopbackPeer treats as
+    // loopback (the loopback-bind default). See ADR docker-xvfb-deployment.md.
+    return httpHandler(request, server.requestIP(request)?.address ?? null);
   },
   // Bun.serve websocket handler for the bridged client sockets above.
   websocket: webSocketProxyHandler
@@ -348,6 +390,22 @@ console.log(`Gini runtime listening on http://127.0.0.1:${server.port} instance=
 maybeAskAboutCrashes(config).catch((err) =>
   appendLog(config.instance, "crash.recovery.error", { error: String(err) })
 );
+
+// Reap executor process groups orphaned by a previous runtime that died
+// without its shutdown drain (crash / SIGKILL). Identity is verified
+// against the spawn-time ps capture before any kill, so a recycled pid
+// is dropped, never killed. Best-effort, never blocks boot. See
+// src/execution/exec-processes.ts.
+reapOrphanedExecProcesses(config.instance)
+  .then((result) => {
+    if (result.reaped.length > 0 || result.dropped > 0) {
+      appendLog(config.instance, "exec.orphans.reaped", {
+        reaped: result.reaped,
+        dropped: result.dropped
+      });
+    }
+  })
+  .catch((err) => appendLog(config.instance, "exec.orphans.reap-error", { error: String(err) }));
 
 // Resume in-flight chat turns interrupted by the previous process and fail
 // any other orphaned task so nothing hangs at "Thinking…" forever. The
@@ -612,7 +670,16 @@ async function shutdown(signal: "SIGTERM" | "SIGINT"): Promise<void> {
       // relay registration severed) with the runtime instead of left
       // forwarding to a server that's going down. Errors swallowed — a stuck
       // stop shouldn't block shutdown; the OS reaps the child on exit.
-      stopAllTunnels().catch(() => {})
+      stopAllTunnels().catch(() => {}),
+      // Kill live executor process groups (approved terminal.exec runs)
+      // so approved commands never outlive the runtime as orphans. The
+      // sidecar records they leave are cleared on kill; a crash that
+      // skips this drain is covered by the boot-time reap. Errors
+      // swallowed — a stuck kill must not block shutdown.
+      killTrackedExecProcesses().catch(() => {}),
+      // Flush any buffered PostHog MCP-analytics events so trailing tool-call
+      // metadata isn't dropped on shutdown. No-op when analytics is disabled.
+      shutdownPosthog().catch(() => {})
     ]),
     Bun.sleep(SCHEDULER_DRAIN_TIMEOUT_MS).then(() => SCHEDULER_DRAIN_TIMED_OUT)
   ]).then((result) => {

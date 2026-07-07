@@ -146,6 +146,15 @@ export async function finalizeJobRunFromTask(config: RuntimeConfig, task: Task):
 
   if (!runFinalized) return;
 
+  // Delivery policy for the fan-out gates below. "silent" skips EVERY
+  // delivery surface (Topic → Chat forward, origin bridge mirror,
+  // deliveryTargets) while keeping the in-thread materialization
+  // (syncChatTaskResult) — the working thread is the run's journal. Defaults
+  // to "always" (the pre-policy behavior) for records the one-time migration
+  // missed, and for a job deleted between the write above and this read.
+  const deliveryPolicy =
+    readState(config.instance).jobs.find((candidate) => candidate.id === task.jobId)?.deliveryPolicy ?? "always";
+
   // Materialize the assistant chat message for jobs created via the
   // agent tool with a chat session. syncChatTaskResult is idempotent
   // (no-ops if the message already exists) and only writes for terminal
@@ -211,7 +220,8 @@ export async function finalizeJobRunFromTask(config: RuntimeConfig, task: Task):
       // landed in the Topic (syncChatTaskResult above). Empty / `[SILENT]`
       // replies forward nothing (resolveJobReplyText suppresses them).
       // Best-effort: a forward failure must never fail the job run.
-      if (forwardToChat && forwardAgentId) {
+      // A silent-policy job never forwards — the fan-out gate below.
+      if (forwardToChat && forwardAgentId && deliveryPolicy !== "silent") {
         try {
           const forwardText = resolveJobReplyText(readState(config.instance), chatSessionIdToSync, task);
           if (forwardText !== undefined) {
@@ -240,6 +250,12 @@ export async function finalizeJobRunFromTask(config: RuntimeConfig, task: Task):
       }
     }
   }
+  // Delivery-policy gate: a silent job's terminal run (completed OR failed)
+  // skips the remaining delivery fan-out entirely — no origin bridge mirror,
+  // no deliveryTargets dispatch. The run's output already landed in the
+  // job's (headless) working thread above; a silent watch surfaces findings
+  // by spawning keyed child tasks, never by reporting.
+  if (deliveryPolicy === "silent") return;
   // Mirror back to the originating bridge on every terminal status —
   // a failed scheduled "remind me in 20s" should still surface SOME
   // signal to the chat the user started in (the agent's error

@@ -19,7 +19,7 @@ The repository is a Bun workspaces monorepo (see ADR bun-workspaces-monorepo.md)
 - `packages/runtime/src/data/` contains the deterministic tabular (CSV/XLSX) → table importer for the agent database.
 - `packages/runtime/src/jobs/` contains scheduler job creation, execution, replay, run history behavior, and the concern fan-out scheduler — a routed pre-run hook result (`buckets`) dispatches one constrained-subagent worker per non-empty bucket into its `JobRecord.routes[routeKey]` (a `JobRoute`), with the cursor committed per-bucket (ADR `job-concern-fanout.md`).
 - `packages/runtime/src/hooks/` contains the domain-agnostic pre-run hook primitive: a trusted handler registry, the runner (per-hook timeout, typed result, untrusted-content fence, flat OR routed-`buckets` context rendering), and its barrel. It imports only `packages/runtime/src/types`; the scheduler and any other caller consume it, and handlers self-register from their own domains.
-- `packages/runtime/src/governance/` contains approvals-adjacent runtime workflows such as pairing, improvements, and promotions.
+- `packages/runtime/src/governance/` contains approvals-adjacent runtime workflows such as improvements and promotions.
 - `packages/runtime/src/capabilities/` contains skills, toolsets, agents, and subagent records.
 - `packages/runtime/src/integrations/` contains connectors, MCP, messaging, import inspection, relay, and notification behavior.
 - `packages/runtime/src/tools/` contains file, terminal, code, and web tool implementations.

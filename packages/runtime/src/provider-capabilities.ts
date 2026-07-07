@@ -128,6 +128,13 @@ function bedrockContextWindowTokens(model: string): number {
 
 export function resolveProviderContextWindowTokens(provider: ProviderConfig): number {
   const model = provider.model ?? "";
+  // Hosted guests never see a concrete model id: the edge exposes a single stable
+  // alias, "gini-model", and rewrites it to the real Azure OpenAI deployment — a
+  // 1M-context frontier model (currently gpt-5.5). Without this the
+  // alias matches no family and falls to the 32K fallback, which silently shrinks
+  // the guest's context budget and compaction thresholds ~30x. Keep in sync if the
+  // alias is ever repointed at a smaller-window deployment.
+  if (normalizeModel(model) === "gini-model") return 1_000_000;
   switch (provider.name) {
     case "openai":
     // Azure hosts the same OpenAI models, so the context window follows the

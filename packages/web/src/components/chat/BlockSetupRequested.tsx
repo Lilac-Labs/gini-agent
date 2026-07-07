@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { CircleHelp } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +13,9 @@ import type { SetupRequest, SetupRequestedBlock } from "@runtime/types";
 import { parseFillSecretSlots, type FillSecretSlot } from "@/lib/fill-secrets-types";
 import { browserConnectButtonLabel } from "./browser-connect-card";
 import { ScreencastModal } from "@/components/browser/ScreencastModal";
+import { AgentAvatar } from "./AgentAvatar";
+import { MarkdownContent } from "./MarkdownContent";
+import { formatMessageTimestamp } from "./relative-time";
 
 // User-actor gate: the user performs a setup step (sign in, enter
 // credentials, fill a form, stand up a messaging bridge, approve an
@@ -21,8 +23,17 @@ import { ScreencastModal } from "@/components/browser/ScreencastModal";
 // docs/adr/authorization-vs-setup-request.md. The action determines the
 // layout (Connect button vs credential dialog vs inline inputs vs
 // messaging-bridge form vs pairing/removal confirmation); every path POSTs
-// to /api/setup-requests/<id>/{complete,cancel,open-browser}.
-export function BlockSetupRequested({ block }: { block: SetupRequestedBlock }) {
+// to /api/setup-requests/<id>/{complete,cancel,open-browser}. chat.choice
+// is the exception to the card layout: it renders as the agent speaking
+// (see the isChatChoice branch below), so it takes the `agent` identity the
+// assistant-text bubbles use.
+export function BlockSetupRequested({
+  block,
+  agent
+}: {
+  block: SetupRequestedBlock;
+  agent?: { id: string; name: string };
+}) {
   const invalidate = useInvalidate();
   const setupRequests = useSetupRequests();
   const providers = useProviders();
@@ -529,6 +540,52 @@ export function BlockSetupRequested({ block }: { block: SetupRequestedBlock }) {
     : Boolean(connectError);
   const effectiveConnectMessage = persistedOutcome?.message ?? connectError ?? null;
 
+  // === chat.choice renders as the agent speaking, not a setup card ===
+  // The question is a normal assistant-style message (avatar + name +
+  // bubble — same shape as BlockAssistantText). While pending WITH options,
+  // one-click option chips render beneath it (plus the UI-owned Other input
+  // and a subtle Skip). A historical question-only row (pre-options-only
+  // ask_user) shows just the question — the composer is the answer path (a
+  // plain message post resumes the same run). Settled rows keep the
+  // question as the agent's message with a muted outcome line; chips gone.
+  if (isChatChoice) {
+    const name = agent?.name ?? "Gini";
+    const seed = agent?.id ?? name;
+    const timestamp = formatMessageTimestamp(block.createdAt);
+    const settledLine = !isPending && setup
+      ? setup.status === "cancelled"
+        ? "Skipped"
+        : persistedOutcome?.message ?? "Answered"
+      : null;
+    return (
+      <div className="flex items-start gap-2.5">
+        <AgentAvatar name={name} seed={seed} size={24} className="mt-0.5" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 pl-1 pb-1 text-xs">
+            <span className="font-semibold text-foreground">{name}</span>
+            {timestamp ? <span className="text-muted-foreground">{timestamp}</span> : null}
+          </div>
+          <div className="max-w-[90%] rounded-xl border bg-card px-3 py-2.5 text-sm text-card-foreground">
+            {/* Same markdown path as BlockAssistantText so a question with
+                emphasis/links/code renders like any other agent message. */}
+            <MarkdownContent text={choiceQuestion} dropForeignImages />
+          </div>
+          {isPending && setup && choiceOptions.length > 0 ? (
+            <ChoiceChips
+              setupRequestId={block.setupRequestId}
+              options={choiceOptions}
+              onSkip={() => cancel.mutate()}
+              skipPending={cancel.isPending}
+            />
+          ) : null}
+          {settledLine ? (
+            <p className="mt-1 pl-1 text-xs text-muted-foreground">{settledLine}</p>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
   // Past-tense the summary once resolved so "Enter credentials..." doesn't
   // keep reading as an active ask after the user has already submitted (or
   // cancelled). Display-only — the underlying block.summary on the wire
@@ -593,32 +650,22 @@ export function BlockSetupRequested({ block }: { block: SetupRequestedBlock }) {
               : setup.status === "cancelled"
                 ? `Request cancelled. (${block.summary})`
                 : block.summary
-            : !isPending && setup && isChatChoice
-              // The /complete handler persists the past-tense selection
-              // ("You selected: X" / "You answered: ...") as the outcome
-              // message BEFORE responding, so the refetched row already
-              // carries it. Skip is a /cancel, so cancelled = skipped.
+            : !isPending && setup && isConfirmationRequest
+              // Confirm is a /complete, Cancel a /cancel — so completed =
+              // confirmed and cancelled = declined. The resolved card states
+              // the decision plainly.
               ? setup.status === "completed"
-                ? `${persistedOutcome?.message ?? "Answered"}. (${block.summary})`
+                ? `Confirmed. (${block.summary})`
                 : setup.status === "cancelled"
-                  ? `Skipped. (${block.summary})`
+                  ? `Cancelled. (${block.summary})`
                   : block.summary
-              : !isPending && setup && isConfirmationRequest
-                // Confirm is a /complete, Cancel a /cancel — so completed =
-                // confirmed and cancelled = declined. The resolved card states
-                // the decision plainly.
-                ? setup.status === "completed"
-                  ? `Confirmed. (${block.summary})`
-                  : setup.status === "cancelled"
-                    ? `Cancelled. (${block.summary})`
-                    : block.summary
-                : block.summary;
+              : block.summary;
 
   return (
     <div className={cardClass}>
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-xs text-foreground">
-          {isBrowserConnect ? "Connect to agent's browser" : isSkillGrant ? "Grant skill access" : isChatChoice ? "Question" : isConfirmationRequest ? "Confirmation" : block.action}
+          {isBrowserConnect ? "Connect to agent's browser" : isSkillGrant ? "Grant skill access" : isConfirmationRequest ? "Confirmation" : block.action}
         </span>
         {!isPending && setup ? <StatusPill value={setup.status} /> : null}
         <button
@@ -629,14 +676,7 @@ export function BlockSetupRequested({ block }: { block: SetupRequestedBlock }) {
           {expanded ? "Hide details" : "Show details"}
         </button>
       </div>
-      {/* While a pending chat.choice card is mounted, the question renders
-          inside the choice body (with its leading icon) — a summary line
-          above it would duplicate it. This condition must mirror the
-          ChoiceCard mount condition below exactly: until the setup row
-          loads, the card isn't rendered, so the summary (which carries the
-          question) must stay visible. Resolved chat.choice rows fall back
-          to the past-tense summary like every other card. */}
-      {!isConnectorRequest && !(isChatChoice && isPending && setup) ? (
+      {!isConnectorRequest ? (
         <p className="mt-1 text-xs text-muted-foreground">{displaySummary}</p>
       ) : null}
       {expanded && setup ? (
@@ -827,15 +867,6 @@ export function BlockSetupRequested({ block }: { block: SetupRequestedBlock }) {
           ) : null}
         </div>
       ) : null}
-      {isChatChoice && isPending && setup ? (
-        <ChoiceCard
-          setupRequestId={block.setupRequestId}
-          question={choiceQuestion}
-          options={choiceOptions}
-          onSkip={() => cancel.mutate()}
-          skipPending={cancel.isPending}
-        />
-      ) : null}
       {/* confirmation.request: the summary renders above (displaySummary); the
           actual content the user is consenting to is shown in a native
           disclosure so they can review exactly what goes out before confirming. */}
@@ -847,8 +878,7 @@ export function BlockSetupRequested({ block }: { block: SetupRequestedBlock }) {
           </pre>
         </details>
       ) : null}
-      {/* chat.choice owns its own Submit/Skip row inside ChoiceCard. */}
-      <div className={isPending && !isChatChoice ? "mt-2 flex gap-2" : "hidden"}>
+      <div className={isPending ? "mt-2 flex gap-2" : "hidden"}>
         {isBrowserConnect ? (
           <>
             <Button
@@ -1093,39 +1123,34 @@ function parseChoiceOptions(raw: unknown): ChoiceOption[] {
   return out;
 }
 
-// Single-select question card for a pending chat.choice SetupRequest. The
-// options come from the trusted setup payload; the card always adds its own
-// "Other (type your answer)" freeform row and a subtle Skip affordance
-// (Skip = the shared /cancel endpoint, which resumes the agent with a skip
-// fallback rather than failing the task). Selection state is the option
-// INDEX (or the literal "other" tag for the card-injected freeform row) so
-// no model-emitted option label can ever collide with the freeform row.
-function ChoiceCard({
+// One-click option chips for a pending chat.choice, rendered under the
+// question bubble (the question itself reads as the agent's message — see
+// the isChatChoice branch above). Options come from the trusted setup
+// payload; clicking one POSTs { choice: { label } } immediately. The UI
+// owns the "Other (type your answer)" affordance (expands into a free-text
+// input that POSTs { choice: { other } }) and the subtle Skip (the shared
+// /cancel endpoint, which resumes the agent with a skip fallback rather
+// than failing the task) — they are never model-supplied options.
+function ChoiceChips({
   setupRequestId,
-  question,
   options,
   onSkip,
   skipPending
 }: {
   setupRequestId: string;
-  question: string;
   options: ChoiceOption[];
   onSkip: () => void;
   skipPending: boolean;
 }) {
   const invalidate = useInvalidate();
-  const [selected, setSelected] = useState<number | "other" | null>(null);
+  const [otherOpen, setOtherOpen] = useState(false);
   const [otherText, setOtherText] = useState("");
 
   const submit = useMutation({
-    mutationFn: () =>
+    mutationFn: (choice: { label: string } | { other: string }) =>
       api<{ ok: boolean }>(`/setup-requests/${setupRequestId}/complete`, {
         method: "POST",
-        body: JSON.stringify(
-          selected === "other"
-            ? { choice: { other: otherText.trim() } }
-            : { choice: { label: typeof selected === "number" ? options[selected]?.label : null } }
-        )
+        body: JSON.stringify({ choice })
       }),
     onSuccess: () => {
       invalidate(["setup-requests", "approvals", "tasks", "task", "chat", "events", "audit"]);
@@ -1133,48 +1158,42 @@ function ChoiceCard({
     onError: (error: Error) => toast.error(error.message)
   });
 
-  const ready = selected === "other" ? otherText.trim().length > 0 : selected !== null;
-
   return (
-    <div className="mt-2 space-y-2">
-      <div className="flex items-start gap-2">
-        <CircleHelp className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        <p className="text-sm font-medium">{question}</p>
-      </div>
-      <div className="space-y-1">
-        {options.map((option, index) => (
-          <label
+    <div className="mt-2 max-w-[90%] space-y-2">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {options.map((option) => (
+          <button
             key={option.label}
-            className="flex cursor-pointer items-start gap-2 rounded-md border border-border bg-background/40 px-2 py-1.5 hover:bg-background/70"
-          >
-            <input
-              type="radio"
-              name={`${setupRequestId}-choice`}
-              className="mt-0.5"
-              checked={selected === index}
-              onChange={() => setSelected(index)}
-              disabled={submit.isPending}
-            />
-            <span>
-              <span className="block text-xs text-foreground">{option.label}</span>
-              {option.description ? (
-                <span className="block text-[11px] text-muted-foreground">{option.description}</span>
-              ) : null}
-            </span>
-          </label>
-        ))}
-        <label className="flex cursor-pointer items-start gap-2 rounded-md border border-border bg-background/40 px-2 py-1.5 hover:bg-background/70">
-          <input
-            type="radio"
-            name={`${setupRequestId}-choice`}
-            className="mt-0.5"
-            checked={selected === "other"}
-            onChange={() => setSelected("other")}
+            type="button"
             disabled={submit.isPending}
-          />
-          <span className="text-xs text-foreground">Other (type your answer)</span>
-        </label>
-        {selected === "other" ? (
+            onClick={() => submit.mutate({ label: option.label })}
+            className="rounded-lg border border-border bg-background px-3 py-1.5 text-left transition-colors hover:bg-accent disabled:opacity-50"
+          >
+            <span className="block text-xs text-foreground">{option.label}</span>
+            {option.description ? (
+              <span className="block text-[11px] text-muted-foreground">{option.description}</span>
+            ) : null}
+          </button>
+        ))}
+        <button
+          type="button"
+          disabled={submit.isPending}
+          onClick={() => setOtherOpen((v) => !v)}
+          className="rounded-lg border border-border bg-background px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent disabled:opacity-50"
+        >
+          Other (type your answer)
+        </button>
+        <button
+          type="button"
+          className="px-1.5 text-[11px] text-muted-foreground underline-offset-2 hover:underline disabled:opacity-50"
+          disabled={skipPending || submit.isPending}
+          onClick={onSkip}
+        >
+          Skip
+        </button>
+      </div>
+      {otherOpen ? (
+        <div className="flex items-center gap-2">
           <Input
             value={otherText}
             onChange={(e) => setOtherText(e.target.value)}
@@ -1184,22 +1203,19 @@ function ChoiceCard({
             autoCorrect="off"
             spellCheck={false}
             disabled={submit.isPending}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && otherText.trim().length > 0) submit.mutate({ other: otherText.trim() });
+            }}
           />
-        ) : null}
-      </div>
-      <div className="flex items-center gap-2">
-        <Button size="sm" disabled={!ready || submit.isPending} onClick={() => submit.mutate()}>
-          Submit
-        </Button>
-        <button
-          type="button"
-          className="ml-auto text-[11px] text-muted-foreground underline-offset-2 hover:underline disabled:opacity-50"
-          disabled={skipPending || submit.isPending}
-          onClick={onSkip}
-        >
-          Skip
-        </button>
-      </div>
+          <Button
+            size="sm"
+            disabled={otherText.trim().length === 0 || submit.isPending}
+            onClick={() => submit.mutate({ other: otherText.trim() })}
+          >
+            Submit
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }

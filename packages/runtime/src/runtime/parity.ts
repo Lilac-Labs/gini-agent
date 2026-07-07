@@ -22,7 +22,7 @@ export function hermesParityChecks(config: RuntimeConfig): { ok: boolean; checks
       `${state.importReports.filter((report) => report.mode === "inspect").length} inspect, ${state.importReports.filter((report) => report.mode === "applied").length} applied import reports`,
       "inspect for read-only summary, apply for in-process state mutation (openclaw migrator)"
     ], "pass"),
-    check("mobile", "Mobile/remote control structure", true, [`${state.devices.length} paired devices`, "mobile bootstrap and revocation contracts"], "pass"),
+    check("mobile", "Mobile/remote control structure", true, ["owner-token mobile client", "mobile bootstrap contract"], "pass"),
     check("relay", "Remote relay and notifications", true, [`${state.relays.length} relay records`, `${state.notifications.length} notifications`, "local/lan/hosted relay records with queued notifications"], "pass")
   ];
   return { ok: checks.every((item) => item.status !== "missing"), checks };

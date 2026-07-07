@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { api, type UploadRef } from "@/lib/api";
 import { openResilientEventSource } from "@/lib/resilient-event-source";
 import type {
   Authorization,
@@ -9,10 +9,13 @@ import type {
   ConnectorRecord,
   EmailWatcherRecord,
   GoogleAccountStatus,
+  HomeTaskItem,
   ImprovementProposal,
   JobRecord,
   JobRunRecord,
+  OnboardingRecord,
   PendingChatMessage,
+  RecentItem,
   RunRecord,
   RuntimeEvent,
   RuntimeStatus,
@@ -291,18 +294,14 @@ export interface ProviderDescriptor {
   secrets?: { purposes: string[]; envBindings: Record<string, string> };
   hasProbe: boolean;
   hasDetect: boolean;
-  // Whether the provider declares a chat-driven setup skill (e.g.
-  // google-workspace-setup). Skills page routes these to "Set up via chat".
-  hasSetupSkill?: boolean;
-  // The setup skill NAME (e.g. "google-workspace-setup"). Lets the Skills
-  // page match a service skill's required-credential connector to its setup
-  // skill so the service pill defers to the setup card's sign-in status.
-  setupSkill?: string;
-  // Live result of the provider's credentialExternallySatisfied hook (e.g.
-  // registered machine-global Google accounts). deriveActivation mirrors the
-  // runtime gate with it: the fallthrough applies only when NO connector
-  // record with the credential name exists — an existing record of any
-  // status (including disabled) keeps the record-based gate.
+  // Live result of the provider's credentialExternallySatisfied hook. For the
+  // hosted Google Workspace credential this is the boot-registered account
+  // (readGoogleAccounts non-empty) — the guest ships with its credential baked
+  // in, so no connector record is ever created and this bit is what keeps the
+  // Workspace skills active. deriveActivation mirrors the runtime gate with it:
+  // the fallthrough applies only when NO connector record with the credential
+  // name exists — an existing record of any status (including disabled) keeps
+  // the record-based gate.
   // Mapping caveat: the web routes a required credential name to its
   // provider via `credentialTemplate.name`, which exists only for modules
   // declaring secret envBindings — while the runtime maps via
@@ -344,11 +343,99 @@ export function useProviders() {
 // google-oauth-desktop connector record, so the Skills page can render the
 // accounts card on a registry-only machine. The GoogleAccountsCard
 // mutations invalidate the "google-accounts" key.
-export function useGoogleAccounts() {
+export function useGoogleAccounts(options?: Partial<UseQueryOptions<GoogleAccountStatus[]>>) {
   return useQuery<GoogleAccountStatus[]>({
     queryKey: ["google-accounts"],
     queryFn: () => api<GoogleAccountStatus[]>("/google/accounts"),
-    refetchInterval: 60_000
+    refetchInterval: 60_000,
+    ...options
+  });
+}
+
+// Which add-a-Google-account flow this deployment supports (GET
+// /api/google/auth-mode): hosted guests are headless, so account adds go
+// through the edge's same-tab web OAuth ("edge"); everywhere else the
+// chat-driven gws loopback flow works ("loopback"). Fixed per deployment, so
+// the answer never goes stale.
+export function useGoogleAuthMode() {
+  return useQuery<{ mode: "edge" | "loopback" }>({
+    queryKey: ["google-auth-mode"],
+    queryFn: () => api<{ mode: "edge" | "loopback" }>("/google/auth-mode"),
+    staleTime: Infinity
+  });
+}
+
+// First-run onboarding record (GET /api/onboarding). The deterministic profile
+// scan finalizes by pushing an `onboarding` event over the SSE stream, which
+// RuntimeStreamBridge maps to this query key — so a running scan reveals its
+// profile within ~50ms without a fast poll. The 30s refetch while running is
+// only a safety net (a missed/reconnecting SSE event); otherwise the record
+// changes only through our own mutations below, which seed the cache directly.
+export function useOnboarding(options?: Partial<UseQueryOptions<OnboardingRecord>>) {
+  return useQuery<OnboardingRecord>({
+    queryKey: ["onboarding"],
+    queryFn: () => api<OnboardingRecord>("/onboarding"),
+    refetchInterval: (query) =>
+      query.state.data?.scan.status === "running" ? 30_000 : false,
+    ...options
+  });
+}
+
+// PATCH /api/onboarding { timezone?, theme?, completed? }. The response is the
+// full updated record; seed the cache with it so the onboarding gate sees
+// `completed: true` before the post-completion redirect lands (no bounce back
+// into the funnel).
+export function useUpdateOnboarding() {
+  const qc = useQueryClient();
+  return useMutation<OnboardingRecord, Error, { timezone?: string; theme?: "light" | "dark"; completed?: boolean }>({
+    mutationFn: (body) =>
+      api<OnboardingRecord>("/onboarding", { method: "PATCH", body: JSON.stringify(body) }),
+    onSuccess: (record) => qc.setQueryData(["onboarding"], record)
+  });
+}
+
+// POST /api/onboarding/scan — kick off the Gmail profile scan. Idempotent
+// server-side (a running/ready scan is returned as-is; failed resubmits),
+// fired from the sign-in step's continue — the moment Gmail access is
+// confirmed — so the scan runs in the background during steps 1–2, and again
+// from step 3's "Try again" after a failure.
+export function useStartOnboardingScan() {
+  const qc = useQueryClient();
+  return useMutation<OnboardingRecord, Error, void>({
+    mutationFn: () =>
+      api<OnboardingRecord>("/onboarding/scan", { method: "POST", body: JSON.stringify({}) }),
+    onSuccess: (record) => qc.setQueryData(["onboarding"], record)
+  });
+}
+
+// POST /api/onboarding/routines body — mirrors the runtime contract in
+// packages/runtime/src/runtime/onboarding.ts (prompts/crons are composed
+// server-side; the browser only sends toggle state).
+export interface OnboardingRoutinesInput {
+  timezone?: string;
+  autoInbox?: {
+    enabled: boolean;
+    labelNewMail: boolean;
+    archiveUnimportant: boolean;
+    assistScheduling: boolean;
+    draftReplies: boolean;
+  };
+  morningBriefing?: { enabled: boolean; personalizedNews: boolean };
+  meetingBriefing?: { enabled: boolean };
+}
+
+export function useApplyOnboardingRoutines() {
+  const qc = useQueryClient();
+  return useMutation<{ record: OnboardingRecord; jobs: JobRecord[] }, Error, OnboardingRoutinesInput>({
+    mutationFn: (body) =>
+      api<{ record: OnboardingRecord; jobs: JobRecord[] }>("/onboarding/routines", {
+        method: "POST",
+        body: JSON.stringify(body)
+      }),
+    onSuccess: ({ record }) => {
+      qc.setQueryData(["onboarding"], record);
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+    }
   });
 }
 
@@ -398,7 +485,8 @@ const CHAT_TERMINAL_TASK_STATUSES = new Set([
   "completed",
   "failed",
   "cancelled",
-  "waiting_approval"
+  "waiting_approval",
+  "needs_input"
 ]);
 
 export function useChatSession(id: string | null) {
@@ -718,6 +806,141 @@ export function useChatBlocks(
   }, [sessionId, refetch]);
 
   return { blocks, isLoading, error, refetch, pendingMessages };
+}
+
+// Composite home read (GET /api/home): greeting owner, the attention-queue
+// task rows, and the Recents artifact feed. Attention is derived server-side
+// and acknowledged rows are filtered there too — the client only renders an
+// optimistic checked state until the refetch drops the row.
+export interface HomeView {
+  owner?: { firstName?: string };
+  tasks: HomeTaskItem[];
+  recents: RecentItem[];
+}
+
+export function useHome() {
+  const agentId = useActiveAgentId();
+  return useQuery<HomeView>({
+    queryKey: ["home", agentId ?? null],
+    queryFn: () => api<HomeView>(scopedPath("/home", agentId)),
+    enabled: Boolean(agentId),
+    // 3s while any row is working keeps the live status line fresh; 30s
+    // otherwise. SSE invalidation (RuntimeStreamBridge maps chat/task events
+    // to "home") is the primary signal — the interval bounds the worst case.
+    refetchInterval: (query) =>
+      query.state.data?.tasks.some((t) => t.attention === "working") ? 3000 : 30_000
+  });
+}
+
+// Direct container start (POST /api/containers) — both home composer modes.
+// `startedAs` records the creation gesture ("task" stays a home work item;
+// "message" lists the conversation in the sidebar Messages section).
+// Optimistically prepends a working row so the list responds instantly; on
+// success the optimistic id is swapped for the real container id so the row's
+// deep link works before the refetch lands. Error toasts live at call sites.
+export function useStartTask() {
+  const qc = useQueryClient();
+  const agentId = useActiveAgentId();
+  const homeKey = ["home", agentId ?? null];
+  return useMutation<
+    { containerId: string; taskId: string; status: string },
+    Error,
+    { content: string; images?: UploadRef[]; startedAs?: "task" | "message" },
+    { previous?: HomeView; optimisticId: string }
+  >({
+    mutationFn: ({ content, images, startedAs }) =>
+      api<{ containerId: string; taskId: string; status: string }>("/containers", {
+        method: "POST",
+        body: JSON.stringify({
+          content,
+          client: "web",
+          ...(agentId ? { agentId } : {}),
+          ...(images && images.length > 0 ? { images } : {}),
+          ...(startedAs ? { startedAs } : {})
+        })
+      }),
+    onMutate: async ({ content }) => {
+      await qc.cancelQueries({ queryKey: homeKey });
+      const previous = qc.getQueryData<HomeView>(homeKey);
+      const optimisticId = `optimistic-${crypto.randomUUID()}`;
+      const row: HomeTaskItem = {
+        id: optimisticId,
+        // An attachment-only send has empty content; the server titles the
+        // minted container "Untitled chat" (createChatSession fallback), so
+        // the optimistic row matches what the refetch will serve.
+        title: content || "Untitled chat",
+        attention: "working",
+        acknowledged: false,
+        startedBy: "user",
+        updatedAt: new Date().toISOString()
+      };
+      qc.setQueryData<HomeView>(homeKey, (prev) =>
+        prev ? { ...prev, tasks: [row, ...prev.tasks] } : { tasks: [row], recents: [] }
+      );
+      return { previous, optimisticId };
+    },
+    onSuccess: (data, _vars, context) => {
+      qc.setQueryData<HomeView>(homeKey, (prev) =>
+        prev
+          ? {
+              ...prev,
+              tasks: prev.tasks.map((t) =>
+                t.id === context.optimisticId ? { ...t, id: data.containerId } : t
+              )
+            }
+          : prev
+      );
+    },
+    onError: (_error, _vars, context) => {
+      if (context?.previous) {
+        qc.setQueryData(homeKey, context.previous);
+      } else if (context) {
+        qc.setQueryData<HomeView>(homeKey, (prev) =>
+          prev ? { ...prev, tasks: prev.tasks.filter((t) => t.id !== context.optimisticId) } : prev
+        );
+      }
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["home"] });
+      qc.invalidateQueries({ queryKey: ["chat"] });
+      qc.invalidateQueries({ queryKey: ["tasks"] });
+    }
+  });
+}
+
+// Acknowledge a container's latest outcome (POST /api/containers/:id/
+// acknowledge) — the home checkbox. Optimistic checked state with rollback;
+// the server filters acknowledged rows out of /api/home on the next refetch.
+export function useAcknowledgeTask() {
+  const qc = useQueryClient();
+  const agentId = useActiveAgentId();
+  const homeKey = ["home", agentId ?? null];
+  return useMutation<{ ok: true; acknowledgedAt?: string }, Error, string, { previous?: HomeView }>({
+    mutationFn: (containerId) =>
+      api<{ ok: true; acknowledgedAt?: string }>(`/containers/${containerId}/acknowledge`, {
+        method: "POST"
+      }),
+    onMutate: async (containerId) => {
+      await qc.cancelQueries({ queryKey: homeKey });
+      const previous = qc.getQueryData<HomeView>(homeKey);
+      qc.setQueryData<HomeView>(homeKey, (prev) =>
+        prev
+          ? {
+              ...prev,
+              tasks: prev.tasks.map((t) => (t.id === containerId ? { ...t, acknowledged: true } : t))
+            }
+          : prev
+      );
+      return { previous };
+    },
+    onError: (_error, _containerId, context) => {
+      if (context?.previous) qc.setQueryData(homeKey, context.previous);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["home"] });
+      qc.invalidateQueries({ queryKey: ["chat"] });
+    }
+  });
 }
 
 // The single canonical chat for an agent. Resolves via

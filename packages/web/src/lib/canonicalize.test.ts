@@ -24,7 +24,7 @@ describe("web canonicalizePath", () => {
     expect(pass("/api/runtime/%73tatus")).toBe("/api/runtime/status");
   });
   test("decodes doubly-encoded", () => {
-    expect(pass("/api/runtime/%2570airing")).toBe("/api/runtime/pairing");
+    expect(pass("/api/runtime/%2573tatus")).toBe("/api/runtime/status");
   });
   test("rejects traversal", () => {
     expect(reason("/api/runtime/../status")).toBe("traversal");

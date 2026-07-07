@@ -10,7 +10,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { spawn } from "bun";
+import { runExecProcess } from "./execution/exec-processes";
 import type {
   Authorization,
   ChatClientSurface,
@@ -89,6 +89,7 @@ import { recordObjectiveOutcomes } from "./learning/outcomes";
 import { updateRunFromTask } from "./execution/runs";
 import { dispatchNextPendingChatMessage } from "./execution/chat";
 import { runChatTask, resumeChatTask } from "./execution/chat-task";
+import { resumeParkIfGatesSettled } from "./execution/safe-resume";
 import {
   emitPhase,
   emitSystemNote,
@@ -278,18 +279,30 @@ export async function retryTask(config: RuntimeConfig, taskId: string): Promise<
   return task;
 }
 
-export async function cancelTask(
-  config: RuntimeConfig,
-  taskId: string,
+export interface CancelTaskOptions {
   // Optional parent-task guard. When set and equal to `taskId`, refuse
   // inside the serialized mutateState callback BEFORE any state change.
   // Mirrors the pattern run_job uses to close the race window between a
   // lock-free pre-check and the mutation: callers that need a strict
   // self-cancel guard pass their own taskId here. cancel_task does that.
   // Callers without that requirement (HTTP `/api/tasks/:id/cancel`)
-  // omit the arg and keep their original behavior.
-  parentTaskId?: string
+  // omit it and keep their original behavior.
+  parentTaskId?: string;
+  // "superseded": the cancel was triggered by a new user message arriving
+  // while this task was parked at waiting_approval on Authorization gates
+  // (the supersede rule — user text never resolves a gate as approval). The
+  // user-facing system note reads "Superseded by your new message" instead
+  // of "Cancelled"; everything else (gate teardown, tool_call settle to
+  // denied, descendant cascade) is the ordinary cancel lifecycle.
+  reason?: "superseded";
+}
+
+export async function cancelTask(
+  config: RuntimeConfig,
+  taskId: string,
+  options?: CancelTaskOptions
 ): Promise<Task> {
+  const parentTaskId = options?.parentTaskId;
   // Tool-call ids of genuinely-pending gated calls when the cancel landed.
   // Filled inside the mutateState callback (before toolCallState is cleared)
   // and read by the post-mutation chat-block emit to settle their tool_call
@@ -333,6 +346,7 @@ export async function cancelTask(
     // covered below by folding in the pending-gate set once it's computed.
     cancelledDuringToolUse =
       task.status === "waiting_approval" ||
+      task.status === "needs_input" ||
       (task.toolCallState?.pending?.length ?? 0) > 0 ||
       (task.recentToolCalls?.some((c) => c.status === "running") ?? false);
     task.status = "cancelled";
@@ -346,7 +360,8 @@ export async function cancelTask(
         target: taskId,
         risk: "low",
         taskId,
-        runId: task.runId
+        runId: task.runId,
+        ...(options?.reason ? { evidence: { reason: options.reason } } : {})
       },
       { taskId }
     );
@@ -518,7 +533,10 @@ export async function cancelTask(
       for (const callId of cancelledPendingToolCallIds) {
         emitToolCallStatus(emitCtx, { callId, status: "denied" });
       }
-      emitSystemNote(emitCtx, "Cancelled");
+      emitSystemNote(
+        emitCtx,
+        options?.reason === "superseded" ? "Superseded by your new message" : "Cancelled"
+      );
       emitPhase(emitCtx, "Cancelled");
     }
   } catch (error) {
@@ -1167,10 +1185,27 @@ export async function reconcileInFlightTasks(
     dispatch?: (config: RuntimeConfig, taskId: string) => Promise<unknown>;
   }
 ): Promise<{ resumed: string[]; failed: string[] }> {
-  const { resumeIds, failIds } = await mutateState(config.instance, (state) => {
+  const { resumeIds, failIds, parkedIds } = await mutateState(config.instance, (state) => {
     const resumeIds: string[] = [];
     const failIds: string[] = [];
+    const parkedIds: string[] = [];
     for (const task of state.tasks) {
+      // Parked tasks from a previous process are settled-park heal
+      // candidates: a gate resolution persists its outcome first and resumes
+      // through a DETACHED call second, so a restart in between leaves the
+      // task parked on gates that are all terminal — wedged forever unless
+      // this boot pass kicks the resume. Candidates only — the idempotent
+      // heal below re-checks the wedge signature and leaves a park with any
+      // PENDING gate untouched (durable state waiting on the user, exactly
+      // as before). The cutoff guard matches the orphan scan: nothing
+      // created/updated by THIS process is ever claimed.
+      if (
+        (task.status === "waiting_approval" || task.status === "needs_input") &&
+        task.updatedAt < opts.cutoffIso
+      ) {
+        parkedIds.push(task.id);
+        continue;
+      }
       const orphaned =
         (task.status === "running" || task.status === "queued") && task.updatedAt < opts.cutoffIso;
       if (!orphaned) continue;
@@ -1191,7 +1226,7 @@ export async function reconcileInFlightTasks(
         failIds.push(task.id);
       }
     }
-    return { resumeIds, failIds };
+    return { resumeIds, failIds, parkedIds };
   });
   for (const id of failIds) {
     // Isolate per task: a failTask throw for one orphan must not abort the
@@ -1210,8 +1245,54 @@ export async function reconcileInFlightTasks(
     appendTrace(config.instance, id, { type: "task", message: "Task resumed after gateway restart", data: {} });
     (opts.dispatch ?? runTask)(config, id).catch((err) => failTask(config, id, err));
   }
-  appendLog(config.instance, "tasks.reconciled", { resumed: resumeIds.length, failed: failIds.length });
-  return { resumed: resumeIds, failed: failIds };
+  // Kick the settled-park heal for parked candidates. The helper re-verifies
+  // the wedge (parked, zero pending gates, snapshot present, every gate's
+  // outcome accountable) and resumes through the same detached machinery a
+  // gate resolution uses — never `dispatch`, which would replay the turn
+  // from the user message instead of continuing from the park.
+  const healedIds: string[] = [];
+  const wedgedFailIds: string[] = [];
+  for (const id of parkedIds) {
+    if (resumeParkIfGatesSettled(config, id)) {
+      healedIds.push(id);
+      appendTrace(config.instance, id, {
+        type: "task",
+        message: "Parked task with settled gates resumed after gateway restart",
+        data: {}
+      });
+      continue;
+    }
+    // A park with ZERO pending gates and NO resume snapshot (toolCallState
+    // cleared by a prior failure path) is unrecoverable: the heal above has
+    // nothing to resume against, no gate resolution will ever arrive, and
+    // messages queue behind it forever. Fail it honestly instead of leaving
+    // it silently wedged. A park with a pending gate stays untouched —
+    // that's durable state waiting on the user, snapshot or not.
+    const state = readState(config.instance);
+    const task = state.tasks.find((t) => t.id === id);
+    if (!task || (task.status !== "waiting_approval" && task.status !== "needs_input")) continue;
+    const hasPendingGate =
+      state.setupRequests.some((s) => s.taskId === id && s.status === "pending") ||
+      state.authorizations.some((a) => a.taskId === id && a.status === "pending");
+    if (hasPendingGate) continue;
+    const pending = task.toolCallState?.pending;
+    if (pending && pending.length > 0) continue;
+    try {
+      await failTask(
+        config,
+        id,
+        new Error("Parked with nothing pending and no resume snapshot after a gateway restart; cannot be resumed.")
+      );
+      wedgedFailIds.push(id);
+    } catch (err) {
+      appendLog(config.instance, "tasks.reconcile.fail_error", { taskId: id, error: String(err) });
+    }
+  }
+  appendLog(config.instance, "tasks.reconciled", {
+    resumed: resumeIds.length + healedIds.length,
+    failed: failIds.length + wedgedFailIds.length
+  });
+  return { resumed: [...resumeIds, ...healedIds], failed: [...failIds, ...wedgedFailIds] };
 }
 
 // Shared between agent and tool modules. Tools that complete immediately
@@ -1286,7 +1367,23 @@ export async function completeLowRiskToolTask(
 // path is the right one to reach for, not this function.
 export async function decideApproval(config: RuntimeConfig, approvalId: string, decision: "approve" | "deny"): Promise<Authorization> {
   if (decision === "approve") {
-    const { approval } = await resolveAuthorization(config, approvalId, { actor: "user", resumeChatTask: true });
+    // Respond as soon as the decision is durable: the returned row has
+    // status "approved" and the authorization.approved audit row is
+    // persisted; the side effect + result feed-back + resume run
+    // detached (see resolveAuthorization's detachExecution contract).
+    // A concurrent second approve still fails cleanly here — the
+    // persist mutateState throws ApprovalRaceLostError on the
+    // non-pending row before any detach happens.
+    //
+    // The deny branch below stays fully synchronous ON PURPOSE: denial
+    // flips the task to failed atomically with the authorization row
+    // inside one mutateState (no executor runs), so there is nothing
+    // slow to detach.
+    const { approval } = await resolveAuthorization(config, approvalId, {
+      actor: "user",
+      resumeChatTask: true,
+      detachExecution: true
+    });
     return approval;
   }
 
@@ -1577,7 +1674,25 @@ export class TaskAlreadyTerminalError extends Error {
 export async function resolveAuthorization(
   config: RuntimeConfig,
   approvalId: string,
-  opts: { actor?: "user" | "runtime"; resumeChatTask?: boolean; evidenceExtra?: AutoApproveMarkers } = {}
+  opts: {
+    actor?: "user" | "runtime";
+    resumeChatTask?: boolean;
+    evidenceExtra?: AutoApproveMarkers;
+    // When true, the approve call returns as soon as the decision is
+    // DURABLE (approval row flipped + authorization.approved audit
+    // persisted); the side effect + result feed-back + resume run
+    // detached through the same pipeline. Used by the user-driven
+    // approve path (HTTP POST /api/authorizations/:id/approve) so a
+    // long-running executor (terminal.exec up to its timeout budget)
+    // can't hold the HTTP response open past the server idle timeout.
+    // The execution audit row is still written AT execution time with
+    // the approvalId — the restart wedge-heal's executed-proof
+    // semantics (audit row present → executed, absent → hedge) are
+    // unchanged; detaching only widens the durable-but-not-executed
+    // window the heal already handles. Auto-approve callers keep the
+    // awaited path — they need `toolResult` synchronously.
+    detachExecution?: boolean;
+  } = {}
 ): Promise<{ approval: Authorization; toolResult: string | undefined }> {
   const actor = opts.actor ?? "user";
   const resumeChatTaskOpt = opts.resumeChatTask ?? true;
@@ -1626,22 +1741,50 @@ export async function resolveAuthorization(
     }
   }
 
-  // Route side-effect failures through `failTask` so the HTTP/CLI
-  // approve paths fail the owning task on a thrown executor.
-  // Otherwise only the auto-approve path benefits from the
-  // `runTask().catch(failTask)` net, and a manual approve that hit a
-  // writeFileSync EISDIR / patch-text-missing throw would leave an
-  // `approved` approval row with no per-action audit and a non-failed
-  // task.
-  //
-  // The `failTask` call is best-effort so a status-probe error or a
-  // `failTask` throw cannot MASK the original executor error. The
-  // original error is the meaningful one for the caller (HTTP / CLI
-  // handler) to render; `failTask` is bookkeeping that the runtime
-  // will retry on the next external trigger anyway.
+  if (opts.detachExecution) {
+    // Decision is durable — hand the caller the approved row now and
+    // run the executor pipeline detached. Failures land in `failTask`
+    // (inside the guarded helper) and the runtime log; there is no
+    // caller left to rethrow to.
+    void executeApprovedActionGuarded(config, approval, {
+      resumeChatTask: resumeChatTaskOpt,
+      evidenceExtra: opts.evidenceExtra
+    }).catch((error) => {
+      appendLog(config.instance, "approval.detached_execution_failed", {
+        approvalId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+    return { approval, toolResult: undefined };
+  }
+
+  return executeApprovedActionGuarded(config, approval, {
+    resumeChatTask: resumeChatTaskOpt,
+    evidenceExtra: opts.evidenceExtra
+  });
+}
+
+// Route side-effect failures through `failTask` so the HTTP/CLI
+// approve paths fail the owning task on a thrown executor.
+// Otherwise only the auto-approve path benefits from the
+// `runTask().catch(failTask)` net, and a manual approve that hit a
+// writeFileSync EISDIR / patch-text-missing throw would leave an
+// `approved` approval row with no per-action audit and a non-failed
+// task.
+//
+// The `failTask` call is best-effort so a status-probe error or a
+// `failTask` throw cannot MASK the original executor error. The
+// original error is the meaningful one for the caller (HTTP / CLI
+// handler) to render; `failTask` is bookkeeping that the runtime
+// will retry on the next external trigger anyway.
+async function executeApprovedActionGuarded(
+  config: RuntimeConfig,
+  approval: Authorization,
+  opts: { resumeChatTask: boolean; evidenceExtra?: AutoApproveMarkers }
+): Promise<{ approval: Authorization; toolResult: string | undefined }> {
   try {
     const toolResult = await executeApprovedAction(config, approval, {
-      resumeChatTask: resumeChatTaskOpt,
+      resumeChatTask: opts.resumeChatTask,
       evidenceExtra: opts.evidenceExtra
     });
     // Re-read the approval row to pick up any guard flip (the
@@ -1651,7 +1794,7 @@ export async function resolveAuthorization(
     // `toolResult === undefined`). Returning the stale pre-guard
     // `approval` object would let `pendingOrAuto` mis-report
     // success to the model on a cancelled side effect.
-    const refreshed = readState(config.instance).authorizations.find((a) => a.id === approvalId) ?? approval;
+    const refreshed = readState(config.instance).authorizations.find((a) => a.id === approval.id) ?? approval;
     return { approval: refreshed, toolResult };
   } catch (error) {
     if (error instanceof ApprovalRaceLostError) throw error;
@@ -1966,6 +2109,21 @@ async function executeApprovedAction(
   // `guardController` variable captures whatever the guard callback
   // claimed; the `finally` releases iff a claim actually happened.
   let guardController: AbortController | undefined;
+  // Executing signal (lightweight): while the gated side effect runs,
+  // the task's stored status stays waiting_approval (flipping status
+  // would interact with the resume stage-2 claim the restart heal
+  // depends on — a distinct "executing" status is a designed follow-up,
+  // see ADR task-containers-and-runs.md). Stamp currentStep truthfully
+  // instead so /api/tasks and the home working join show live progress
+  // rather than a frozen approval wait. Captured previous value is
+  // restored on settle iff the stamp is still ours — a cancel/fail that
+  // wrote its own terminal step is never clobbered. The approval id is
+  // appended as an ownership token so the restore check stays exact
+  // under two concurrent gates on the SAME action: gate B settling must
+  // not restore over gate A's live stamp.
+  const executingStep = `Executing ${approval.action}… — ${approval.id}`;
+  let stampedPreviousStep: string | undefined;
+  let stamped = false;
   try {
     const guard = await mutateState(config.instance, (state) => {
       const taskNow = approval.taskId
@@ -2002,6 +2160,12 @@ async function executeApprovedAction(
       // callback) cannot interleave between this claim and the
       // task-status check above.
       guardController = claimApproval(config.instance, approval.id, approval.taskId);
+      if (taskNow) {
+        stampedPreviousStep = taskNow.currentStep;
+        taskNow.currentStep = executingStep;
+        taskNow.updatedAt = now();
+        stamped = true;
+      }
       return { ok: true as const };
     });
     if (!guard.ok) {
@@ -2058,6 +2222,26 @@ async function executeApprovedAction(
     return result;
   } finally {
     if (guardController) releaseApproval(config.instance, approval.id);
+    // Settle the executing stamp: restore the pre-execution step iff
+    // currentStep is still exactly ours. The successful paths already
+    // replaced it (resumeChatTask's loop stamps its own steps;
+    // completeApprovedTask writes Completed/Failed), and a concurrent
+    // cancel/fail wrote its terminal step — both leave this a no-op.
+    if (stamped && approval.taskId) {
+      const taskIdForRestore = approval.taskId;
+      try {
+        await mutateState(config.instance, (state) => {
+          const t = state.tasks.find((item) => item.id === taskIdForRestore);
+          if (t && t.currentStep === executingStep) {
+            t.currentStep = stampedPreviousStep;
+            t.updatedAt = now();
+          }
+        });
+      } catch {
+        // Best-effort presentation state — never mask the try block's
+        // outcome (result or thrown executor error).
+      }
+    }
   }
 }
 
@@ -2269,58 +2453,26 @@ async function runApprovedActionImpl(
       verdict.aborted = true;
       return await emitTerminalAborted(config, approval, extraEvidence, { command, usePty, signal });
     }
-    const proc = spawn(spawnArgs, {
+    // The tool schema promises a 60s default budget; enforce the same
+    // default here so an approval payload minted without timeoutMs
+    // matches the contract the model saw.
+    const rawTimeoutMs = Number(approval.payload.timeoutMs);
+    const timeoutMs = Number.isFinite(rawTimeoutMs) && rawTimeoutMs > 0 ? rawTimeoutMs : 60_000;
+    // runExecProcess spawns the command in its own process group and
+    // enforces timeoutMs / the abort signal against the WHOLE group
+    // (TERM → KILL escalation), with a bounded post-exit stream drain.
+    // See src/execution/exec-processes.ts and ADR
+    // approval-execution-abort.md.
+    const exec = await runExecProcess({
+      instance: config.instance,
+      spawnArgs,
       cwd: config.workspaceRoot,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env }
+      command,
+      timeoutMs,
+      signal
     });
-    const timeoutMs = Number(approval.payload.timeoutMs ?? 10_000);
-    const timeout = setTimeout(() => proc.kill(), timeoutMs);
-    // Race `proc.exited` against the abort signal to pick the
-    // audit-row name. `Promise.race` uses the microtask-ordering
-    // guarantee that whichever underlying promise resolves first
-    // wins; that's more reliable than a side-flag where a same-tick
-    // "abort fires THEN proc.exited.then microtask runs"
-    // interleaving could misclassify a naturally-completed proc as
-    // aborted. The losing side's promise stays pending; we await
-    // `proc.exited` again below as part of the drain — already-
-    // resolved promises return their settled value cheaply.
-    //
-    // Grandchildren teardown: `proc.kill()` only SIGTERMs the
-    // immediate child. When zsh exec's the leaf command (the
-    // common case for `zsh -lc "sleep 30"`), that IS the leaf. For
-    // commands that fork detached children (`sleep 30 & wait`),
-    // the children survive. Bun's spawn does not expose a
-    // `detached` option that turns the child into a session leader,
-    // so a `process.kill(-pid)` group kill is unsafe (without
-    // detached, `-pid` is a non-existent or our-own process group).
-    // ADR approval-execution-abort.md documents the residual gap; a true setsid wrap is
-    // tracked as deferred work.
-    let abortReason: string | undefined;
-    const procExitedSentinel = proc.exited.then(() => "exited" as const);
-    const abortSentinel = new Promise<"aborted">((resolve) => {
-      if (signal.aborted) {
-        abortReason = readSignalReason(signal);
-        return resolve("aborted");
-      }
-      signal.addEventListener("abort", () => {
-        abortReason = readSignalReason(signal);
-        resolve("aborted");
-      }, { once: true });
-    });
-    const winner = await Promise.race([procExitedSentinel, abortSentinel]);
-    if (winner === "aborted") {
-      try { proc.kill(); } catch { /* already exited */ }
-    }
-    let stdout = "";
-    let stderr = "";
-    let exitCode = 0;
-    try {
-      [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-    } finally {
-      clearTimeout(timeout);
-    }
+    const { stdout, stderr, exitCode, timedOut, winner } = exec;
+    const abortReason = exec.abortReason;
     // Master plan §6.2: outputs may be truncated for at-a-glance display, but
     // the full logs must be retrievable. The audit `evidence` field keeps the
     // 4KB excerpt for inline reading (mobile, terminal); the full text is
@@ -2399,6 +2551,7 @@ async function runApprovedActionImpl(
           evidence: {
             ...extraEvidence,
             exitCode,
+            ...(timedOut ? { timedOut: true, timeoutMs } : {}),
             stdout: stdout.slice(0, 4000),
             stderr: stderr.slice(0, 4000),
             stdoutBytes: stdout.length,
@@ -2434,7 +2587,10 @@ async function runApprovedActionImpl(
     if (task) await updateRunFromTask(config, task);
     // Feed the captured stdout/stderr back to the chat-task loop. Truncate
     // similarly to the audit trail so we don't blow the model's context.
+    // A timed-out run reports the kill truthfully — the model must never
+    // read a bare exit code as "the command ran to completion".
     const summary = [
+      timedOut ? `Command timed out: exceeded the ${timeoutMs}ms budget and its process group was killed.` : "",
       `exit ${exitCode}`,
       stdout.length > 0 ? `stdout:\n${stdout.slice(0, 4000)}${stdout.length > 4000 ? "\n…(truncated)" : ""}` : "",
       stderr.length > 0 ? `stderr:\n${stderr.slice(0, 4000)}${stderr.length > 4000 ? "\n…(truncated)" : ""}` : ""
@@ -3248,6 +3404,7 @@ async function runTerminalCommandClaimed(
   let exitCode = 0;
   let winner: "exited" | "aborted" = "exited";
   let abortReason: string | undefined;
+  let timedOut = false;
   if (signal.aborted) {
     // Cancellation already landed (e.g. cancelTask ran between
     // terminalExecDispatch's allowlist match and this claim). Emit
@@ -3255,33 +3412,19 @@ async function runTerminalCommandClaimed(
     winner = "aborted";
     abortReason = readSignalReason(signal);
   } else {
-    const proc = spawn(spawnArgs, {
+    // Same process-group execution as the approval executor: timeout
+    // and abort kill the whole group, drain is bounded. See
+    // src/execution/exec-processes.ts.
+    const exec = await runExecProcess({
+      instance: config.instance,
+      spawnArgs,
       cwd: config.workspaceRoot,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env }
+      command,
+      timeoutMs,
+      signal
     });
-    const timeout = setTimeout(() => proc.kill(), timeoutMs);
-    const procExitedSentinel = proc.exited.then(() => "exited" as const);
-    const abortSentinel = new Promise<"aborted">((resolve) => {
-      signal.addEventListener("abort", () => {
-        abortReason = readSignalReason(signal);
-        resolve("aborted");
-      }, { once: true });
-    });
-    winner = await Promise.race([procExitedSentinel, abortSentinel]);
-    if (winner === "aborted") {
-      try { proc.kill(); } catch { /* already exited */ }
-    }
-    try {
-      [stdout, stderr, exitCode] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited
-      ]);
-    } finally {
-      clearTimeout(timeout);
-    }
+    ({ stdout, stderr, exitCode, winner, timedOut } = exec);
+    abortReason = exec.abortReason;
   }
 
   const artifact = winner === "aborted" && exitCode === 0 && stdout.length === 0 && stderr.length === 0
@@ -3301,6 +3444,7 @@ async function runTerminalCommandClaimed(
         evidence: {
           ...options.evidenceExtra,
           ...(winner === "aborted" ? { aborted: true, abortReason: abortReason ?? "task.cancelled" } : {}),
+          ...(timedOut ? { timedOut: true, timeoutMs } : {}),
           exitCode,
           stdout: stdout.slice(0, 4000),
           stderr: stderr.slice(0, 4000),
@@ -3337,6 +3481,7 @@ async function runTerminalCommandClaimed(
   const summary = winner === "aborted"
     ? `Command aborted: task was cancelled (exit ${exitCode}).`
     : ([
+      timedOut ? `Command timed out: exceeded the ${timeoutMs}ms budget and its process group was killed.` : "",
       `exit ${exitCode}`,
       stdout.length > 0 ? `stdout:\n${stdout.slice(0, 4000)}${stdout.length > 4000 ? "\n…(truncated)" : ""}` : "",
       stderr.length > 0 ? `stderr:\n${stderr.slice(0, 4000)}${stderr.length > 4000 ? "\n…(truncated)" : ""}` : ""

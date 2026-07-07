@@ -24,27 +24,40 @@ skills (`google-gmail`, `google-calendar`, `google-drive`, `google-docs`,
   per-instance `google-workspace-oauth` connector exists: `isSkillActive`
   (`packages/runtime/src/integrations/connectors/index.ts`) consults the owning provider's
   `credentialExternallySatisfied` hook (`google-oauth-desktop.ts`, backed by
-  `readGoogleAccounts()`) before declaring a required credential unmet. The
-  hook applies only when no connector record with that name exists at all —
-  an existing record of any status keeps the usability-only gate, so a
-  `disabled` connector (explicit operator off) leaves the skills inactive
-  regardless of registered accounts. For the read/operate Workspace skills,
-  each account's config dir is self-contained (its own OAuth client + tokens),
-  so no client env bindings are needed on that path; the exception is
-  `google-account-login`'s fresh-login flow, which mints a new config dir and
-  still needs the connector's `GOOGLE_WORKSPACE_CLI_CLIENT_ID`/`_SECRET`
-  bindings. The check is presence-only; sign-in expiry is handled by the
-  skill recipes at run time.
+  `readGoogleAccounts()`) before declaring a required credential unmet. In the
+  hosted product this is the steady state: the host bakes the guest's Google
+  Workspace credential at provisioning and the gateway registers the primary
+  account at boot (see "Hosted edge-provisioned accounts"), so
+  `readGoogleAccounts()` is non-empty from the first turn and the Workspace API
+  skills are active with no in-chat setup. The hook applies only when no
+  connector record with that name exists at all — an existing record of any
+  status keeps the usability-only gate, so a `disabled` connector (explicit
+  operator off) leaves the skills inactive regardless of registered accounts.
+  Each account's config dir is self-contained (its own OAuth client + tokens),
+  so no client env bindings are needed to read or operate against it. The check
+  is presence-only; sign-in expiry is handled by the skill recipes at run time.
 
 - **Accounts are tagged.** Each account carries a user label (`personal`,
   `work`, `school`, …). Tags are unique case-insensitively across accounts.
 
 - **Machine-global registry.** Accounts live in
   `~/.gini/google-accounts/accounts.json`
-  (`{ version: 1, accounts: GoogleAccount[] }`), with each gini-managed config
-  dir under `~/.gini/google-accounts/<id>/`. The pre-existing `~/.config/gws`
-  session is **adopted in place** (its account's `configDir` points at
-  `~/.config/gws`), so no forced re-login of the user's existing session.
+  (`{ version: 1, accounts: GoogleAccount[], primaryAccountId?: string }`),
+  with each gini-managed config dir under `~/.gini/google-accounts/<id>/`. The
+  hosted guest's baked primary credential is registered at boot with its
+  `configDir` pointing at the baked credentials directory (see "Hosted
+  edge-provisioned accounts"); additional accounts each get their own managed
+  config dir.
+
+- **One persisted primary account.** `primaryAccountId` is an optional,
+  additive registry field naming the user's primary account (see "The primary
+  account and OAuth intents" below). Reads are tolerant: a registry written
+  before the field existed, or one whose id no longer names a row, resolves
+  through the pre-field heuristic (first `provisioned` row, else the first
+  row). The *effective* primary is resolved server-side
+  (`effectivePrimaryAccountId`) and surfaced as `primary: true` on exactly one
+  row of `GET /api/google/accounts`, so every client agrees. Deleting the
+  primary account clears the field.
 
 - **Surfaced as a transient sub-resource of the connector, not persisted to
   per-instance state.** `GET /api/connectors` attaches an `accounts` enrichment
@@ -69,6 +82,7 @@ export interface GoogleAccountStatus extends GoogleAccount {
   signedIn: boolean;
   services: Record<string, boolean>; // keyed by google-* skill suffix
   message: string;
+  primary?: boolean;                 // true on exactly the effective primary row
 }
 // ConnectorRecord.accounts?: GoogleAccountStatus[]  // transient, like `session`
 ```
@@ -125,7 +139,10 @@ resource, not as instance state:
 
 The intelligence lives in the prompt and skill text, not in heuristic code:
 
-- **0 accounts** → fall back to setup (`google-workspace-setup`).
+- **0 accounts** → fall back to setup (`google-workspace-setup`). On a hosted
+  guest the account is baked at provision and registered at boot, so an empty
+  registry there means provisioning hasn't finished — surface that the account
+  isn't ready rather than attempting a local sign-in.
 - **exactly 1 account** → use it (still passing its config dir).
 - **2+ accounts** → choose by the operation:
   - The user **named or clearly implied** one account (an explicit tag, an
@@ -137,6 +154,47 @@ The intelligence lives in the prompt and skill text, not in heuristic code:
     pick one, and don't ask — the user wants the whole picture across accounts.
   - A **write** (send, create, edit, delete) with no account named → **ASK
     before running** — never guess. There is no silent default account.
+
+### The primary account and OAuth intents
+
+"Primary" is a **display concept**: it labels the account the sign-in surfaces
+speak for (the onboarding step-0 "Continue as …" card, the accounts list's
+"Primary account" badge and ordering). It never scopes agent behavior — the
+selection policy above still aggregates unscoped reads across every account.
+
+The primary is **persisted** as the registry's `primaryAccountId` and driven
+by an **intent** every OAuth flow carries:
+
+- **`signin`** — the user is answering "who am I?" (onboarding step-0
+  "Continue with Google" / "Use a different account", and the
+  reconnect-revoked-primary relogin). On successful provisioning the
+  provisioned/matched account becomes `primaryAccountId`. A failed
+  exchange/provision never flips it.
+- **`add`** (the default everywhere) — the user is attaching another mailbox
+  (the accounts step). Never touches the primary.
+
+How the intent travels per flow:
+
+- **Loopback web login**: `GET /api/google/login/start?intent=signin|add`
+  (absent → `add`; anything else is a 400, like a bad `origin`). The intent
+  rides the in-memory pending-login record to the callback, which passes
+  `makePrimary` to `provisionAccount`.
+- **Hosted edge add flow**: `/auth/google/add?intent=signin` sanitizes the
+  param (only the literal `signin` counts; anything else is `add`), carries it
+  inside the signed add-mode OAuth `state`, and the callback POSTs
+  `makePrimary: true` to the guest's provision endpoint only for signin
+  intent. The web's reconnect-revoked-primary relogin is this same flow with
+  `intent=signin`. Independently of the intent, the callback compares the
+  OAuth'd Google sub with the session owner's stored sub and on a match
+  upgrades the provision to a baked-dir heal (`primary: true`) — see "Hosted
+  edge-provisioned accounts" below.
+- **Guest provision endpoint**: `POST /api/google/accounts/provision` accepts
+  an optional `makePrimary: boolean` — distinct from the existing `primary`
+  flag, which only *routes where the credential lands* (the baked-file heal)
+  and never touches `primaryAccountId`.
+- **Hosted boot**: `ensureHostedPrimaryAccount` sets `primaryAccountId` only
+  when unset (backfilling pre-field guests on their next boot), so a user's
+  later sign-in choice survives reboots.
 
 This is surfaced two ways, both byte-stable so they don't churn the prompt
 cache:
@@ -203,31 +261,86 @@ The script reads stdin JSON
 
 The 5-minute default skill-script timeout bounds the human OAuth wait.
 
+### How a Google account lands (hosted)
+
+On a hosted guest, accounts arrive through the host, not through an in-chat or
+local sign-in. The login skill above never runs there: the guest is headless,
+so the Desktop-client loopback flow can't complete anyway (nothing opens the
+consent URL and `localhost` resolves to the visitor's machine, not the
+guest). Two mechanisms populate the
+registry, both detailed in "Hosted edge-provisioned accounts" below:
+
+- **Boot registration of the baked primary.** The host bakes the guest's
+  Google Workspace credential at provisioning (a `credentials.json` pointed at
+  by `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`); at gateway boot
+  `ensureHostedPrimaryAccount` registers `dirname(credentials file)` as the
+  trusted `primary` account. This is why the Workspace skills are active from
+  the first turn with no user action.
+- **Adding another account.** The edge runs the web-application OAuth consent
+  + server-side code exchange and `POST`s the resulting refresh token to the
+  guest's `/api/google/accounts/provision`; `provisionAccount` writes an
+  `authorized_user` `credentials.json` into a managed config dir and registers
+  it `trusted: true`. The guest never runs `gws auth login` and never sees the
+  authorization code — only the already-exchanged refresh token.
+
+Both paths register `trusted: true` (skipping the live `gws auth status` probe)
+because the credential is trustworthy by construction: Google issues a refresh
+token only after a completed OAuth consent, and the probe is unusable at
+provisioning/boot time. `provisionAccount` is idempotent per identity (matched
+by Google `sub`, then verified email, then a live-email probe of empty-email
+rows), so re-adding the same account never mints a duplicate row.
+
 ### Trust boundary / security
 
-- **No secrets in chat.** The script never writes the client id/secret or any
-  token to chat or logs; it returns only `{ ok, id, tag, email, configDir,
-  scopes }`. OAuth consent is a human-in-the-loop browser step.
-- **Loopback registration with the instance bearer token.** After login, the
-  script reads the instance's `~/.gini/instances/<instance>/config.json` for the
-  API port + bearer token and `POST`s `/api/google/accounts` over loopback. The
-  gateway derives the canonical account id (the dir basename for gini-managed
-  dirs) so `configDirForAccount(id) === account.configDir` holds and removal can
-  clean the dir up.
+- **No secrets in chat.** The login script never writes the client id/secret
+  or any token to chat or logs; it returns only `{ ok, id, tag, email,
+  configDir, scopes }`, and OAuth consent is a human-in-the-loop browser step.
+  On a hosted guest the OAuth authorization-code exchange happens server-side
+  on the edge instead, and only the resulting refresh token crosses to the
+  guest over its bearer-authenticated `/api/google/accounts/provision` call.
+- **Trusted registration writes a 0600 credential.** `provisionAccount` writes
+  the standard `authorized_user` `credentials.json` (mode 0600, atomic
+  temp+rename) into a gini-managed config dir and registers it, deriving the
+  canonical account id from the dir basename so `configDirForAccount(id) ===
+  account.configDir` holds and removal can clean the dir up.
 - **`terminal_exec` still carries no connector env** (ADR
   skill-env-containment.md). Account selection is a config-dir *path* prefix,
   not a secret, so the model targeting an account in an arbitrary `gws` command
-  injects no credential — the clean-env guarantee is intact. Credentialed work
-  (login) stays on the named `skill_run` path.
+  injects no credential — the clean-env guarantee is intact.
 
 ## API surface
 
 - `GET /api/google/accounts` → `listAccountsWithStatus()` (registry joined with
-  live per-dir `gws auth status`, fetched in parallel, best-effort).
-- `POST /api/google/accounts` → body `{ tag, configDir, adopt? }` →
-  `registerAccount(...)` (201). Rejects with 400 when `tag`/`configDir` are
-  missing, or `"No signed-in Google session in <dir>"` when the dir has no live
-  session — so an empty dir is never registered.
+  live per-dir `gws auth status`, fetched in parallel, best-effort; exactly the
+  effective primary row carries `primary: true`).
+- `POST /api/google/accounts` → body `{ tag?, configDir, adopt? }` →
+  `registerAccount(...)` (201). Rejects with 400 when `configDir` is missing,
+  or `"No signed-in Google session in <dir>"` when the dir has no live
+  session — so an empty dir is never registered. A missing `tag` defaults from
+  the live session: a re-register keeps the existing row's tag, a fresh
+  registration derives the email local-part via `uniqueAccountTag`
+  (uniquified case-insensitively, so a defaulted tag never throws on a
+  collision — an explicit tag keeps its collision error).
+- `POST /api/google/accounts/provision` → body
+  `{ clientId, clientSecret, refreshToken, email?, principal?, tag?, primary?,
+  makePrimary? }` → `provisionAccount(...)` (201; 400 when any of the three
+  credential fields is missing/empty). The hosted-edge provisioning path — see
+  "Hosted edge-provisioned accounts" below. `makePrimary: true` persists the
+  provisioned account as `primaryAccountId` (sign-in intent — see "The primary
+  account and OAuth intents").
+- `GET /api/google/login/start?returnTo=&origin=&intent=` → 302 to Google
+  consent (the runtime-owned same-tab web login in `google-login-web.ts`, used
+  by non-hosted/loopback deployments); 400 in edge auth mode, on a
+  non-loopback `origin`, or on an `intent` other than `signin`/`add` (absent
+  defaults to `add`).
+- `GET /api/google/login/callback?code&state` → always a 302 back into the
+  app: `returnTo` on success, `returnTo` + `googleAddError=1` on any failure
+  (state mismatch/expiry, exchange failure, missing refresh token/sub).
+- `GET /api/google/auth-mode` → `{ mode: "edge" | "loopback" }` — which
+  add-account flow the web should offer. `"edge"` iff `GINI_HOSTED=1` (the
+  unconditional hosted-guest marker baked by the hosted provisioner) — the hosted
+  product's steady state, where the edge drives the OAuth exchange and provision
+  call; everywhere else `"loopback"` (the runtime-owned web login above).
 - `PATCH /api/google/accounts/:id` → `{ tag }` → retag (404 unknown id; 400 on
   a tag collision).
 - `DELETE /api/google/accounts/:id` → remove from the registry; best-effort
@@ -238,9 +351,10 @@ The 5-minute default skill-script timeout bounds the human OAuth wait.
 
 These `/api/google/accounts` routes are **not** instance-scoped (the registry is
 machine-global). The CLI (`gini connector accounts [list|retag|remove]`) and the
-Skills-page `GoogleAccountsCard` are thin clients of these routes; `add` from the
-CLI routes the user into chat, since only the agent can drive the browser OAuth
-flow.
+Skills-page `GoogleAccountsCard` are thin clients of these routes. Adding an
+account is a host-driven flow (the edge's server-side OAuth exchange →
+`/api/google/accounts/provision`); the CLI has no `add` and points the user at
+the host sign-in instead.
 
 ## Consequences
 
@@ -251,7 +365,10 @@ flow.
   credential is paired with the arbitrary command.
 - Credentialed Google login ships as the `google-account-login` skill's
   `account-login.ts`, invoked via `skill_run`. The setup skill must stay
-  credential-free so `read_skill` can load it during first-time setup.
+  credential-free so `read_skill` can load it during first-time setup. On a
+  hosted guest login is host-driven instead: the edge runs the OAuth
+  authorization-code exchange server-side and hands the guest a refresh token
+  via `/api/google/accounts/provision`.
 - New persistence belongs in `packages/runtime/src/state/google-accounts.ts` (low-level
   registry) and orchestration in `packages/runtime/src/integrations/connectors/google-accounts.ts`
   (registry ∪ live status, register/remove/retag). Status fetching is injectable
@@ -261,25 +378,33 @@ flow.
 
 The account dimension never widens the credential surface. The OAuth *client*
 creds reach a process only through the named `skill_run` login path
-(`resolveSkillEnv`); selecting *which account* a query runs as is a path, so it
-flows through `terminal_exec`'s clean env unchanged. Removing a gini-managed
-account deletes its config dir (its tokens) but never the user's
-`~/.config/gws`.
+(`resolveSkillEnv`); on a hosted guest even that never happens — the exchange
+runs server-side on the edge and the guest receives only the already-exchanged
+refresh token over its bearer-authenticated
+`/api/google/accounts/provision` call and writes it into a config dir. Selecting
+*which account* a query runs as is a path, so it flows through `terminal_exec`'s
+clean env unchanged. Removing a gini-managed account deletes its config dir
+(its tokens) but never the baked primary's credentials directory.
 
 Registration normally gates the registry write on a live `gws auth status`
-probe, so an empty or signed-out dir is never registered. The relay-provisioned
-grant path (`defaultPersistWorkspaceGrant` in `packages/runtime/src/integrations/tunnel.ts`) is
-the one exception: it calls `registerAccount` with `trusted: true`, which skips
-the probe. This is sound because the credential is trustworthy *by
-construction* — the relay only issues a refresh token after a completed OAuth
-consent — and the probe is unusable at tunnel-connect time, when the `gws`
-binary may not yet be installed, so gating on it would strand a valid credential
-unregistered (invisible to every readiness surface). The trusted account is
-written with `email: ""`; `listAccountsWithStatus` back-fills the live email and
-sign-in liveness on the next read. `trusted` is reachable only from this
-internal path: the public `POST /api/google/accounts` route forwards only
-`{ tag, configDir, adopt }` and never sets it, so the probe stays mandatory for
-all caller-supplied dirs.
+probe, so an empty or signed-out dir is never registered. The provisioned
+paths — the relay grant (`defaultPersistWorkspaceGrant` in
+`packages/runtime/src/integrations/tunnel.ts`) and the hosted-edge paths below
+— are the exceptions: they call `registerAccount` with `trusted: true`, which
+skips the probe. This is sound because the credential is trustworthy *by
+construction* — Google (via the relay or the edge's server-side code exchange)
+only issues a refresh token after a completed OAuth consent — and the probe is
+unusable at tunnel-connect time, when the `gws` binary may not yet be
+installed, so gating on it would strand a valid credential unregistered
+(invisible to every readiness surface). A trusted account is written with
+the caller's Google-verified email when it has one (the provision path below)
+and `email: ""` otherwise (the relay grant and the boot-registered primary);
+`listAccountsWithStatus` back-fills the live email and sign-in liveness on
+the next read. The general-purpose `POST /api/google/accounts`
+route forwards only `{ tag, configDir, adopt }` and never sets `trusted`, so
+the probe stays mandatory for all caller-supplied dirs; the provision route
+sets it only after building the credential itself from the posted refresh
+token.
 
 A trusted account carries two extra fields on the registry row (`GoogleAccount`
 in `packages/runtime/src/types.ts`), both set only on this path and never by a user/manual
@@ -309,11 +434,85 @@ which could misclassify and overwrite a user account that merely shares the tag.
 The duplicate is cleaned up by removing the stale row; correctness is never at
 risk.
 
+### Hosted edge-provisioned accounts
+
+A hosted guest is headless: the gws
+Desktop-client loopback OAuth cannot complete there — nothing opens the
+consent URL, and the `localhost` redirect resolves to the visitor's machine,
+not the guest. Account adds therefore go through the edge's web-application
+OAuth client, the same client sign-in uses (gws does not care which client
+minted a refresh token; the hosted primary already runs off this client's
+token). Three pieces make that work:
+
+- **`GET /api/google/auth-mode`** tells the web which flow to offer. Keyed on
+  `GINI_HOSTED=1` — the marker the hosted provisioner bakes into every guest's
+  environment unconditionally — rather than
+  `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`, which is only present when the
+  sign-in granted Workspace scopes (a guest without it still can't do
+  loopback).
+- **`POST /api/google/accounts/provision`** (`provisionAccount` in the
+  connector module) is how a new credential lands: the edge runs the consent
+  redirect + server-side code exchange (`/auth/google/add`, whose
+  `intent=signin` rides the add-mode OAuth state and becomes
+  `makePrimary: true` in the POST — see "The primary account and OAuth
+  intents"), then POSTs
+  `{ clientId, clientSecret, refreshToken, email?, principal?, tag?,
+  makePrimary? }` to the guest with the guest's bearer token. The runtime writes the standard
+  `authorized_user` `credentials.json` (0600, atomic temp+rename) into a
+  managed config dir and registers it `trusted: true`. Idempotent per
+  identity, matched in order: (1) a provisioned row with the same immutable
+  `principal` (the Google `sub`) — mirroring the relay grant's re-find; (2) a
+  row whose stored email equals the posted email case-insensitively; (3)
+  among rows with no stored email, a best-effort live `gws auth status` probe
+  per row matched on the live email — this is what re-finds rows registered
+  before their email was known, like the boot-registered primary. The posted
+  email is trustworthy for matching: both callers (the edge add callback and
+  the loopback web callback) take it from Google userinfo fetched with the
+  same exchange's access token, so the user just proved ownership of that
+  mailbox. On a match the credential is rewritten into that row's config dir,
+  the principal is stamped, `provisioned` stays sticky, the stored email is
+  backfilled, and the row's (possibly user-retagged) tag and id are kept.
+  Only a genuinely new identity mints a row, defaulting its tag to the email
+  local-part, uniquified case-insensitively so registration never throws on a
+  collision. **Owner-match upgrade:** when the OAuth'd Google sub equals the
+  session owner's stored sub (subs are immutable; emails are never compared),
+  the edge's add callback additionally sends `primary: true` — the baked-dir
+  heal flag — regardless of intent, and persists the freshly-minted refresh
+  token/scopes onto its own accounts row the way the sign-in callback does.
+  This is what lets the web's reconnect relogin heal a REVOKED owner
+  credential through the add flow: a revoked credential has no live email or
+  principal for the identity matching above, so without the flag the heal
+  would mint a duplicate row instead of rewriting the baked file gws reads.
+- **Boot-time primary registration** (`ensureHostedPrimaryAccount`, called
+  best-effort at gateway boot in `server.ts`): the sign-in grant is baked into
+  the guest as a credentials file pointed at by
+  `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`, which gws reads via env — it never
+  passes through the provision endpoint, so the registry wouldn't know about
+  it. Boot registers `dirname(credentials file)` as the trusted `primary`
+  account when no registry row points at that dir yet. It requires BOTH
+  hosted markers (`GINI_HOSTED=1` and the credentials env) so a local machine
+  exporting the gws env var for its own use never grows a surprise registry
+  row; errors are logged and never block boot. The boot-registered primary
+  carries no `principal` (the guest doesn't know its Google `sub`) and no
+  stored email, so a user re-adding the same identity through the edge
+  re-finds it via the owner-match upgrade above (`primary: true` routes the
+  credential straight into the baked dir, with the live-email probe as the
+  identity-matched fallback): the primary row keeps its tag and id, gets the
+  fresh credential and the `principal` stamped, and its email backfilled — no
+  duplicate row.
+
+OAuth scopes are deliberately unchanged by this path: the edge add flow
+requests the same `gmail.modify` + calendar set sign-in does. Widening the
+scope set is a separate decision.
+
 ## Acceptance checks
 
 - `bun test packages/runtime/src/state/google-accounts.test.ts` — registry round-trips
   (atomic write + read-back), missing/corrupt file → `[]`, case-insensitive tag
-  uniqueness rejects a colliding add/retag, remove is a no-op for an unknown id.
+  uniqueness rejects a colliding add/retag, remove is a no-op for an unknown id;
+  `primaryAccountId` set/read/clear round-trips, survives account writes, is
+  cleared by removing the primary account, and reads tolerantly (absent/corrupt
+  → undefined).
 - `bun test packages/runtime/src/integrations/connectors/google-accounts.test.ts` —
   `registerAccount` derives the id from the dir basename for a gini-managed dir
   (so `removeAccount` cleans that dir) and reuses/mints for an adopted dir;
@@ -321,7 +520,18 @@ risk.
   path**, and registers without probing when called with `trusted: true` (the
   relay-provisioned path below); `removeAccount` deletes a gini-managed dir but
   never `~/.config/gws`; `listAccountsWithStatus` degrades a failing per-dir
-  status fetch to `signedIn: false`.
+  status fetch to `signedIn: false`; `provisionAccount` mints a 0600 credential
+  with the caller's client, dedupes re-adds by principal, stored email, and
+  live-probed email of empty-email rows (no duplicate rows; a matched row keeps
+  its tag/id and gets the principal stamped and its email backfilled), and
+  uniquifies a colliding default tag; `provisionAccount` with
+  `makePrimary: true` persists the provisioned/matched account as the primary
+  while a plain add never touches it; `listAccountsWithStatus` marks exactly
+  the effective primary row `primary: true` (persisted id when live, else the
+  first-provisioned/first fallback); `googleAuthMode` /
+  `ensureHostedPrimaryAccount` key on the hosted markers (register once,
+  no-op when already registered or unhosted; sets `primaryAccountId` only
+  when unset).
 - `bun test packages/runtime/src/integrations/connectors/gws-session.test.ts` —
   `gwsSessionStatusForDir` passes `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` and caches
   per dir (each dir spawns at most one `gws auth status` per TTL window);
@@ -335,6 +545,15 @@ risk.
   (`extractConsentUrl`, `buildLoginArgs`, `forceAccountChooser` — merges
   `select_account` into any existing prompt, adds `login_hint`, no-ops an
   unparseable URL).
+- `bun test packages/runtime/src/integrations/connectors/google-login-web.test.ts`
+  — the runtime-owned same-tab web login with stubbed Google HTTP: edge-mode,
+  non-loopback-origin, and unknown-intent 400s, the returnTo sanitizer, the
+  consent-URL shape (PKCE S256 round trip, state, offline+consent, the gws
+  scope set, the browser-facing redirect_uri), callback state
+  mismatch/expiry/supersede, exchange-failure and missing-refresh-token/sub
+  redirects with `googleAddError=1`, the 0600 provisioned credential,
+  per-principal idempotent re-adds, and the intent semantics (signin flips the
+  persisted primary only on success; add/default never does).
 - E2E in a real chat turn: with two accounts connected, an unscoped read
   ("what's on my calendar") runs against every account's config dir and
   aggregates the results; a write that doesn't name an account makes the agent
@@ -346,13 +565,13 @@ risk.
 - ADR `typed-named-credentials.md` — the single `google-workspace-oauth`
   credential name the skills resolve by; unchanged here (one client, many
   accounts).
-- ADR `skill-env-containment.md` — the single-surface env containment the login
-  script sits on; this ADR implements that ADR's deferred `gws auth login`
-  env-injection follow-up.
+- ADR `skill-env-containment.md` — the single-surface env containment for
+  connector-derived env; no Workspace login runs on the guest, so the guest
+  never needs the `gws auth login` client-env injection.
 - ADR `connector-provider-spec-compliance.md` — the transient `session`
   enrichment and "Health vs. session liveness" pattern the `accounts`
   enrichment mirrors.
-- ADR `skill-connector-consent.md` — bundled skills (including
-  `google-account-login`) are auto-granted their declared credentials.
+- ADR `skill-connector-consent.md` — bundled skills are auto-granted their
+  declared credentials.
 - ADR `connector-secret-storage.md` — how the OAuth client creds are encrypted
-  before `resolveSkillEnv` injects them into the login script.
+  at rest.

@@ -17,7 +17,6 @@ import type {
   JobRecord,
   ConnectorRecord,
   ImprovementProposal,
-  PairedDevice,
   RuntimeEvent,
   JobRunRecord
 } from "@runtime/types";
@@ -54,7 +53,6 @@ export interface RuntimeStateSnapshot {
   jobs: JobRecord[];
   connectors: ConnectorRecord[];
   improvements: ImprovementProposal[];
-  devices: PairedDevice[];
   promotions: Array<{
     id: string;
     status: string;

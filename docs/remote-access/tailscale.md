@@ -24,13 +24,13 @@ https://<machine>.<tailnet>.ts.net
 tailscale serve --bg http://127.0.0.1:<gateway-port>
 ```
 
-The connected URL's origin is trusted by the gateway automatically for exactly as long as the tunnel is connected. The first browser to visit is redirected to `/pair` and must be approved once from the operator's tunnel popover (or any already-paired session).
+The connected URL's origin is trusted by the gateway automatically for exactly as long as the tunnel is connected. A trusted front is **owner-equivalent** — anyone on your tailnet who can reach the URL gets the same access as loopback, with no per-device pairing gate (see ADR [owner-token-auth.md](../adr/owner-token-auth.md)) — so keep the tailnet limited to devices you fully trust, or use the hosted edge for multi-user access.
 
 ## Confirm it's live
 
 - Sidebar pill: `Live / tailscale`.
 - `tailscale serve status` shows the proxy to the gateway port.
-- A page request to the `ts.net` URL answers `302 → /pair` until paired.
+- A page request to the `ts.net` URL serves the app.
 - If the `ts.net` name doesn't resolve on some machine, MagicDNS is off for that resolver — enable it, or pin with `curl --resolve <name>:443:<tailscale-ip>`.
 
 ## Public exposure (optional)

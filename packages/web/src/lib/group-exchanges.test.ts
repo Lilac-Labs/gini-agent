@@ -40,8 +40,12 @@ function toolCall(overrides: Partial<ToolCallBlock>): ChatBlock {
   } as ChatBlock;
 }
 
-function toolResult(callId: string, taskId: string): ChatBlock {
-  return { kind: "tool_result", id: `r${ordinal}`, sessionId: "s", instance: "test", ordinal: ordinal++, createdAt: "2026-01-01T00:00:00.000Z", callId, preview: "", truncated: false, taskId } as ChatBlock;
+function toolResult(callId: string, taskId: string, preview = ""): ChatBlock {
+  return { kind: "tool_result", id: `r${ordinal}`, sessionId: "s", instance: "test", ordinal: ordinal++, createdAt: "2026-01-01T00:00:00.000Z", callId, preview, truncated: false, taskId } as ChatBlock;
+}
+
+function setupRequested(summary: string, taskId: string): ChatBlock {
+  return { kind: "setup_requested", id: `sr${ordinal}`, sessionId: "s", instance: "test", ordinal: ordinal++, createdAt: "2026-01-01T00:00:00.000Z", setupRequestId: `setup-${ordinal}`, action: "chat.choice", summary, taskId } as ChatBlock;
 }
 
 // A job-cycle exchange: an assistant preamble, a tool call, and a final
@@ -320,6 +324,172 @@ describe("groupExchanges narration folding", () => {
     );
     expect(standaloneAssistant.length).toBe(1);
     expect(standaloneAssistant[0]!.kind === "block" && standaloneAssistant[0]!.isFinalAnswer).toBe(true);
+  });
+
+  // Native (server-side) web search surfaces as a display-only "Web search"
+  // tool_call chip with NO paired tool_result. The runtime emits it mid-stream
+  // so it lands BEFORE the answer; this pins that ordering renders the answer as
+  // a standalone final-answer bubble with the chip folded into the group.
+  test("a native web_search chip before the answer keeps the answer a standalone bubble", () => {
+    const items = groupExchanges([
+      user("what's the top HN story?", "task_ws"),
+      toolCall({ toolName: "web_search", argsPreview: "top hacker news story", argsFull: { query: "top hacker news story" }, status: "ok", taskId: "task_ws" }),
+      assistant("The top story is X.", "task_ws")
+    ], new Set(["task_ws"]));
+    const groups = items.filter((i) => i.kind === "tool_group");
+    expect(groups.length).toBe(1);
+    const group = groups[0]!;
+    expect(group.calls.length).toBe(1);
+    const standaloneAssistant = items.filter(
+      (i) => i.kind === "block" && i.block.kind === "assistant_text"
+    );
+    expect(standaloneAssistant.length).toBe(1);
+    expect(
+      standaloneAssistant[0]!.kind === "block" &&
+        standaloneAssistant[0]!.block.kind === "assistant_text" &&
+        standaloneAssistant[0]!.block.text
+    ).toBe("The top story is X.");
+    expect(standaloneAssistant[0]!.kind === "block" && standaloneAssistant[0]!.isFinalAnswer).toBe(true);
+  });
+
+  // The contrapositive that makes the mid-stream ordering load-bearing: a
+  // display-only chip emitted AFTER the answer (the naive post-turn approach)
+  // pushes the last tool-call index past the answer, so finalAnswerIdx stays -1
+  // and the answer is demoted into the collapsed group with no standalone bubble.
+  test("a native web_search chip after the answer folds the answer out of its bubble", () => {
+    const items = groupExchanges([
+      user("what's the top HN story?", "task_ws2"),
+      assistant("The top story is X.", "task_ws2"),
+      toolCall({ toolName: "web_search", argsPreview: "top hacker news story", status: "ok", taskId: "task_ws2" })
+    ], new Set(["task_ws2"]));
+    const standaloneAssistant = items.filter(
+      (i) => i.kind === "block" && i.block.kind === "assistant_text"
+    );
+    expect(standaloneAssistant.length).toBe(0);
+    const groups = items.filter((i) => i.kind === "tool_group");
+    expect(groups.length).toBe(1);
+    const group = groups[0]!;
+    expect(group.steps.some((s) => s.kind === "narration" && s.block.text === "The top story is X.")).toBe(true);
+  });
+});
+
+describe("groupExchanges ask_user exemption", () => {
+  // ask_user renders as the agent speaking: the chat.choice setup_requested
+  // block is the sole representation, so the tool_call must produce neither
+  // a tool-group row nor a loose inline block.
+  test("an ask_user call never renders a tool row — its chat.choice block is the sole representation", () => {
+    const items = groupExchanges([
+      user("book a table", "task_ask"),
+      toolCall({ toolName: "ask_user", displayLabel: "Ask user", argsPreview: "Which venue?", status: "ok", taskId: "task_ask" }),
+      setupRequested("Which venue?", "task_ask")
+    ]);
+    expect(items.some((i) => i.kind === "tool_group")).toBe(false);
+    expect(items.some((i) => i.kind === "block" && i.block.kind === "tool_call")).toBe(false);
+    expect(items.some((i) => i.kind === "block" && i.block.kind === "setup_requested")).toBe(true);
+  });
+
+  // The ask_user tool_result survives the tool_call filter, so a turn whose
+  // ONLY call was ask_user takes the no-tool passthrough. The result must not
+  // leak out as a block item — BlockRenderer renders tool_result as null, so
+  // it would become an empty transcript row (an empty <li>).
+  test("an ask_user-only turn's tool_result never passes through as a block item", () => {
+    const items = groupExchanges([
+      user("book a table", "task_ask_res"),
+      toolCall({ toolName: "ask_user", displayLabel: "Ask user", argsPreview: "Which venue?", status: "ok", callId: "call-ask", taskId: "task_ask_res" }),
+      toolResult("call-ask", "task_ask_res"),
+      setupRequested("Which venue?", "task_ask_res")
+    ]);
+    expect(items.some((i) => i.kind === "block" && i.block.kind === "tool_result")).toBe(false);
+    // Only the user's message and the chat.choice block render.
+    expect(items.length).toBe(2);
+    expect(items.some((i) => i.kind === "block" && i.block.kind === "setup_requested")).toBe(true);
+  });
+
+  // When the ask is the turn's FIRST process-eligible block (no narration or
+  // call before it) and the answered run goes on to make a real tool call,
+  // the ask's orphaned tool_result sits before the group anchor. It must not
+  // pass through as a block item — that would render an empty transcript row
+  // between the settled ask and the tool group.
+  test("a settled ask followed by a real tool call never leaks the ask's orphaned tool_result", () => {
+    const items = groupExchanges(
+      [
+        user("which repo?", "task_ask_resume"),
+        toolCall({ toolName: "ask_user", displayLabel: "Ask user", argsPreview: "Which repo?", status: "ok", callId: "call-ask2", taskId: "task_ask_resume" }),
+        setupRequested("Which repo?", "task_ask_resume"),
+        toolResult("call-ask2", "task_ask_resume"),
+        toolCall({ toolName: "web_search", argsPreview: "repo docs", status: "ok", callId: "call-ws", taskId: "task_ask_resume" }),
+        toolResult("call-ws", "task_ask_resume"),
+        assistant("here you go", "task_ask_resume")
+      ],
+      new Set(["task_ask_resume"])
+    );
+    expect(items.some((i) => i.kind === "block" && i.block.kind === "tool_result")).toBe(false);
+    // The settled ask stays in place, directly followed by the tool group.
+    const kinds = items.map((i) => (i.kind === "block" ? i.block.kind : i.kind));
+    expect(kinds).toEqual(["user_text", "setup_requested", "tool_group", "assistant_text"]);
+  });
+
+  // A rejected ask_user (the dispatcher refused to mint a choice —
+  // option-less or malformed args) produces no chat.choice block, so the
+  // call must render as a tool row instead of the turn showing nothing. The
+  // graceful steer settles the call "ok" and carries the rejection only in
+  // the paired tool_result's `{"ok":false,...}` JSON.
+  test("a rejected ask_user call (graceful ok:false result) still renders a tool row", () => {
+    const items = groupExchanges([
+      user("reply to dana", "task_ask_rej"),
+      toolCall({ toolName: "ask_user", displayLabel: "Ask user", argsPreview: "What should the reply say?", status: "ok", callId: "call-rej", taskId: "task_ask_rej" }),
+      toolResult("call-rej", "task_ask_rej", '{"ok":false,"error":"ask_user only presents choices — `options` (2-6 entries…'),
+      assistant("What should the reply say?", "task_ask_rej")
+    ]);
+    const groups = items.filter((i) => i.kind === "tool_group");
+    expect(groups.length).toBe(1);
+    expect(groups[0]!.calls.map((c) => c.toolName)).toEqual(["ask_user"]);
+  });
+
+  test("an error-status ask_user call still renders a tool row", () => {
+    const items = groupExchanges([
+      user("pick one", "task_ask_err"),
+      toolCall({ toolName: "ask_user", displayLabel: "Ask user", argsPreview: "Pick?", status: "error", callId: "call-err", taskId: "task_ask_err" }),
+      assistant("Pick?", "task_ask_err")
+    ]);
+    const groups = items.filter((i) => i.kind === "tool_group");
+    expect(groups.length).toBe(1);
+    expect(groups[0]!.calls.map((c) => c.toolName)).toEqual(["ask_user"]);
+  });
+
+  // The successful path is untouched by the rejection carve-out: an answered
+  // ask's tool_result reads `User selected: ...`, not ok:false JSON, so the
+  // call stays hidden and the chat.choice block remains the representation.
+  test("an answered ask_user still never renders a tool row", () => {
+    const items = groupExchanges(
+      [
+        user("book a table", "task_ask_ans"),
+        toolCall({ toolName: "ask_user", displayLabel: "Ask user", argsPreview: "Which venue?", status: "ok", callId: "call-ans", taskId: "task_ask_ans" }),
+        setupRequested("Which venue?", "task_ask_ans"),
+        toolResult("call-ans", "task_ask_ans", 'User selected: "Blue Door"'),
+        assistant("Booked.", "task_ask_ans")
+      ],
+      new Set(["task_ask_ans"])
+    );
+    expect(items.some((i) => i.kind === "tool_group")).toBe(false);
+    expect(items.some((i) => i.kind === "block" && i.block.kind === "tool_call")).toBe(false);
+    expect(items.some((i) => i.kind === "block" && i.block.kind === "setup_requested")).toBe(true);
+  });
+
+  test("a mixed turn folds only the non-ask_user calls into the group", () => {
+    const items = groupExchanges([
+      user("find a venue", "task_ask_mixed"),
+      toolCall({ toolName: "web_search", argsPreview: "venues nearby", status: "ok", taskId: "task_ask_mixed" }),
+      toolCall({ toolName: "ask_user", displayLabel: "Ask user", argsPreview: "Which venue?", status: "ok", taskId: "task_ask_mixed" }),
+      setupRequested("Which venue?", "task_ask_mixed")
+    ]);
+    const groups = items.filter((i) => i.kind === "tool_group");
+    expect(groups.length).toBe(1);
+    expect(groups[0]!.calls.map((c) => c.toolName)).toEqual(["web_search"]);
+    expect(
+      groups[0]!.steps.every((s) => s.kind !== "tool_call" || s.block.toolName !== "ask_user")
+    ).toBe(true);
+    expect(items.some((i) => i.kind === "block" && i.block.kind === "setup_requested")).toBe(true);
   });
 });
 

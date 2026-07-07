@@ -41,7 +41,7 @@ async function photoLikePng(width: number, height: number): Promise<Uint8Array> 
 
 describe("compressImageToFit", () => {
   test("compresses an oversized raster to a valid JPEG under the limit", async () => {
-    const png = await photoLikePng(1500, 1500);
+    const png = await photoLikePng(800, 800);
     const limit = 120_000;
     expect(png.length).toBeGreaterThan(limit);
 
@@ -73,7 +73,7 @@ describe("compressImageToFit", () => {
   });
 
   test("exhausts the ladder gracefully under a pathologically tiny limit", async () => {
-    const png = await photoLikePng(1500, 1500);
+    const png = await photoLikePng(800, 800);
     const limit = 100;
     expect(png.length).toBeGreaterThan(limit);
 
@@ -113,7 +113,7 @@ describe("visionImageDataUrl", () => {
   });
 
   test("compresses once, caches the JPEG, and reuses it", async () => {
-    const png = await photoLikePng(1500, 1500);
+    const png = await photoLikePng(800, 800);
     const limit = 120_000;
     const upload = storeUpload(instance, png, "image/png", "photo.png");
 
@@ -142,7 +142,7 @@ describe("visionImageDataUrl", () => {
   });
 
   test("returns null when the image can't be compressed under a tiny limit", async () => {
-    const png = await photoLikePng(1500, 1500);
+    const png = await photoLikePng(800, 800);
     const limit = 100; // no real-raster JPEG fits — over-limit guard drops it.
     const upload = storeUpload(instance, png, "image/png", "photo.png");
 

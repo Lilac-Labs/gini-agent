@@ -35,6 +35,27 @@ export function groupExchanges(
   terminalTaskIds: ReadonlySet<string> = new Set()
 ): ChatRenderItem[] {
   const items: ChatRenderItem[] = [];
+  // ask_user renders as the agent speaking: its chat.choice setup_requested
+  // block is the sole representation, so the tool_call itself never becomes
+  // a tool-group row (or a loose inline block). Its tool_result stays in the
+  // stream but is invisible on its own (results render only inside a parent
+  // call's expansion). EXCEPT a rejected call: the dispatcher refuses to
+  // mint a choice (option-less/malformed args), so no chat.choice block
+  // exists and dropping the call would leave the turn with no trace at all.
+  // A rejection shows up either as block status "error"/"denied" (dispatch
+  // threw) or — for the graceful steer — as the paired tool_result's
+  // `{"ok":false,...}` JSON while the call itself settled "ok"; keep those
+  // calls so the failed ask still renders as a tool row.
+  const askUserRejected = (call: ToolCallBlock): boolean => {
+    if (call.status === "error" || call.status === "denied") return true;
+    const result = blocks.find(
+      (b) => b.kind === "tool_result" && b.callId === call.callId && b.taskId === call.taskId
+    );
+    return result?.kind === "tool_result" && result.preview.startsWith('{"ok":false');
+  };
+  blocks = blocks.filter(
+    (b) => !(b.kind === "tool_call" && b.toolName === "ask_user" && !askUserRejected(b))
+  );
   // Partition blocks into exchanges, then collapse each. An exchange is the
   // set of blocks sharing one taskId — a single agent turn or job cycle. A
   // turn's user_text, assistant_text, and tool calls all carry that turn's
@@ -90,6 +111,12 @@ function appendExchange(items: ChatRenderItem[], exchange: ChatBlock[], terminal
       }
     }
     for (let i = 0; i < exchange.length; i++) {
+      // A tool_result never renders standalone (results show only inside a
+      // parent call's expansion), so skip it here like the grouped path does.
+      // Reachable without a call: the ask_user filter above drops the
+      // tool_call but its result stays, so an ask_user-only turn lands here —
+      // passing the result through would render an empty transcript row.
+      if (exchange[i]!.kind === "tool_result") continue;
       items.push({ kind: "block", block: exchange[i]!, ...(i === finalIdx ? { isFinalAnswer: true } : {}) });
     }
     return;
@@ -133,6 +160,12 @@ function appendExchange(items: ChatRenderItem[], exchange: ChatBlock[], terminal
     if (groupIdx === -1) groupIdx = i;
   }
   for (let i = 0; i < groupIdx; i++) {
+    // A tool_result never renders standalone (BlockRenderer returns null for
+    // it), so passing one through here would render an empty transcript row.
+    // Reachable: the ask_user filter above drops the tool_call but keeps its
+    // result, so when the ask was the turn's first process-eligible block
+    // (no earlier narration or call) its orphaned result precedes groupIdx.
+    if (exchange[i]!.kind === "tool_result") continue;
     items.push({ kind: "block", block: exchange[i]! });
   }
   // While the turn is still generating, the group renders expanded (each tool

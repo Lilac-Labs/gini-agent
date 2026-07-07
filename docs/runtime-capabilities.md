@@ -67,20 +67,14 @@ Stable local clients use the gateway API:
 - `/api/embedding/status`, `/api/embedding/reembed`, `/api/reranker/status`, `/api/stt/status`
 - `/api/uploads` (POST `image/*` or `audio/*`), `GET /api/uploads/:id` — serves both inbound (user-attached) and outbound (agent-produced) media; the same store backs agent screenshots / promoted files, which the agent references inline in its reply text as `gini-upload://<id>` markdown (the block schema is unchanged — only `UserTextBlock.images` carries inbound attachments). See [outbound-chat-attachments.md](adr/outbound-chat-attachments.md)
 - `/api/skills`, `/api/jobs`, `/api/connectors`, `/api/toolsets`
-- `/api/pairing`, `/api/pairing/claim`, `/api/pairing/request*`, `/api/devices`, `/api/mobile/bootstrap`
+- `/api/mobile/bootstrap`
 - `/api/messaging`, `/api/mcp`, `/api/subagents`, `/api/agents`
 - `/api/tunnel`, `/api/tunnel/select`, `/api/tunnel/connect`, `/api/tunnel/cancel`, `/api/tunnel/disconnect`
 - `/api/audit`, `/api/events`, `/api/events/stream`
 - `/api/settings/auto-approve`
 - `/api/parity/hermes`, `/api/readiness/v1`
 
-Native gateway `/api/*` routes require `Authorization: Bearer <token>` except health checks, the limited SSE token compatibility path, and the device-pairing routes under `/api/pairing/*`. Pairing has its own trust model (see [ADR: Device-pairing authentication](adr/device-pairing-auth.md)), and the two claim paths are distinct:
-
-- **Legacy code-claim** — `POST /api/pairing/claim` takes a one-time admin-generated code in the request body and returns a `gini_device_<uuid>` bearer token (the mobile/CLI flow). It is public and not `gini_pair`-bound, but is rate-limited (per-host + global token buckets) to throttle brute-forcing the 6-digit code now that the gateway fronts the relay. Codes are created by `POST /api/pairing`, an admin route (see Admin routes below).
-- **Relay device-request flow** — `POST /api/pairing/request`, `GET /api/pairing/request/:id`, and `POST /api/pairing/request/:id/{claim,cancel}` are public and bound to the single-use `gini_pair` binding cookie rather than a bearer; both `POST /api/pairing/request` and the legacy claim are rate-limited. `POST /api/pairing/request/:id/claim` sets the `gini_session` cookie instead of returning a bearer for a browser; a verified **native** client (the mobile app) instead receives the `gini_device_<uuid>` token in the response body and no cookie, and uses it as its `Authorization: Bearer` (see the ADR's "Native pairing client").
-- **Admin routes** — `GET /api/pairing/requests` and `POST /api/pairing/requests/:id/{approve,reject}` are admin actions, called same-origin on the native surface and gated by **loopback Host OR a valid `gini_session`**. A **paired** session (loopback OR relay) is admin: once paired, a relay session is a full mirror of loopback and can approve/add devices exactly like `127.0.0.1`. `POST /api/pairing` (legacy code create) is bearer-gated (reached via the BFF's owner bearer). The only relay-specific gate is the initial pairing handshake. See [ADR](adr/device-pairing-auth.md) ("Relay sessions mirror loopback").
-
-Separately, web-bound `/api/runtime/*` calls arriving on a non-loopback (relay/allowlisted) front are authenticated by the `gini_session` cookie minted at request-claim, not a bearer.
+Native gateway `/api/*` routes require the **owner bearer** (`Authorization: Bearer <config.token>`) — the only credential the runtime authorizes — with health checks and signed upload GETs excepted. Hosted requests arrive pre-authenticated via `X-Gini-Edge`: the edge authenticates the user with Google OAuth and injects the guest's own owner token upstream. See [ADR: Owner-token-only authentication](adr/owner-token-auth.md).
 
 ## Boundaries
 

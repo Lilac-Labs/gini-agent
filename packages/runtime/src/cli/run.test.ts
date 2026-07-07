@@ -255,53 +255,46 @@ describe("gini run", () => {
     expect(await pidAlive(directChildPid)).toBe(false);
   }, 30_000);
 
-  test.concurrent("captures runtime child stdout to runtime-stdout.log", async () => {
+  test.concurrent("captures runtime child stdout and shutdown output to runtime-stdout.log", async () => {
+    // One boot exercises both stdio-capture guarantees, because a single
+    // runtime-stdout.log records BOTH markers across one boot+SIGTERM cycle:
+    //   1. boot stdout — src/server.ts logs "Gini runtime listening on ..."
+    //      once the tee stream is wired, proving child stdio flows to the file.
+    //   2. shutdown stdout — the server.ts SIGTERM handler logs "Gini runtime
+    //      shutting down (SIGTERM)" as it tears down. This is the end-to-end
+    //      guard for the shutdown contract that `awaitForegroundLogFlush()` in
+    //      admin.ts:runForeground supports: on a slow OS or a future Bun where
+    //      WriteStream draining isn't already done by the time `await done`
+    //      resolves, dropping the await would lose these tail bytes.
+    // Asserting both on the same log after one teardown keeps every assertion
+    // the two separate tests made while paying the CLI-child boot cost once.
     const h = makeHarness("logfile");
     const { child, stdout, exit } = await spawnRun(h);
     await stdout;
     // With GINI_LOG_ROOT set (via --log-root), logDir(instance) resolves to
     // <override>/<instance> (no extra /logs/ segment). See src/paths.ts:logDir.
     const logPath = join(h.logRoot, h.instance, "runtime-stdout.log");
-    // Wait for the runtime child to actually flush its startup line before we
-    // tear down the parent — the tee stream is closed on child exit, so killing
-    // before the write lands would lose the marker we assert on below.
-    await waitForLogMarker(logPath, "Gini runtime listening");
-    child.kill("SIGTERM");
-    await exit;
-    expect(existsSync(logPath)).toBe(true);
-    const contents = readFileSync(logPath, "utf8");
-    // src/server.ts logs "Gini runtime listening on ..." at boot, so this is
-    // the most reliable marker that stdio actually flowed into the log file.
-    expect(contents).toContain("Gini runtime listening");
-    expect(contents).toContain(`instance=${h.instance}`);
-  }, 30_000);
-
-  test.concurrent("captures runtime shutdown output to runtime-stdout.log on SIGTERM", async () => {
-    // End-to-end guard for the shutdown contract that
-    // `awaitForegroundLogFlush()` in admin.ts:runForeground exists to support:
-    // output emitted by the runtime as it tears down (server.ts SIGTERM
-    // handler) must reach the log file before the CLI exits. On a slow OS or
-    // a future Bun where WriteStream draining isn't already done by the time
-    // `await done` resolves, dropping the await would lose the tail bytes.
-    const h = makeHarness("shutdown-flush");
-    const { child, stdout, exit } = await spawnRun(h);
-    await stdout;
-    const logPath = join(h.logRoot, h.instance, "runtime-stdout.log");
     // Wait for the runtime child to finish booting (its "listening" line lands
-    // in the log) before tearing down. The parent banner (`await stdout`)
-    // only proves the child was spawned, not that it reached steady state.
-    // Sending SIGTERM mid-boot lets the parent forward the signal before the
-    // child's scheduler loops have settled into their short steady-state
-    // sleeps; under parallel load the resulting drain can run long enough to
-    // race the parent's SIGKILL deadline, killing the child before it writes
-    // the shutdown marker this test asserts on.
+    // in the log) before tearing down. The parent banner (`await stdout`) only
+    // proves the child was spawned, not that it reached steady state. Sending
+    // SIGTERM mid-boot lets the parent forward the signal before the child's
+    // scheduler loops have settled into their short steady-state sleeps; under
+    // parallel load the resulting drain can run long enough to race the
+    // parent's SIGKILL deadline, killing the child before it writes the
+    // shutdown marker. It also guards the boot marker: the tee stream is closed
+    // on child exit, so killing before the "listening" write lands would lose
+    // it too.
     await waitForLogMarker(logPath, "Gini runtime listening");
     child.kill("SIGTERM");
     await exit;
     expect(existsSync(logPath)).toBe(true);
     const contents = readFileSync(logPath, "utf8");
-    // Marker comes from src/server.ts SIGTERM handler. The instance suffix
-    // makes sure we're seeing OUR runtime's shutdown, not stray output.
+    // Boot marker: src/server.ts logs "Gini runtime listening on ..." at boot,
+    // so this is the most reliable marker that stdio actually flowed into the
+    // log file. Shutdown marker comes from the server.ts SIGTERM handler. The
+    // instance suffix on each makes sure we're seeing OUR runtime, not stray
+    // output from a sibling instance.
+    expect(contents).toContain("Gini runtime listening");
     expect(contents).toContain("Gini runtime shutting down (SIGTERM)");
     expect(contents).toContain(`instance=${h.instance}`);
   }, 30_000);

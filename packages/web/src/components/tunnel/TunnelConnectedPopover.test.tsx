@@ -8,32 +8,11 @@
 // because happy-dom omits navigator.clipboard. Every state-updating interaction
 // goes through async userEvent so React updates stay inside act().
 
-import { afterAll, afterEach, beforeAll, describe, expect, jest, mock, test } from "bun:test";
+import { afterEach, describe, expect, jest, mock, test } from "bun:test";
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { TunnelProvider, TunnelState } from "./types";
-
-// TunnelConnectedPopover now embeds the live PairRequestsPanel inline (the QR it
-// shows IS what a new device scans, so there's no separate "Pair a device" step).
-// That panel is a data-fetching leaf owned by its own test, so we stub it and
-// import the popover AFTER the mock (cache-busted) — the popover then binds to our
-// stub regardless of sibling files. LEAK SAFETY: ./PairRequestsPanel is also
-// mocked by PairDeviceDialog.test; we spread/revert the real module in afterAll,
-// and the cache-busted subject import scopes our stub to this file.
-const realPanel = await import("@/components/pairing/PairRequestsPanel");
-let TunnelConnectedPopover: typeof import("./TunnelConnectedPopover").TunnelConnectedPopover;
-
-beforeAll(async () => {
-  mock.module("@/components/pairing/PairRequestsPanel", () => ({
-    PairRequestsPanel: () => <div data-testid="pair-panel-stub">pair requests</div>
-  }));
-  const popoverPath = "./TunnelConnectedPopover?popover-test";
-  ({ TunnelConnectedPopover } = (await import(popoverPath)) as typeof import("./TunnelConnectedPopover"));
-});
-
-afterAll(() => {
-  mock.module("@/components/pairing/PairRequestsPanel", () => realPanel);
-});
+import { TunnelConnectedPopover } from "./TunnelConnectedPopover";
 
 const PROVIDERS: TunnelProvider[] = [
   { id: "gini-relay", name: "Gini Relay", enabled: true },
@@ -230,15 +209,5 @@ describe("TunnelConnectedPopover", () => {
       />
     );
     expect(screen.queryByRole("button", { name: "Copy public URL" })).not.toBeNull();
-  });
-
-  test("embeds the live Pair-requests panel inline, with no extra Pair-a-device button", () => {
-    render(
-      <TunnelConnectedPopover state={makeState()} onEdit={() => {}} onDisconnect={() => {}} />
-    );
-    // The approval panel is embedded right in the popover — no separate
-    // "Pair a device" dialog trigger to click first.
-    expect(screen.queryByTestId("pair-panel-stub")).not.toBeNull();
-    expect(screen.queryByRole("button", { name: "Pair a device" })).toBeNull();
   });
 });

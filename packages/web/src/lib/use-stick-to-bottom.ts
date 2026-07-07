@@ -38,9 +38,17 @@ function findScroller(el: HTMLElement | null): HTMLElement | null {
  * arriving on a live relay) must NOT yank them back down. "Pinned" is sampled
  * from a scroll listener so the read happens *before* the new block grows the
  * content; measuring in the layout effect would see the already-appended block
- * and misjudge a pinned user as scrolled-up. This fires per new block, not per
- * streamed token — assistant text accretes in place under a stable block id
- * without changing the count, so intra-message streaming does not re-scroll.
+ * and misjudge a pinned user as scrolled-up.
+ *
+ * Content can also change size with NO count change and NO scroll event: gate
+ * cards (setup / authorization requests) mount compact and expand when their
+ * payload query resolves, streamed assistant text accretes under a stable
+ * block id, and the autosizing composer can shrink the viewport itself. Any of
+ * these would strand the last block clipped under the composer with the
+ * jump-to-bottom button still hidden (its sample is stale). A ResizeObserver
+ * on the scroller and its content wrapper covers this: while pinned it
+ * re-snaps; while scrolled up it re-samples so the button appears over the
+ * newly hidden content instead of scrolling.
  *
  * Every scroll here is instant (`behavior: "auto"`), never smooth. An animated
  * follow IS the visible scrolling this hook exists to suppress; worse, a
@@ -84,7 +92,27 @@ export function useStickToBottom(
     };
     sample();
     scroller.addEventListener("scroll", sample, { passive: true });
-    return () => scroller.removeEventListener("scroll", sample);
+    // Follow size changes that arrive without a count change or scroll event
+    // (see the note above): re-snap while pinned, re-sample otherwise. Instant,
+    // like every other scroll here. Observing the scroller catches viewport
+    // shrinkage (the composer autosizing taller); its content wrapper catches
+    // transcript growth (a gate card expanding, streamed text accreting).
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            if (pinnedRef.current) {
+              endRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+              return;
+            }
+            sample();
+          });
+    observer?.observe(scroller);
+    if (scroller.firstElementChild) observer?.observe(scroller.firstElementChild);
+    return () => {
+      scroller.removeEventListener("scroll", sample);
+      observer?.disconnect();
+    };
   }, [key, enabled]);
 
   useLayoutEffect(() => {

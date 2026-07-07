@@ -21,19 +21,26 @@ import {
 } from "./provider";
 import { createHandler } from "./http";
 import { submitChatMessage as submitChatMessageRaw } from "./execution/chat";
+import { settleSubmittedChatMessage, type SettledDispatch } from "./execution/chat-test-support";
 import { createChatSession, listChatBlocks, mutateState, readState } from "./state";
 import type { RuntimeConfig, Task } from "./types";
 
-// These tests submit on idle sessions, which always run immediately. Narrow
-// the submit union to the run-now branch so the existing `.taskId` reads stay
-// typed (a queued result here is a test-setup bug). See ADR
-// chat-message-queue.md.
+// These tests submit on idle sessions, which always run immediately. Settle
+// the echo-first ack into the dispatched turn and narrow to the run-now
+// branch so the existing `.taskId` reads stay typed (a queued result here is
+// a test-setup bug). See ADR chat-message-queue.md.
 async function submitChatMessage(
   ...args: Parameters<typeof submitChatMessageRaw>
-): Promise<Extract<Awaited<ReturnType<typeof submitChatMessageRaw>>, { taskId: string }>> {
+): Promise<Extract<SettledDispatch, { taskId: string }>> {
   const result = await submitChatMessageRaw(...args);
-  if ("queued" in result) throw new Error("expected run-now submission, got queued");
-  return result;
+  const settled = await settleSubmittedChatMessage(
+    args[0],
+    args[1],
+    result,
+    String(args[2].content ?? "")
+  );
+  if ("queued" in settled) throw new Error("expected run-now submission, got queued");
+  return settled;
 }
 
 const ROOT = "/tmp/gini-http-chat-choice-tests";
@@ -82,7 +89,17 @@ async function waitForTask(
 
 // Drive a real chat turn that pauses on ask_user. Returns the paused task id,
 // session id, and the pending chat.choice setup-request id.
-async function pauseOnAskUser(config: RuntimeConfig): Promise<{ taskId: string; sessionId: string; setupId: string }> {
+async function pauseOnAskUser(
+  config: RuntimeConfig
+): Promise<{ taskId: string; sessionId: string; setupId: string }> {
+  const toolArgs = {
+    question: "How should I search the web?",
+    options: [
+      { label: "Set up Brave + Exa", description: "Best coverage" },
+      { label: "Set up Brave only" },
+      { label: "Neither — use web_fetch" }
+    ]
+  };
   const provider = normalizeProvider(config.provider);
   setEchoToolCallingResponse({
     provider,
@@ -93,14 +110,7 @@ async function pauseOnAskUser(config: RuntimeConfig): Promise<{ taskId: string; 
         type: "function",
         function: {
           name: "ask_user",
-          arguments: JSON.stringify({
-            question: "How should I search the web?",
-            options: [
-              { label: "Set up Brave + Exa", description: "Best coverage" },
-              { label: "Set up Brave only" },
-              { label: "Neither — use web_fetch" }
-            ]
-          })
+          arguments: JSON.stringify(toolArgs)
         }
       }
     ],
@@ -108,7 +118,8 @@ async function pauseOnAskUser(config: RuntimeConfig): Promise<{ taskId: string; 
   });
   const session = await mutateState(config.instance, (state) => createChatSession(state, "choice session"));
   const submitted = await submitChatMessage(config, session.id, { content: "find me fresh results" });
-  await waitForTask(config, submitted.taskId, "waiting_approval");
+  // An all-chat.choice park is reclassified as needs_input.
+  await waitForTask(config, submitted.taskId, "needs_input");
   const setup = readState(config.instance).setupRequests.find(
     (s) => s.taskId === submitted.taskId && s.action === "chat.choice"
   );
@@ -170,7 +181,40 @@ describe("chat.choice /complete and /cancel", () => {
 
     const setup = readState(config.instance).setupRequests.find((s) => s.id === setupId);
     expect(setup?.status).toBe("pending");
-    expect(readState(config.instance).tasks.find((t) => t.id === taskId)?.status).toBe("waiting_approval");
+    expect(readState(config.instance).tasks.find((t) => t.id === taskId)?.status).toBe("needs_input");
+  });
+
+  test("a label against an option-less question 400s and the row stays answerable", async () => {
+    const instance = "chat-choice-optionless-label";
+    rmSync(`${ROOT}/instances/${instance}`, { recursive: true, force: true });
+    const config = buildConfig(instance);
+    const handler = createHandler(config);
+    // Historical question-only park (the dispatcher now rejects option-less
+    // ask_user calls, but rows minted before that persist): strip the stored
+    // options so NO label can ever match — the free-text `other` is the only
+    // remaining answer shape.
+    const { taskId, setupId } = await pauseOnAskUser(config);
+    await mutateState(config.instance, (state) => {
+      const setup = state.setupRequests.find((s) => s.id === setupId);
+      if (setup) setup.payload = { ...setup.payload, options: [] };
+    });
+
+    const response = await handler(completeRequest(config, setupId, { choice: { label: "X" } }));
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { error: string }).error).toBe("Unknown option label: X");
+    expect(readState(config.instance).setupRequests.find((s) => s.id === setupId)?.status).toBe("pending");
+    expect(readState(config.instance).tasks.find((t) => t.id === taskId)?.status).toBe("needs_input");
+
+    // The row is still answerable through the card's free-text input.
+    setEchoToolCallingResponse({
+      provider: normalizeProvider(config.provider),
+      text: "Replying with a yes.",
+      toolCalls: [],
+      finishReason: "stop"
+    });
+    const other = await handler(completeRequest(config, setupId, { choice: { other: "Tell them yes" } }));
+    expect(other.status).toBe(200);
+    await waitForTask(config, taskId, "completed");
   });
 
   test("a malformed body 400s and leaves the row pending", async () => {

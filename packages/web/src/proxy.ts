@@ -97,11 +97,8 @@ function notFound(): NextResponse {
 function applyResponsePolicy(res: NextResponse): NextResponse {
   // Outbound clicks send only the origin, never the full path.
   res.headers.set("referrer-policy", "strict-origin");
-  // Defense-in-depth against clickjacking: the control plane is never meant to be
-  // framed. gini_session is SameSite=Lax, so it isn't sent on a cross-site iframe
-  // load (a framed relay app is unpaired and only shows /pair, never the approve
-  // UI) — but a deny-all anti-framing header is the cheap, standard backstop and
-  // guards against any future SameSite relaxation.
+  // Defense-in-depth against clickjacking: the control plane is never meant to
+  // be framed, so send the deny-all anti-framing headers as a standard backstop.
   res.headers.set("x-frame-options", "DENY");
   res.headers.set("content-security-policy", "frame-ancestors 'none'");
   return res;
@@ -131,18 +128,9 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
     const dest = request.headers.get("sec-fetch-dest");
     const isPageNav = dest === "document"
       || (dest === null && (request.headers.get("accept") ?? "").includes("text/html"));
-    // /pair is the device-pairing entry point and, like /setup, must render
-    // regardless of provider-setup state — otherwise an unpaired relay device
-    // bounces /pair -> /setup (here) while the gateway bounces /setup -> /pair
-    // (its relay session gate), an infinite redirect. Match /pair exactly (and
-    // /pair/*), NOT a broad prefix, so a future /pairing route isn't also
-    // exempted from the setup gate (mirrors AppShell.tsx and providers.tsx).
-    // See ADR device-pairing-auth.md.
     if (
       isPageNav
       && !pathname.startsWith("/setup")
-      && pathname !== "/pair"
-      && !pathname.startsWith("/pair/")
       && !pathname.startsWith("/api/")
     ) {
       const configured = await isProviderConfigured();

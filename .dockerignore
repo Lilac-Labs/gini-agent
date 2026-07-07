@@ -1,0 +1,56 @@
+# Build-context excludes for the Gini Agent image.
+#
+# Goal: ship source + manifests + patches + vendored tarballs, and let the
+# image reinstall every dependency fresh for linux/arm64. NEVER ship host
+# node_modules (wrong platform/arch native binaries) or the worktree .git
+# pointer (it references a host path that won't exist in the container — the
+# Dockerfile inits a fresh repo instead).
+
+# Host dependency trees — reinstalled in-image for the target platform. The
+# workspace hoists to the root node_modules, but each package can also carry a
+# local tree, so exclude both the root and every package's node_modules.
+node_modules
+packages/*/node_modules
+
+# VCS: the worktree .git is a 71-byte pointer file, not a usable repo. The
+# Dockerfile `git init`s a fresh one, so excluding this avoids confusing the
+# in-image git and shrinks the context. NOTE: .gitignore is intentionally NOT
+# excluded — shipping it lets the in-image `git add -A` skip node_modules/.next,
+# which otherwise bloated the snapshot commit to ~888 MB and ~72s.
+.git
+
+# Local runtime state / logs (per-instance; the container uses a fresh volume).
+.gini
+.conductor
+
+# Web build artifacts — rebuilt in-image, sha-keyed to the in-container HEAD.
+packages/web/.next
+packages/web/.next-*
+packages/web/.turbo
+packages/web/next-env.d.ts
+packages/web/tsconfig.tsbuildinfo
+# A stray root-level web/ build dir (Next scratch from a host dev run).
+web
+
+# Test/coverage output.
+coverage
+
+# The mobile app isn't run in the server image, but the Dockerfile still copies
+# its package.json for the single-lockfile workspace install (bun install
+# --frozen-lockfile needs every workspace member), so don't exclude the whole
+# dir — only its heavy build artifacts. (node_modules is already excluded above.)
+packages/mobile/ios/Pods
+packages/mobile/ios/build
+packages/mobile/android/.gradle
+packages/mobile/android/build
+packages/mobile/.expo
+
+# Editor / OS / agent scratch.
+.DS_Store
+.claude
+.venv
+.playwright-cli
+.playwright-mcp
+
+# Docker artifacts themselves (don't recurse our own outputs into the context).
+**/*.log

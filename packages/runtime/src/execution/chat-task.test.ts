@@ -98,12 +98,19 @@ async function submitChatMessage(
   config: RuntimeConfig,
   sessionId: string,
   input: Record<string, unknown>
-): Promise<{ sessionId: string; runId: string; taskId: string; status: Task["status"] }> {
+): Promise<{ sessionId: string; runId?: string; taskId: string; status: Task["status"] }> {
   const { submitChatMessage: submitChatMessageRaw } = await import("./chat");
+  const { settleSubmittedChatMessage } = await import("./chat-test-support");
   const result = await submitChatMessageRaw(config, sessionId, input);
-  if ("queued" in result) throw new Error("expected run-now submission, got queued");
-  if ("topicId" in result) throw new Error("expected chat-direct submission, got topic dispatch");
-  return result;
+  const settled = await settleSubmittedChatMessage(
+    config,
+    sessionId,
+    result,
+    String(input.content ?? "")
+  );
+  if ("queued" in settled) throw new Error("expected run-now submission, got queued");
+  if ("topicId" in settled) throw new Error("expected chat-direct submission, got topic dispatch");
+  return settled;
 }
 
 let scratchHome: string;
@@ -210,17 +217,43 @@ const FIXED_COMPACTION_CATALOG: ToolCatalogTool[] = [
   }))
 ];
 
+// Poll cadence for the terminal-state waiters. The task settles on a detached
+// microtask/timer, so the wait resolves at the NEXT poll after it lands — a
+// tight interval keeps the wall-clock cost near the real settle time instead of
+// rounding every wait up to a coarse tick. Kept as a named constant so the
+// cadence is tunable in one place (and small enough that 100+ sequential waits
+// don't dominate the suite).
+const TERMINAL_POLL_MS = 2;
+
 async function waitForTerminal(config: RuntimeConfig, taskId: string, timeoutMs = 5000): Promise<Task> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const state = readState(config.instance);
     const task = state.tasks.find((t) => t.id === taskId);
-    if (task && (task.status === "completed" || task.status === "failed" || task.status === "cancelled" || task.status === "waiting_approval")) {
+    if (task && (task.status === "completed" || task.status === "failed" || task.status === "cancelled" || task.status === "waiting_approval" || task.status === "needs_input")) {
       return task;
     }
-    await Bun.sleep(20);
+    await Bun.sleep(TERMINAL_POLL_MS);
   }
   throw new Error(`Task ${taskId} did not reach terminal state within ${timeoutMs}ms`);
+}
+
+// Post-approve wait: decideApproval("approve") returns once the decision is
+// durable while the side effect + resume run detached, so the task is still
+// parked at waiting_approval when the call returns — waitForTerminal's
+// parked-inclusive accept set would return the pre-approve park immediately.
+// Poll for a genuinely final status instead.
+async function waitForFinalTerminal(config: RuntimeConfig, taskId: string, timeoutMs = 5000): Promise<Task> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = readState(config.instance);
+    const task = state.tasks.find((t) => t.id === taskId);
+    if (task && (task.status === "completed" || task.status === "failed" || task.status === "cancelled")) {
+      return task;
+    }
+    await Bun.sleep(TERMINAL_POLL_MS);
+  }
+  throw new Error(`Task ${taskId} did not reach a final terminal state within ${timeoutMs}ms`);
 }
 
 describe("chat-task loop", () => {
@@ -328,7 +361,7 @@ describe("chat-task loop", () => {
 
     const approvalId = paused.approvalIds[0]!;
     await decideApproval(config, approvalId, "approve");
-    const finished = await waitForTerminal(config, task.id);
+    const finished = await waitForFinalTerminal(config, task.id);
 
     expect(finished.status).toBe("completed");
     expect(finished.summary).toBe("Wrote the file as requested.");
@@ -538,10 +571,10 @@ describe("chat-task loop", () => {
     // exist on disk either.
     const [firstApprovalId] = paused.approvalIds as [string];
     await decideApproval(config, firstApprovalId, "deny");
-    await Bun.sleep(50);
+    // Deny resumes detached; poll for the final failed state rather than a
+    // fixed sleep so the wait tracks the real settle time.
+    const failedTask = await waitForFinalTerminal(config, task.id);
 
-    const stateAfter = readState(config.instance);
-    const failedTask = stateAfter.tasks.find((t) => t.id === task.id)!;
     expect(failedTask.status).toBe("failed");
     expect(failedTask.toolCallState).toBeUndefined();
     expect(existsSync(join(workspaceRoot, "a.txt"))).toBe(false);
@@ -573,11 +606,10 @@ describe("chat-task loop", () => {
     expect(paused.status).toBe("waiting_approval");
     const approvalId = paused.approvalIds[0]!;
 
-    // Deny — fails the task and clears the snapshot.
+    // Deny — fails the task and clears the snapshot. Deny resumes detached, so
+    // poll for the failed state instead of a fixed sleep.
     await decideApproval(config, approvalId, "deny");
-    await Bun.sleep(50);
-
-    const failedBefore = readState(config.instance).tasks.find((t) => t.id === task.id)!;
+    const failedBefore = await waitForFinalTerminal(config, task.id);
     expect(failedBefore.status).toBe("failed");
 
     // Now call resumeChatTask directly. Must no-op.
@@ -671,7 +703,7 @@ describe("chat-task loop", () => {
     expect(approval.payload.pty).toBe(true);
 
     await decideApproval(config, approval.id, "approve");
-    const finished = await waitForTerminal(config, task.id);
+    const finished = await waitForFinalTerminal(config, task.id);
     expect(finished.status).toBe("completed");
 
     const stateAfter = readState(config.instance);
@@ -716,7 +748,7 @@ describe("chat-task loop", () => {
     expect(approval.payload.pty).toBe(false);
 
     await decideApproval(config, approval.id, "approve");
-    const finished = await waitForTerminal(config, task.id);
+    const finished = await waitForFinalTerminal(config, task.id);
     expect(finished.status).toBe("completed");
 
     const stateAfter = readState(config.instance);
@@ -1158,6 +1190,11 @@ describe("chat-task loop", () => {
     const config = buildConfig(workspaceRoot, "chat-task-nav-distinct");
     config.agent = { maxIterations: 9 };
     const provider = normalizeProvider(config.provider);
+    // Pin the tool-catalog floor so the many-iteration geometry is decoupled
+    // from live always-on catalog size (cleared in afterEach) — this test is
+    // about the nav guard, not the context window. Dispatch keys on the call
+    // name, so browser_navigate still hits the SSRF gate as before.
+    __setBaseToolCatalogForTests(FIXED_COMPACTION_CATALOG);
 
     // Nine navigations to nine DISTINCT loopback URLs. Each is SSRF-blocked
     // pre-flight (deterministic, no browser), but the nav guard counts the
@@ -1216,6 +1253,8 @@ describe("chat-task loop", () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "gini-chat-ws-"));
     const config = buildConfig(workspaceRoot, "chat-task-nav-oscillate");
     const provider = normalizeProvider(config.provider);
+    // Pinned floor for the same reason as the distinct-URL test above.
+    __setBaseToolCatalogForTests(FIXED_COMPACTION_CATALOG);
 
     // Two distinct first-visits seed the recent-URL window (count stays 0),
     // then alternating between them is a repeat every turn so the count climbs
@@ -1459,7 +1498,7 @@ describe("chat-task loop", () => {
     const paused = await waitForTerminal(config, task.id);
     expect(paused.status).toBe("waiting_approval");
     await decideApproval(config, paused.approvalIds[0]!, "approve");
-    const finished = await waitForTerminal(config, task.id);
+    const finished = await waitForFinalTerminal(config, task.id);
     expect(finished.status).toBe("completed");
 
     const { readTrace } = await import("../state");
@@ -2460,6 +2499,67 @@ describe("chat-task loop", () => {
     rmSync(workspaceRoot, { recursive: true, force: true });
   });
 
+  test("surfaces native web searches as display-only Web search chips", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "gini-chat-ws-"));
+    const config = buildConfig(workspaceRoot, "chat-task-web-search-chip");
+    const provider = normalizeProvider(config.provider);
+
+    const session = await mutateState(config.instance, (state) =>
+      createChatSession(state, "block-websearch", undefined, "agent_ws")
+    );
+
+    // A hosted native-web-search turn: the provider ran the searches itself and
+    // returns their headlines in `webSearches` alongside a cited final answer
+    // (no dispatchable tool calls). The loop must surface each search as a chip.
+    setEchoToolCallingResponse({
+      provider,
+      text: "The top story is X. ([hn](https://news.ycombinator.com/))",
+      toolCalls: [],
+      finishReason: "stop",
+      webSearches: ["hacker news top story", "https://news.ycombinator.com/"]
+    });
+
+    const submitted = await submitChatMessage(config, session.id, { content: "what's the top HN story?" });
+    const finished = await waitForTerminal(config, submitted.taskId);
+    expect(finished.status).toBe("completed");
+
+    const { listChatBlocks } = await import("../state");
+    const blocks = listChatBlocks(config.instance, session.id);
+
+    const webSearchChips = blocks.filter(
+      (b): b is typeof blocks[0] & { kind: "tool_call" } =>
+        b.kind === "tool_call" && b.toolName === "web_search"
+    );
+    expect(webSearchChips.length).toBe(2);
+    // Display-only: "Web search" label, the query/url as the inline preview,
+    // settled straight to ok (the search already ran on the provider).
+    expect(webSearchChips.map((c) => c.displayLabel)).toEqual(["Web search", "Web search"]);
+    expect(webSearchChips.map((c) => c.argsPreview)).toEqual([
+      "hacker news top story",
+      "https://news.ycombinator.com/"
+    ]);
+    expect(webSearchChips.every((c) => c.status === "ok")).toBe(true);
+    // Distinct call ids so the two searches render as separate rows.
+    expect(new Set(webSearchChips.map((c) => c.callId)).size).toBe(2);
+    // Nothing was dispatched, so the chips carry no paired tool_result.
+    expect(blocks.filter((b) => b.kind === "tool_result")).toHaveLength(0);
+
+    // Ordering is load-bearing, not cosmetic: both chips must land BEFORE the
+    // assistant's answer block. A chip trailing the answer makes group-exchanges
+    // fold the answer out of its standalone bubble (finalAnswerIdx = -1). The
+    // provider announces each search mid-stream (before text) for exactly this.
+    // listChatBlocks is ordinal-ordered, so index position is the settled order.
+    const kinds = blocks.map((b) => b.kind);
+    const lastAnswerIdx = kinds.lastIndexOf("assistant_text");
+    const chipIdxs = blocks
+      .map((b, i) => (b.kind === "tool_call" && b.toolName === "web_search" ? i : -1))
+      .filter((i) => i >= 0);
+    expect(lastAnswerIdx).toBeGreaterThanOrEqual(0);
+    expect(Math.max(...chipIdxs)).toBeLessThan(lastAnswerIdx);
+
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  });
+
   test("emits authorization_requested with the action field for gated tools", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "gini-chat-ws-"));
     const config = buildConfig(workspaceRoot, "chat-task-blocks-approval");
@@ -2501,7 +2601,7 @@ describe("chat-task loop", () => {
 
     // Resume by approving; the tool_call flips ok and a tool_result lands.
     await decideApproval(config, paused.approvalIds[0]!, "approve");
-    const finished = await waitForTerminal(config, submitted.taskId);
+    const finished = await waitForFinalTerminal(config, submitted.taskId);
     expect(finished.status).toBe("completed");
 
     blocks = listChatBlocks(config.instance, session.id);
@@ -2552,7 +2652,7 @@ describe("chat-task loop", () => {
     if (!gate) throw new Error("missing authorization_requested block");
 
     await decideApproval(config, paused.approvalIds[0]!, "approve");
-    const finished = await waitForTerminal(config, submitted.taskId);
+    const finished = await waitForFinalTerminal(config, submitted.taskId);
     expect(finished.status).toBe("completed");
 
     // The approval flip itself lands a non-terminal phase NEWER than the
@@ -2699,7 +2799,7 @@ describe("chat-task loop", () => {
     let finished = readState(config.instance).tasks.find((t) => t.id === submitted.taskId);
     const deadline = Date.now() + 5000;
     while (finished?.status !== "completed" && Date.now() < deadline) {
-      await Bun.sleep(20);
+      await Bun.sleep(TERMINAL_POLL_MS);
       finished = readState(config.instance).tasks.find((t) => t.id === submitted.taskId);
     }
     expect(finished?.status).toBe("completed");
@@ -2769,7 +2869,8 @@ describe("chat-task loop", () => {
 
     const submitted = await submitChatMessage(config, session.id, { content: "find the best cafe" });
     const paused = await waitForTerminal(config, submitted.taskId);
-    expect(paused.status).toBe("waiting_approval");
+    // An all-chat.choice park is reclassified as needs_input.
+    expect(paused.status).toBe("needs_input");
 
     const setup = readState(config.instance).setupRequests.find((s) => s.taskId === submitted.taskId);
     expect(setup?.action).toBe("chat.choice");
@@ -2828,7 +2929,7 @@ describe("chat-task loop", () => {
 
     const submitted = await submitChatMessage(config, session.id, { content: "export my notes" });
     const paused = await waitForTerminal(config, submitted.taskId);
-    expect(paused.status).toBe("waiting_approval");
+    expect(paused.status).toBe("needs_input");
 
     const setup = readState(config.instance).setupRequests.find((s) => s.taskId === submitted.taskId);
     expect(setup?.action).toBe("chat.choice");
@@ -2838,7 +2939,7 @@ describe("chat-task loop", () => {
     let finished = readState(config.instance).tasks.find((t) => t.id === submitted.taskId);
     const deadline = Date.now() + 5000;
     while (finished?.status !== "completed" && Date.now() < deadline) {
-      await Bun.sleep(20);
+      await Bun.sleep(TERMINAL_POLL_MS);
       finished = readState(config.instance).tasks.find((t) => t.id === submitted.taskId);
     }
     // Skip must resume the loop, NOT fail the task.
@@ -2953,7 +3054,7 @@ describe("chat-task loop", () => {
     let finished = readState(config.instance).tasks.find((t) => t.id === submitted.taskId);
     const deadline = Date.now() + 5000;
     while (finished?.status !== "completed" && Date.now() < deadline) {
-      await Bun.sleep(20);
+      await Bun.sleep(TERMINAL_POLL_MS);
       finished = readState(config.instance).tasks.find((t) => t.id === submitted.taskId);
     }
     // Cancel must resume the loop, NOT fail the task.
@@ -3391,7 +3492,7 @@ describe("chat-task loop", () => {
     expect(paused.status).toBe("waiting_approval");
     const approvalId = paused.approvalIds[0]!;
     await decideApproval(config, approvalId, "approve");
-    const finished = await waitForTerminal(config, first.taskId);
+    const finished = await waitForFinalTerminal(config, first.taskId);
     expect(finished.status).toBe("completed");
     await syncChatTaskResult(config, session.id, first.taskId);
 
@@ -3701,7 +3802,7 @@ describe("chat-task loop", () => {
     // Approve → resume. runLoop re-seeds loadedToolNames from task.loadedTools
     // so get_self is live again on the resumed iteration.
     await decideApproval(config, paused.approvalIds[0]!, "approve");
-    const finished = await waitForTerminal(config, task.id, 10000);
+    const finished = await waitForFinalTerminal(config, task.id, 10000);
     expect(finished.status).toBe("completed");
     expect(finished.summary).toBe("Provider set.");
     // get_self dispatched on the resumed turn — proving the loaded deferred
@@ -3874,7 +3975,7 @@ describe("chat-task loop", () => {
     expect(paused.loadedTools).toContain("browser_type");
 
     await decideApproval(config, paused.approvalIds[0]!, "approve");
-    const finished = await waitForTerminal(config, task.id, 10000);
+    const finished = await waitForFinalTerminal(config, task.id, 10000);
     expect(finished.status).toBe("completed");
     expect(finished.summary).toBe("Browsing session ready.");
     // Cleared on terminal completion.
@@ -3947,7 +4048,7 @@ describe("chat-task loop", () => {
     expect(stateBefore.agents.some((a) => a.name === "E2E2")).toBe(false);
 
     await decideApproval(config, approval.id, "approve");
-    const finished = await waitForTerminal(config, task.id, 10000);
+    const finished = await waitForFinalTerminal(config, task.id, 10000);
     expect(finished.status).toBe("completed");
     expect(finished.summary).toBe("Agent created.");
 
@@ -4480,7 +4581,7 @@ describe("chat-task loop", () => {
     // transcript sits below the chars/4 high-water mark given the always-on
     // tool-schema floor and system-prompt slice.
     for (let i = 0; i < 12; i++) {
-      writeFileSync(join(workspaceRoot, `chunk${i}.md`), `chunk-${i} `.repeat(340));
+      writeFileSync(join(workspaceRoot, `chunk${i}.md`), `chunk-${i} `.repeat(325));
       setEchoToolCallingResponse({
         provider,
         text: "",
@@ -4620,7 +4721,7 @@ describe("chat-task loop", () => {
     });
 
     for (let i = 0; i < 11; i++) {
-      await seedBulkSkill(config, `bulk-skill-${i}`, `BODY-${i} ${"x".repeat(4_800)}`);
+      await seedBulkSkill(config, `bulk-skill-${i}`, `BODY-${i} ${"x".repeat(4_550)}`);
     }
     for (let i = 0; i < 10; i++) {
       setEchoToolCallingResponse({
@@ -6177,10 +6278,11 @@ describe("buildInactiveSkillsBlock", () => {
     };
   }
 
-  test("routes setup-skill providers to the setup skill instead of request_connector", () => {
-    // google-workspace-oauth maps to google-oauth-desktop, which declares
-    // setupSkill: "google-workspace-setup". The block must point the model at
-    // that skill, NOT at request_connector.
+  test("routes the google-workspace-oauth credential to request_connector with the provider id", () => {
+    // google-workspace-oauth maps to google-oauth-desktop. In hosted this
+    // provider declares no setup skill (the credential is baked into the guest
+    // at provisioning), so the block emits the bare request_connector shortcut
+    // for the provider id — no read_skill / setup-skill detour.
     const skill = makeSkill({
       name: "google-calendar",
       description: "Google Calendar",
@@ -6188,10 +6290,10 @@ describe("buildInactiveSkillsBlock", () => {
     });
     const block = buildInactiveSkillsBlock([skill]);
     expect(block).toContain("google-oauth-desktop");
-    expect(block).toContain("read_skill");
-    expect(block).toContain("google-workspace-setup");
-    // Must NOT emit the bare request_connector shortcut for this provider.
-    expect(block).not.toContain("call `request_connector` with provider id `google-oauth-desktop`");
+    expect(block).toContain("call `request_connector` with provider id `google-oauth-desktop`");
+    // No setup skill is declared, so the block must not tell the model to
+    // read_skill first.
+    expect(block).not.toMatch(/read_skill/);
   });
 
   test("collapses multiple skills sharing one credential into a single line", () => {
@@ -6208,7 +6310,7 @@ describe("buildInactiveSkillsBlock", () => {
     expect(providerLines[0]).toContain("google-calendar");
     expect(providerLines[0]).toContain("google-gmail");
     expect(providerLines[0]).toContain("google-drive");
-    expect(providerLines[0]).toContain("google-workspace-setup");
+    expect(providerLines[0]).toContain("call `request_connector` with provider id `google-oauth-desktop`");
   });
 
   test("falls back to request_connector guidance for providers without a setup skill", () => {
@@ -6258,7 +6360,7 @@ describe("buildInactiveSkillsBlock", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
       tasks: [], authorizations: [], setupRequests: [], audit: [], skills: [], jobs: [],
-      connectors, improvements: [], skillOutcomes: [], learningFindings: [], pairingCodes: [], pairingRequests: [], devices: [],
+      connectors, improvements: [], skillOutcomes: [], learningFindings: [],
       promotions: [], snapshots: [], tools: [], toolsets: [], subagents: [],
       mcpServers: [], messagingBridges: [], importReports: [], agents: [],
       activeAgentId: undefined, relays: [], notifications: [], emailWatchers: [], events: [],
@@ -6323,29 +6425,20 @@ describe("buildInactiveSkillsBlock", () => {
     expect(block).toContain('{name, type:"api-key", skillId}');
   });
 
-  test("appends a no-browser-shortcut directive when a setup-skill provider is present", () => {
-    // The model has been observed shortcutting to browser_navigate
-    // (calendar.google.com, gmail.com, a Google sign-in page) instead of
-    // running the listed setup skill. The block must include an explicit
-    // directive forbidding that shortcut so the setup skill becomes the
-    // only sanctioned route.
+  test("emits no browser-shortcut directive for the Google Workspace credential", () => {
+    // On hosted, the Google account is connected at sign-in through the host
+    // and google-oauth-desktop declares no setup skill, so the Google credential
+    // routes through the bare request_connector line — with no read_skill detour
+    // and no "ONLY correct path" browser-shortcut directive.
     const skill = makeSkill({
       name: "google-calendar",
       requiredCredentials: ["google-workspace-oauth"]
     });
     const block = buildInactiveSkillsBlock([skill]);
-    expect(block).toContain("ONLY correct path");
-    expect(block).toContain("browser_navigate");
-    expect(block).toContain("calendar.google.com");
-    expect(block).toContain("gmail.com");
-    expect(block).toContain("read_skill");
-    // The directive sits after the per-provider lines so the model reads
-    // "what needs connecting" before "the rule for how to satisfy it".
-    const lines = block.split("\n");
-    const providerLineIdx = lines.findIndex((line) => line.includes("google-oauth-desktop"));
-    const directiveIdx = lines.findIndex((line) => line.includes("ONLY correct path"));
-    expect(providerLineIdx).toBeGreaterThan(-1);
-    expect(directiveIdx).toBeGreaterThan(providerLineIdx);
+    expect(block).toContain("google-oauth-desktop");
+    expect(block).not.toContain("ONLY correct path");
+    expect(block).not.toContain("browser_navigate");
+    expect(block).not.toMatch(/read_skill/);
   });
 
   test("skips the no-browser-shortcut directive when no provider declares a setup skill", () => {
@@ -6369,7 +6462,7 @@ describe("buildMcpServersBlock", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
       tasks: [], authorizations: [], setupRequests: [], audit: [], skills: [], jobs: [],
-      connectors: [], improvements: [], skillOutcomes: [], learningFindings: [], pairingCodes: [], pairingRequests: [], devices: [],
+      connectors: [], improvements: [], skillOutcomes: [], learningFindings: [],
       promotions: [], snapshots: [], tools: [], toolsets: [], subagents: [],
       mcpServers: servers, messagingBridges: [], importReports: [], agents: [],
       activeAgentId: undefined, relays: [], notifications: [], emailWatchers: [], events: [],

@@ -545,17 +545,18 @@ describe("subagent runtime (Slice 4)", () => {
     const state = readState(config.instance);
     const sub = state.subagents.find((s) => s.parentTaskId === parent.id);
     expect(sub).toBeDefined();
-    // The record mirrors the bubbled-up question.
-    expect(sub!.resultNeedsInput).toEqual({ question: "Which option do you want?" });
+    // The record mirrors the bubbled-up question WITH the option labels, so
+    // the parent can re-ask with the same choices.
+    expect(sub!.resultNeedsInput).toEqual({ question: "Which option do you want?", options: ["A", "B"] });
     // The child task is terminal (completed) — NOT stranded in waiting_approval,
     // and NOT timed out.
     const childTask = state.tasks.find((t) => t.id === sub!.taskId);
     expect(childTask?.status).toBe("completed");
-    expect(childTask?.needsInput).toEqual({ question: "Which option do you want?" });
+    expect(childTask?.needsInput).toEqual({ question: "Which option do you want?", options: ["A", "B"] });
 
     // The parent's spawn_subagent tool result is a parseable JSON string
-    // carrying status:"needs_input" + the question, so the parent model can
-    // re-ask via its own ask_user.
+    // carrying status:"needs_input" + the question and options, so the
+    // parent model can re-ask via its own ask_user with the same choices.
     const calls = getEchoToolCallingCalls();
     const parentTurn2 = calls[calls.length - 1]!;
     const toolMsg = parentTurn2.find(
@@ -564,7 +565,7 @@ describe("subagent runtime (Slice 4)", () => {
     expect(toolMsg).toBeDefined();
     const payload = JSON.parse(String(toolMsg!.content));
     expect(payload.status).toBe("needs_input");
-    expect(payload.needsInput).toEqual({ question: "Which option do you want?" });
+    expect(payload.needsInput).toEqual({ question: "Which option do you want?", options: ["A", "B"] });
   });
 
   test("goal and context render as labeled sections in the subagent system prompt", async () => {

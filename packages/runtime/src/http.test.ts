@@ -5,12 +5,12 @@ import { createHandler, resolveInlineUpload } from "./http";
 import { logDir, uploadsDir, webPortPath } from "./paths";
 import { clearWebTargetCache } from "./web-target";
 import { dirname, join } from "node:path";
-import { addAudit, appendEvent, approvePairingRequest, claimPairingRequest, createPairingRequest, insertChatBlock, isPlausibleMime, mutateState, readState, readTrace, recordProviderAuthFailure, revokeDevice, sanitizeFilename, storeUpload, uploadStat } from "./state";
+import { addAudit, appendEvent, insertChatBlock, isPlausibleMime, mutateState, readState, readTrace, recordProviderAuthFailure, sanitizeFilename, storeUpload, uploadStat } from "./state";
 import { getOrCreateAgentChat } from "./execution/chat";
 import { createScheduledJob } from "./jobs";
-import { listAllDevices } from "./state/devices";
 import { removeMemoryDb } from "./state/memory-db";
 import { listProviders } from "./integrations/connectors/registry";
+import { resetGoogleLoginWebState } from "./integrations/connectors/google-login-web";
 import { awaitTunnelSettled, setTunnelDeps, type TunnelChild } from "./integrations/tunnel";
 import type { RuntimeConfig } from "./types";
 import type { LoginHandle, RelayDefaults, Session, Store, TunnelOptions } from "gini-relay";
@@ -97,39 +97,17 @@ describe("runtime api", () => {
     expect(state.audit.some((event) => event.action === "improvement.rejected")).toBe(true);
   });
 
-  test("pairs devices with one-time codes and redacts stored secrets", async () => {
-    const config = testConfig("pairing");
+  test("only the owner bearer authorizes the mobile contracts (owner-token-only auth)", async () => {
+    const config = testConfig("owner-only-mobile");
     const handler = createHandler(config);
 
-    const pairing = await call(handler, config, "/api/pairing", { method: "POST", body: JSON.stringify({ ttlSeconds: 60 }) });
-    const claimed = await callPublic(handler, config, "/api/pairing/claim", {
-      method: "POST",
-      body: JSON.stringify({ code: pairing.code, deviceName: "Test phone" })
-    });
-    const mobile = await callWithToken(handler, config, claimed.token, "/api/mobile/bootstrap");
-    const devices = await call(handler, config, "/api/devices");
-    const state = await call(handler, config, "/api/state");
+    // A legacy device-shaped bearer must be refused — the pairing subsystem is
+    // gone and bearer === config.token is the whole check (ADR owner-token-auth.md).
+    const refused = await rawCall(handler, config, "/api/mobile/bootstrap", {}, "gini_device_00000000-0000-0000-0000-000000000000");
+    expect(refused.status).toBe(401);
 
+    const mobile = await callWithToken(handler, config, config.token, "/api/mobile/bootstrap");
     expect(mobile.instance).toBe(config.instance);
-    expect(devices[0].name).toBe("Test phone");
-    expect(JSON.stringify(state)).not.toContain("tokenHash");
-    expect(JSON.stringify(state)).not.toContain("codeHash");
-    expect(JSON.stringify(state)).not.toContain(claimed.token);
-  });
-
-  test("revoked device tokens cannot use mobile contracts", async () => {
-    const config = testConfig("pairing-revoke");
-    const handler = createHandler(config);
-
-    const pairing = await call(handler, config, "/api/pairing", { method: "POST" });
-    const claimed = await callPublic(handler, config, "/api/pairing/claim", {
-      method: "POST",
-      body: JSON.stringify({ code: pairing.code, deviceName: "Revoked phone" })
-    });
-    await call(handler, config, `/api/devices/${claimed.device.id}/revoke`, { method: "POST" });
-    const response = await rawCall(handler, config, "/api/mobile/bootstrap", {}, claimed.token);
-
-    expect(response.status).toBe(401);
   });
 
   test("records promotion proposals without applying upgrades", async () => {
@@ -1226,10 +1204,10 @@ describe("runtime api", () => {
     }
   });
 
-  // Gateway-owned pairing cookies must not cross into the inner web child, which
-  // is relay-agnostic and authenticates via the BFF bearer. Other cookies pass.
-  test("proxyWeb strips gini_session/gini_pair/gini_client from the forwarded Cookie header", async () => {
-    const config = testConfig("web-proxy-cookie-strip");
+  // The gateway forwards app cookies to the inner web child untouched (it owns
+  // no cookies of its own under owner-token-only auth).
+  test("proxyWeb passes application cookies through to the inner web child", async () => {
+    const config = testConfig("web-proxy-cookie-pass");
     const handler = createHandler(config);
     const captured: { cookie: string | null } = { cookie: null };
     const upstream = Bun.serve({
@@ -1248,95 +1226,16 @@ describe("runtime api", () => {
       mkdirSync(dirname(webPortPath(config.instance)), { recursive: true });
       writeFileSync(webPortPath(config.instance), String(upstream.port));
       clearWebTargetCache(config.instance);
-      // Loopback front (un-gated), so the request reaches proxyWeb directly with
-      // a Cookie carrying both a gateway cookie and an unrelated app cookie.
       await handler(new Request(`http://127.0.0.1:${config.port}/some/app/route`, {
         headers: {
           origin: `http://127.0.0.1:${config.port}`,
-          cookie: "gini_session=sekret; theme=dark; gini_pair=bindy; gini_client=cid; __Host-gini_client=cid2"
+          cookie: "theme=dark; locale=en"
         }
       }));
-      expect(captured.cookie).toBe("theme=dark");
+      expect(captured.cookie).toBe("theme=dark; locale=en");
     } finally {
       await upstream.stop(true);
       clearWebTargetCache(config.instance);
-    }
-  });
-
-  // The relay session gate validates gini_session once at connect time; an open
-  // SSE stream must still be torn down when the session is revoked mid-stream,
-  // or a revoked relay device would keep receiving the owner's event feed.
-  test("proxyWeb tears down a relay SSE stream when its session is revoked", async () => {
-    const config = testConfig("web-proxy-sse-revoke");
-    const handler = createHandler(config);
-    const relay = "sse.gini-relay.lilaclabs.ai";
-    // Mint an active relay session (request → approve → claim) and grab its token.
-    const minted = await mutateState(config.instance, (state) => {
-      const req = createPairingRequest(state, { userAgent: "Mozilla/5.0 Safari", relayHost: relay, bindSecret: "bindy" });
-      approvePairingRequest(state, req.id);
-      const claimed = claimPairingRequest(state, req.id, "bindy");
-      if (!claimed.ok) throw new Error("mint failed");
-      return { token: claimed.token, deviceId: claimed.device.id };
-    });
-    const upstream = Bun.serve({
-      port: 0,
-      hostname: "127.0.0.1",
-      fetch(req) {
-        const u = new URL(req.url);
-        if (u.pathname === "/api/runtime/__healthz") {
-          return Response.json({ ok: true, service: "gini-web", instance: config.instance });
-        }
-        // A long-lived SSE: emit one comment, then hold the connection open.
-        const stream = new ReadableStream({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode(": open\n\n"));
-          }
-        });
-        return new Response(stream, { headers: { "content-type": "text/event-stream" } });
-      }
-    });
-    try {
-      // Set inside the try so the finally always reverts it; shrink the cadence so
-      // the post-revoke teardown lands in tens of ms.
-      process.env.GINI_SESSION_REVALIDATE_MS = "20";
-      mkdirSync(dirname(webPortPath(config.instance)), { recursive: true });
-      writeFileSync(webPortPath(config.instance), String(upstream.port));
-      clearWebTargetCache(config.instance);
-      const res = await handler(new Request(`http://127.0.0.1:${config.port}/api/runtime/events/stream`, {
-        headers: {
-          host: relay,
-          origin: `https://${relay}`,
-          "sec-fetch-site": "same-origin",
-          cookie: `gini_session=${encodeURIComponent(minted.token)}`
-        }
-      }));
-      expect(res.headers.get("content-type")).toContain("text/event-stream");
-      const reader = res.body!.getReader();
-      await reader.read(); // first chunk arrives while the session is valid
-      // Revoke mid-stream; the re-validation tick (20ms) must abort the stream.
-      await mutateState(config.instance, (state) => revokeDevice(state, minted.deviceId));
-      // Bounded drain (1s ≈ 50 revalidation ticks of headroom) so a teardown
-      // regression fails fast instead of hanging to the 10s global cap.
-      let ended = false;
-      const deadline = Date.now() + 1000;
-      try {
-        while (Date.now() < deadline) {
-          const { done } = await Promise.race([
-            reader.read(),
-            new Promise<{ done: boolean }>((resolve) =>
-              setTimeout(() => resolve({ done: false }), Math.max(0, deadline - Date.now()))
-            )
-          ]);
-          if (done) { ended = true; break; }
-        }
-      } catch {
-        ended = true; // aborted upstream surfaces as a stream error — also terminal
-      }
-      expect(ended).toBe(true);
-    } finally {
-      await upstream.stop(true);
-      clearWebTargetCache(config.instance);
-      delete process.env.GINI_SESSION_REVALIDATE_MS;
     }
   });
 
@@ -1364,7 +1263,7 @@ describe("runtime api", () => {
     expect(approval).toBeDefined();
     await call(handler, config, `/api/authorizations/${approval!.id}/approve`, { method: "POST" });
 
-    const finalDetail = await waitForTask(handler, config, submitted.id);
+    const finalDetail = await waitForTask(handler, config, submitted.id, ["completed", "failed"]);
     expect(finalDetail.task.status).toBe("completed");
 
     const auditEntry = readState(config.instance).audit.find(
@@ -5214,34 +5113,28 @@ describe("runtime api", () => {
   });
 
   describe("push device endpoints", () => {
-    test("POST /api/push/devices upserts a token scoped to the caller's credential", async () => {
+    test("POST /api/push/devices upserts a token scoped to the owner credential", async () => {
       const config = testConfig("push-devices-upsert");
       const handler = createHandler(config);
-      // Two distinct credentials: the runtime "owner" (config.token)
-      // and a paired mobile device that gets its own credential id.
-      const pairing = await call(handler, config, "/api/pairing", { method: "POST", body: JSON.stringify({ ttlSeconds: 60 }) });
-      const claimed = await callPublic(handler, config, "/api/pairing/claim", {
-        method: "POST",
-        body: JSON.stringify({ code: pairing.code, deviceName: "Phone" })
-      });
 
       const ownerReg = await call(handler, config, "/api/push/devices", {
         method: "POST",
         body: JSON.stringify({ token: "tok_owner", platform: "ios", bundleId: "ai.lilaclabs.gini.mobile" })
       });
-      const phoneReg = await callWithToken(handler, config, claimed.token, "/api/push/devices", {
-        method: "POST",
-        body: JSON.stringify({ token: "tok_phone", platform: "ios", bundleId: "ai.lilaclabs.gini.mobile" })
-      });
-
+      // Owner-token-only auth: every caller resolves to the "owner" credential.
       expect(ownerReg.ok).toBe(true);
       expect(ownerReg.device.credentialId).toBe("owner");
       expect(ownerReg.device.token).toBe("tok_owner");
-      expect(phoneReg.ok).toBe(true);
-      expect(phoneReg.device.credentialId).toBe(claimed.device.id);
-      expect(phoneReg.device.token).toBe("tok_phone");
 
-      // Re-register the same token under the owner — idempotent rebind.
+      // A second install registers its own token under the same credential.
+      const secondReg = await call(handler, config, "/api/push/devices", {
+        method: "POST",
+        body: JSON.stringify({ token: "tok_phone", platform: "ios", bundleId: "ai.lilaclabs.gini.mobile" })
+      });
+      expect(secondReg.ok).toBe(true);
+      expect(secondReg.device.credentialId).toBe("owner");
+
+      // Re-register the same token — idempotent rebind (bundle id updates).
       const rebind = await call(handler, config, "/api/push/devices", {
         method: "POST",
         body: JSON.stringify({ token: "tok_owner", platform: "ios", bundleId: "ai.lilaclabs.gini.mobile.dev" })
@@ -5273,38 +5166,25 @@ describe("runtime api", () => {
       expect(missingBundle.status).toBe(400);
     });
 
-    test("DELETE /api/push/devices/:token removes only the caller's tokens", async () => {
+    test("DELETE /api/push/devices/:token removes the owner's token; a missing token is 404", async () => {
       const config = testConfig("push-devices-delete");
       const handler = createHandler(config);
-      const pairing = await call(handler, config, "/api/pairing", { method: "POST", body: JSON.stringify({ ttlSeconds: 60 }) });
-      const claimed = await callPublic(handler, config, "/api/pairing/claim", {
-        method: "POST",
-        body: JSON.stringify({ code: pairing.code, deviceName: "Phone" })
-      });
 
-      // Register two tokens — one per credential.
       await call(handler, config, "/api/push/devices", {
-        method: "POST",
-        body: JSON.stringify({ token: "tok_owner", platform: "ios", bundleId: "ai.lilaclabs.gini.mobile" })
-      });
-      await callWithToken(handler, config, claimed.token, "/api/push/devices", {
         method: "POST",
         body: JSON.stringify({ token: "tok_phone", platform: "ios", bundleId: "ai.lilaclabs.gini.mobile" })
       });
 
-      // Owner cannot delete the paired device's token — 404 (we
-      // intentionally don't surface which of "missing" vs "wrong
-      // owner" so credentials can't probe each other).
-      const crossDelete = await rawCall(handler, config, "/api/push/devices/tok_phone", { method: "DELETE" }, config.token);
-      expect(crossDelete.status).toBe(404);
-
-      // The paired device deleting its own token succeeds.
-      const ownDelete = await callWithToken(handler, config, claimed.token, "/api/push/devices/tok_phone", { method: "DELETE" });
+      const ownDelete = await call(handler, config, "/api/push/devices/tok_phone", { method: "DELETE" });
       expect(ownDelete.ok).toBe(true);
 
       // Second delete of the same token: 404.
-      const repeatDelete = await rawCall(handler, config, "/api/push/devices/tok_phone", { method: "DELETE" }, claimed.token);
+      const repeatDelete = await rawCall(handler, config, "/api/push/devices/tok_phone", { method: "DELETE" }, config.token);
       expect(repeatDelete.status).toBe(404);
+
+      // A token that never existed: 404 as well.
+      const missingDelete = await rawCall(handler, config, "/api/push/devices/tok_never", { method: "DELETE" }, config.token);
+      expect(missingDelete.status).toBe(404);
     });
 
     test("POST /api/push/devices → 200 row written with origin='loopback'", async () => {
@@ -7455,6 +7335,275 @@ describe("email watcher routes", () => {
     expect(arbitrary.status).toBe(400);
     expect((await arbitrary.json()).error).toContain("configDir must be");
   });
+
+  test("POST /api/google/accounts/provision requires all three credential fields", async () => {
+    const config = testConfig("http-google-provision-400");
+    const handler = createHandler(config);
+    for (const body of [
+      {},
+      { clientId: "id", clientSecret: "secret" },
+      { clientId: "id", refreshToken: "token" },
+      { clientId: "id", clientSecret: "secret", refreshToken: "  " }
+    ]) {
+      const response = await rawCall(
+        handler,
+        config,
+        "/api/google/accounts/provision",
+        { method: "POST", body: JSON.stringify(body) },
+        config.token
+      );
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toContain("clientId, clientSecret, and refreshToken");
+    }
+  });
+
+  test("POST /api/google/accounts/provision registers a trusted account (201)", async () => {
+    const config = testConfig("http-google-provision-201");
+    const handler = createHandler(config);
+    // The registry is HOME-keyed (machine-global), so point HOME at a scratch
+    // dir for the duration of this test.
+    const prevHome = process.env.HOME;
+    const scratchHome = join("/tmp/gini-http-tests", `provision-home-${process.pid}-${Date.now()}`);
+    mkdirSync(scratchHome, { recursive: true });
+    process.env.HOME = scratchHome;
+    try {
+      const response = await rawCall(
+        handler,
+        config,
+        "/api/google/accounts/provision",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            clientId: "edge-client",
+            clientSecret: "edge-secret",
+            refreshToken: "1//refresh",
+            email: "ada@example.com",
+            principal: "sub-ada"
+          })
+        },
+        config.token
+      );
+      expect(response.status).toBe(201);
+      const account = await response.json();
+      expect(account.tag).toBe("ada");
+      expect(account.provisioned).toBe(true);
+      expect(existsSync(join(account.configDir, "credentials.json"))).toBe(true);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      rmSync(scratchHome, { recursive: true, force: true });
+    }
+  });
+
+  test("POST /api/google/accounts/provision with primary:true heals the hosted baked credential in place", async () => {
+    const config = testConfig("http-google-provision-primary");
+    const handler = createHandler(config);
+    const prevHome = process.env.HOME;
+    const prevHosted = process.env.GINI_HOSTED;
+    const prevCred = process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
+    const scratchHome = join("/tmp/gini-http-tests", `provision-primary-${process.pid}-${Date.now()}`);
+    const credentialsFile = join(scratchHome, ".config", "gws-hosted", "credentials.json");
+    mkdirSync(dirname(credentialsFile), { recursive: true });
+    writeFileSync(credentialsFile, "{}");
+    process.env.HOME = scratchHome;
+    process.env.GINI_HOSTED = "1";
+    process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE = credentialsFile;
+    try {
+      const { ensureHostedPrimaryAccount } = await import("./integrations/connectors/google-accounts");
+      const { readGoogleAccounts } = await import("./state/google-accounts");
+      const primary = await ensureHostedPrimaryAccount();
+      expect(primary?.tag).toBe("primary");
+
+      const response = await rawCall(
+        handler,
+        config,
+        "/api/google/accounts/provision",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            clientId: "edge-client",
+            clientSecret: "edge-secret",
+            refreshToken: "1//healed",
+            email: "wilson@example.com",
+            principal: "sub-wilson",
+            primary: true
+          })
+        },
+        config.token
+      );
+      expect(response.status).toBe(201);
+      const account = await response.json();
+      // Landed on the baked primary row — no duplicate minted.
+      expect(account.id).toBe(primary!.id);
+      expect(account.configDir).toBe(dirname(credentialsFile));
+      expect(readGoogleAccounts()).toHaveLength(1);
+      // The fresh token overwrote the baked file gws actually reads.
+      expect(JSON.parse(readFileSync(credentialsFile, "utf8")).refresh_token).toBe("1//healed");
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevHosted === undefined) delete process.env.GINI_HOSTED;
+      else process.env.GINI_HOSTED = prevHosted;
+      if (prevCred === undefined) delete process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
+      else process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE = prevCred;
+      rmSync(scratchHome, { recursive: true, force: true });
+    }
+  });
+
+  test("POST /api/google/accounts/provision with makePrimary:true persists the account as the primary", async () => {
+    const config = testConfig("http-google-provision-make-primary");
+    const handler = createHandler(config);
+    const prevHome = process.env.HOME;
+    const scratchHome = join("/tmp/gini-http-tests", `provision-make-primary-${process.pid}-${Date.now()}`);
+    mkdirSync(scratchHome, { recursive: true });
+    process.env.HOME = scratchHome;
+    try {
+      const { readPrimaryGoogleAccountId } = await import("./state/google-accounts");
+      const provision = (body: Record<string, unknown>) =>
+        rawCall(
+          handler,
+          config,
+          "/api/google/accounts/provision",
+          { method: "POST", body: JSON.stringify(body) },
+          config.token
+        );
+      // An add (no flag) never touches the primary.
+      const added = await provision({
+        clientId: "edge-client",
+        clientSecret: "edge-secret",
+        refreshToken: "1//refresh-a",
+        email: "ada@example.com",
+        principal: "sub-ada"
+      });
+      expect(added.status).toBe(201);
+      expect(readPrimaryGoogleAccountId()).toBeUndefined();
+      // A sign-in-intent provision flips the persisted primary to its account.
+      const signedIn = await provision({
+        clientId: "edge-client",
+        clientSecret: "edge-secret",
+        refreshToken: "1//refresh-b",
+        email: "bob@example.com",
+        principal: "sub-bob",
+        makePrimary: true
+      });
+      expect(signedIn.status).toBe(201);
+      const account = await signedIn.json();
+      expect(readPrimaryGoogleAccountId()).toBe(account.id);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      rmSync(scratchHome, { recursive: true, force: true });
+    }
+  });
+
+  test("GET /api/google/auth-mode reflects the hosted marker", async () => {
+    const config = testConfig("http-google-auth-mode");
+    const handler = createHandler(config);
+    const prevHosted = process.env.GINI_HOSTED;
+    delete process.env.GINI_HOSTED;
+    try {
+      expect(await call(handler, config, "/api/google/auth-mode")).toEqual({ mode: "loopback" });
+      process.env.GINI_HOSTED = "1";
+      expect(await call(handler, config, "/api/google/auth-mode")).toEqual({ mode: "edge" });
+    } finally {
+      if (prevHosted === undefined) delete process.env.GINI_HOSTED;
+      else process.env.GINI_HOSTED = prevHosted;
+    }
+  });
+
+  test("POST /api/google/accounts no longer requires a tag (configDir validation still applies)", async () => {
+    const config = testConfig("http-google-accounts-no-tag");
+    const handler = createHandler(config);
+    // A tag-less body reaches the configDir gate (previously a missing tag was
+    // its own 400) — the register path derives the tag from the live session.
+    const response = await rawCall(
+      handler,
+      config,
+      "/api/google/accounts",
+      { method: "POST", body: JSON.stringify({ configDir: "relative/gws" }) },
+      config.token
+    );
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toContain("configDir must be");
+  });
+
+  test("GET /api/google/login/start 302s to Google consent with PKCE and the browser-facing redirect_uri", async () => {
+    const config = testConfig("http-google-login-start");
+    const handler = createHandler(config);
+    const prevHosted = process.env.GINI_HOSTED;
+    delete process.env.GINI_HOSTED;
+    resetGoogleLoginWebState();
+    try {
+      const origin = encodeURIComponent("http://127.0.0.1:3059");
+      const response = await rawCall(
+        handler,
+        config,
+        `/api/google/login/start?returnTo=%2Fonboarding&origin=${origin}`,
+        {},
+        config.token
+      );
+      expect(response.status).toBe(302);
+      const location = new URL(response.headers.get("location") ?? "");
+      expect(location.host).toBe("accounts.google.com");
+      expect(location.searchParams.get("redirect_uri")).toBe(
+        "http://127.0.0.1:3059/api/runtime/google/login/callback"
+      );
+      expect(location.searchParams.get("code_challenge_method")).toBe("S256");
+      expect(location.searchParams.get("state")).toBeTruthy();
+    } finally {
+      if (prevHosted === undefined) delete process.env.GINI_HOSTED;
+      else process.env.GINI_HOSTED = prevHosted;
+      resetGoogleLoginWebState();
+    }
+  });
+
+  test("GET /api/google/login/start 400s on a non-loopback origin and in edge auth mode", async () => {
+    const config = testConfig("http-google-login-start-400");
+    const handler = createHandler(config);
+    const prevHosted = process.env.GINI_HOSTED;
+    delete process.env.GINI_HOSTED;
+    resetGoogleLoginWebState();
+    try {
+      const lan = await rawCall(
+        handler,
+        config,
+        `/api/google/login/start?origin=${encodeURIComponent("http://192.168.1.20:3000")}`,
+        {},
+        config.token
+      );
+      expect(lan.status).toBe(400);
+      expect((await lan.json()).error).toContain("loopback");
+      process.env.GINI_HOSTED = "1";
+      const edge = await rawCall(
+        handler,
+        config,
+        `/api/google/login/start?origin=${encodeURIComponent("http://127.0.0.1:3059")}`,
+        {},
+        config.token
+      );
+      expect(edge.status).toBe(400);
+      expect((await edge.json()).error).toContain("edge sign-in flow");
+    } finally {
+      if (prevHosted === undefined) delete process.env.GINI_HOSTED;
+      else process.env.GINI_HOSTED = prevHosted;
+      resetGoogleLoginWebState();
+    }
+  });
+
+  test("GET /api/google/login/callback with an unknown state 302s back with googleAddError=1 (never an error page)", async () => {
+    const config = testConfig("http-google-login-callback");
+    const handler = createHandler(config);
+    resetGoogleLoginWebState();
+    const response = await rawCall(
+      handler,
+      config,
+      "/api/google/login/callback?code=bogus&state=bogus",
+      {},
+      config.token
+    );
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("/onboarding?step=accounts&googleAddError=1");
+  });
 });
 
 describe("response compression", () => {
@@ -7649,13 +7798,6 @@ async function callWithToken(handler: ReturnType<typeof createHandler>, config: 
   return value;
 }
 
-async function callPublic(handler: ReturnType<typeof createHandler>, config: RuntimeConfig, path: string, init: RequestInit = {}) {
-  const response = await rawCall(handler, config, path, init);
-  const value = await response.json();
-  if (!response.ok) throw new Error(value.error ?? `HTTP ${response.status}`);
-  return value;
-}
-
 async function rawCall(handler: ReturnType<typeof createHandler>, config: RuntimeConfig, path: string, init: RequestInit = {}, token?: string) {
   const response = await handler(new Request(`http://127.0.0.1:${config.port}${path}`, {
     ...init,
@@ -7778,7 +7920,16 @@ async function seedTypedCredential(config: RuntimeConfig, name: string, provider
   });
 }
 
-async function waitForTask(handler: ReturnType<typeof createHandler>, config: RuntimeConfig, taskId: string) {
+async function waitForTask(
+  handler: ReturnType<typeof createHandler>,
+  config: RuntimeConfig,
+  taskId: string,
+  // The approve endpoint returns at decision durability while the side
+  // effect + resume run detached, so a post-approve wait must exclude
+  // the still-parked waiting_approval status or it returns the
+  // pre-approve park immediately.
+  statuses: string[] = ["completed", "failed", "waiting_approval"]
+) {
   // Phase 5 added auto-recall + auto-retain to runTask. The retain side is
   // fire-and-forget so it can't block, but the inline recall + a few extra
   // mutateState audits push runTask completion past the original 500ms
@@ -7786,7 +7937,7 @@ async function waitForTask(handler: ReturnType<typeof createHandler>, config: Ru
   // still well under any reasonable test timeout.
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const detail = await call(handler, config, `/api/tasks/${taskId}`);
-    if (["completed", "failed", "waiting_approval"].includes(detail.task.status)) return detail;
+    if (statuses.includes(detail.task.status)) return detail;
     await Bun.sleep(10);
   }
   throw new Error(`Task did not settle: ${taskId}`);

@@ -251,11 +251,13 @@ describe("request_connector dispatch", () => {
     }
   });
 
-  test("setupSkill provider: rejects request_connector when no prior read_skill is in task history", async () => {
-    // google-oauth-desktop declares `setupSkill: "google-workspace-setup"`.
-    // The dispatcher must refuse the bare shortcut and direct the model at
-    // the setup skill, which owns the multi-step prerequisite flow.
-    const instance = `req-connector-gated-${Math.random().toString(36).slice(2, 8)}`;
+  test("google-oauth-desktop: request_connector proceeds to a pending approval with no read_skill prerequisite", async () => {
+    // In hosted, the Google Workspace credential is baked into the guest at
+    // provisioning and satisfied by the boot-registered account, so
+    // google-oauth-desktop declares no setup skill. request_connector for it
+    // behaves like any other registered provider: it mints a pending
+    // connector.request approval directly, with no read_skill gate.
+    const instance = `req-connector-gws-${Math.random().toString(36).slice(2, 8)}`;
     const config = buildConfig(instance);
     const taskId = await newTask(config);
     const result = await dispatchToolCall(
@@ -265,63 +267,6 @@ describe("request_connector dispatch", () => {
       "call_1",
       JSON.stringify({ provider: "google-oauth-desktop", reason: "connect google" })
     );
-    expect(result.kind).toBe("sync");
-    if (result.kind === "sync") {
-      const parsed = JSON.parse(result.result);
-      expect(parsed.ok).toBe(false);
-      expect(parsed.error).toContain("google-workspace-setup");
-      expect(parsed.error).toContain("read_skill");
-    }
-    // The gate must short-circuit BEFORE any approval row is created.
-    const state = readState(instance);
-    expect(state.setupRequests.filter((a) => a.taskId === taskId).length).toBe(0);
-  });
-
-  test("setupSkill provider: proceeds when task history contains a read_skill for the setup skill", async () => {
-    // Once the model has read the setup skill body, the eventual
-    // request_connector call (whether emitted by the skill itself or by
-    // the model after following the instructions) must pass the gate.
-    const instance = `req-connector-allowed-${Math.random().toString(36).slice(2, 8)}`;
-    const config = buildConfig(instance);
-    const taskId = await newTask(config);
-    // Seed the task's toolCallState with an assistant message whose
-    // tool_calls includes a read_skill for "google-workspace-setup".
-    await mutateState(instance, (state) => {
-      const task = state.tasks.find((t) => t.id === taskId)!;
-      task.toolCallState = {
-        toolsHash: "test",
-        iterations: 1,
-        pending: [],
-        messages: [
-          {
-            role: "assistant",
-            content: null,
-            tool_calls: [
-              {
-                id: "rs_1",
-                type: "function",
-                function: {
-                  name: "read_skill",
-                  arguments: JSON.stringify({ name: "google-workspace-setup" })
-                }
-              }
-            ]
-          },
-          {
-            role: "tool",
-            tool_call_id: "rs_1",
-            content: "(skill body)"
-          }
-        ]
-      };
-    });
-    const result = await dispatchToolCall(
-      config,
-      taskId,
-      "request_connector",
-      "call_2",
-      JSON.stringify({ provider: "google-oauth-desktop", reason: "Paste OAuth Desktop credentials for project gini-123" })
-    );
     expect(result.kind).toBe("pending");
     if (result.kind === "pending") {
       const state = readState(instance);
@@ -330,57 +275,6 @@ describe("request_connector dispatch", () => {
       expect(approval!.action).toBe("connector.request");
       expect(approval!.target).toBe("google-oauth-desktop");
       expect(approval!.payload.provider).toBe("google-oauth-desktop");
-    }
-  });
-
-  test("setupSkill provider: proceeds when read_skill is in this turn's in-flight workingMessages (not yet persisted)", async () => {
-    // The chat-task loop only writes `task.toolCallState.messages` when
-    // pausing for approval. Within a single task run, an earlier
-    // read_skill call lives only in the loop's local workingMessages
-    // until then. The gate must consult workingMessages (passed via
-    // the messageHistory arg) so the model isn't told to re-read the
-    // skill it just read in the same turn.
-    const instance = `req-connector-inflight-${Math.random().toString(36).slice(2, 8)}`;
-    const config = buildConfig(instance);
-    const taskId = await newTask(config);
-    // Deliberately do NOT seed task.toolCallState — the read_skill
-    // evidence only exists in the in-flight buffer the loop passes in.
-    const inflight = [
-      {
-        role: "assistant",
-        content: null,
-        tool_calls: [
-          {
-            id: "rs_inflight",
-            type: "function",
-            function: {
-              name: "read_skill",
-              arguments: JSON.stringify({ name: "google-workspace-setup" })
-            }
-          }
-        ]
-      },
-      {
-        role: "tool",
-        tool_call_id: "rs_inflight",
-        content: "(skill body)"
-      }
-    ];
-    const result = await dispatchToolCall(
-      config,
-      taskId,
-      "request_connector",
-      "call_inflight",
-      JSON.stringify({ provider: "google-oauth-desktop", reason: "Paste OAuth Desktop credentials for project gini-456" }),
-      inflight
-    );
-    expect(result.kind).toBe("pending");
-    if (result.kind === "pending") {
-      const state = readState(instance);
-      const approval = state.setupRequests.find((a) => a.id === result.approvalId);
-      expect(approval).toBeDefined();
-      expect(approval!.action).toBe("connector.request");
-      expect(approval!.target).toBe("google-oauth-desktop");
     }
   });
 
@@ -1730,7 +1624,9 @@ describe("ask_user dispatch", () => {
     expect(readState(instance).setupRequests.filter((a) => a.taskId === taskId).length).toBe(0);
   });
 
-  test("rejects fewer than 2 or more than 6 options with a sync error", async () => {
+  test("rejects a single option or more than 6 with a sync error", async () => {
+    // Exactly one option is a confirmation in disguise, and seven is past
+    // the option bound — both stay recoverable errors.
     const instance = `ask-user-count-${Math.random().toString(36).slice(2, 8)}`;
     const config = buildConfig(instance);
     const taskId = await newTask(config);
@@ -1828,6 +1724,41 @@ describe("ask_user dispatch", () => {
         { label: "Neither — use web_fetch", description: "No setup needed" }
       ]);
     }
+  });
+
+  test("a question-only call (no options) is rejected with a steer to plain message text", async () => {
+    // ask_user is options-only: an open-ended ask belongs in the model's own
+    // message text. Both an omitted field and an explicit empty array reject
+    // gracefully without minting a chat.choice row.
+    const instance = `ask-user-open-${Math.random().toString(36).slice(2, 8)}`;
+    const config = buildConfig(instance);
+    const taskId = await newTask(config);
+    const omitted = await dispatchToolCall(
+      config,
+      taskId,
+      "ask_user",
+      "call_open",
+      JSON.stringify({ question: "What should the reply to Dana say?" })
+    );
+    expect(omitted.kind).toBe("sync");
+    if (omitted.kind === "sync") {
+      const parsed = JSON.parse(omitted.result);
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain("ask_user only presents choices");
+      expect(parsed.error).toContain("message text");
+    }
+    const emptyArray = await dispatchToolCall(
+      config,
+      taskId,
+      "ask_user",
+      "call_open_empty",
+      JSON.stringify({ question: "What should the subject line be?", options: [] })
+    );
+    expect(emptyArray.kind).toBe("sync");
+    if (emptyArray.kind === "sync") {
+      expect(JSON.parse(emptyArray.result).ok).toBe(false);
+    }
+    expect(readState(instance).setupRequests.filter((a) => a.taskId === taskId).length).toBe(0);
   });
 
   test("surface guard: rejects a telegram-sourced session synchronously", async () => {

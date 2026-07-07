@@ -821,6 +821,42 @@ export function upsertAssistantTextBlock(
   return updated;
 }
 
+// Attaches a task/run to an existing user_text block in place. Used by the
+// echo-first submit path: the block is inserted render-only at accept time
+// (before the routing verdict exists), and the chat-direct dispatch later
+// binds it to the turn it started — instead of inserting a duplicate bubble.
+// Publishes the updated block so live subscribers pick up the association.
+// Returns null when the block no longer exists (e.g. its session was
+// deleted while the verdict was pending).
+export function attachTaskToUserTextBlock(
+  instance: Instance,
+  blockId: string,
+  binding: { taskId: string; runId: string }
+): ChatBlock | null {
+  const db = getMemoryDb(instance);
+  const at = now();
+  const row = db
+    .query<ChatBlockRow, [string]>(
+      "SELECT * FROM chat_blocks WHERE id = ? AND kind = 'user_text'"
+    )
+    .get(blockId);
+  if (!row) return null;
+  db.run(
+    `UPDATE chat_blocks
+       SET task_id = ?, run_id = ?, updated_at = ?
+     WHERE id = ?`,
+    [binding.taskId, binding.runId, at, blockId]
+  );
+  const updated = rowToBlock({
+    ...row,
+    task_id: binding.taskId,
+    run_id: binding.runId,
+    updated_at: at
+  });
+  publish(instance, updated);
+  return updated;
+}
+
 // Updates an existing tool_call block in place — used to flip a running
 // row to `ok`, `error`, or `denied` once the dispatch resolves (and to
 // stamp `errorMessage` on error). Looking up by call_id makes the resume

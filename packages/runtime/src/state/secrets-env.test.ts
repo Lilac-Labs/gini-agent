@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   isSafeEnvVarName,
   isValidEnvVarName,
+  loadSecretsEnvIntoProcess,
   removeKeyFromSecretsEnv,
   secretsEnvHasKey,
   secretsEnvPath,
@@ -238,5 +239,69 @@ describe("env-var name validation", () => {
     // unwritable name as nothing-to-remove (false) without touching the file.
     expect(() => writeKeyToSecretsEnv("FOO=evil\nexport BAR", "v")).toThrow(/unsafe env var name/);
     expect(removeKeyFromSecretsEnv("FOO=evil\nexport BAR")).toBe(false);
+  });
+});
+
+describe("loadSecretsEnvIntoProcess", () => {
+  // Names chosen to be inert (never real provider vars) so mutating them
+  // can't perturb another test's provider state; restored fully after each.
+  const KEYS = ["GINI_TEST_LOAD_A", "GINI_TEST_LOAD_B", "GINI_TEST_LOAD_EMPTY"];
+  let scratchHome: string;
+  let savedHome: string | undefined;
+  let savedKeys: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    savedHome = process.env.HOME;
+    savedKeys = {};
+    for (const key of KEYS) {
+      savedKeys[key] = process.env[key];
+      delete process.env[key];
+    }
+    scratchHome = join("/tmp", `gini-secrets-env-load-${tag()}`);
+    rmSync(scratchHome, { recursive: true, force: true });
+    mkdirSync(join(scratchHome, ".gini"), { recursive: true });
+    process.env.HOME = scratchHome;
+  });
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    for (const key of KEYS) {
+      const prev = savedKeys[key];
+      if (prev === undefined) delete process.env[key];
+      else process.env[key] = prev;
+    }
+    rmSync(scratchHome, { recursive: true, force: true });
+  });
+
+  test("sets missing keys, unquoting values, and returns the keys it set", () => {
+    writeFileSync(
+      secretsEnvPath(),
+      `export GINI_TEST_LOAD_A='val'\\''with'\\''quotes'\nGINI_TEST_LOAD_B=bare-value\n`
+    );
+    const set = loadSecretsEnvIntoProcess();
+    expect(process.env.GINI_TEST_LOAD_A).toBe("val'with'quotes");
+    expect(process.env.GINI_TEST_LOAD_B).toBe("bare-value");
+    expect(set.sort()).toEqual(["GINI_TEST_LOAD_A", "GINI_TEST_LOAD_B"]);
+  });
+
+  test("fill-missing: a pre-set non-empty value is NOT overwritten; an empty one IS filled", () => {
+    process.env.GINI_TEST_LOAD_A = "ambient-wins";
+    process.env.GINI_TEST_LOAD_EMPTY = "";
+    writeFileSync(
+      secretsEnvPath(),
+      `GINI_TEST_LOAD_A=from-file\nGINI_TEST_LOAD_EMPTY=filled\n`
+    );
+    const set = loadSecretsEnvIntoProcess();
+    // Ambient non-empty value survives; the empty one gets filled from the file.
+    expect(process.env.GINI_TEST_LOAD_A).toBe("ambient-wins");
+    expect(process.env.GINI_TEST_LOAD_EMPTY).toBe("filled");
+    expect(set).toEqual(["GINI_TEST_LOAD_EMPTY"]);
+  });
+
+  test("no-op returning [] when the file is absent, without throwing", () => {
+    // Fresh scratch HOME has ~/.gini but no secrets.env.
+    expect(loadSecretsEnvIntoProcess()).toEqual([]);
+    for (const key of KEYS) expect(process.env[key]).toBeUndefined();
   });
 });

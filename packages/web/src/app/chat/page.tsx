@@ -1,6 +1,7 @@
 "use client";
 
-import { useSearchParams } from "next/navigation";
+import { useEffect } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { AgentChatHeader } from "@/components/chat/AgentChatHeader";
 import { ChatTabBar } from "@/components/chat/ChatTabBar";
 import { ChatSurface, useChannelSession } from "@/components/chat/ChatSurface";
@@ -22,10 +23,19 @@ export default function ChatPage() {
 
 function ChatPageBody() {
   const params = useSearchParams();
+  const router = useRouter();
   // ?session= deep-links open a specific session (a recurring-job channel
   // from the sidebar, or an agent-chat link from Home/Tasks). Without it, the
   // surface is the active agent's single canonical chat.
   const pinnedSessionId = params?.get("session") ?? null;
+
+  // The bare-/chat root agent chat is hidden from the chrome for now:
+  // redirect home. ?session= deep links are untouched, and the root-chat
+  // rendering path below is deliberately kept so the surface comes back by
+  // removing this redirect.
+  useEffect(() => {
+    if (!pinnedSessionId) router.replace("/");
+  }, [pinnedSessionId, router]);
 
   const status = useStatus();
   const activeAgentId = status.data?.activeAgent?.id;
@@ -75,6 +85,9 @@ function ChatPageBody() {
   // over itself.
   const { openTopicId } = useTopicPanel()!;
   const panelTopicId = !isTopic && openTopicId ? openTopicId : null;
+
+  // Redirecting (see the effect above) — render nothing for the frame.
+  if (!pinnedSessionId) return null;
 
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden bg-background">

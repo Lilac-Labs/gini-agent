@@ -101,7 +101,7 @@ via Add Provider); scrubbing the azure key from `secrets.env` is the CLI
 ## Out Of Scope
 
 - **Azure embeddings.** The default embedding provider is `local`; Azure embeddings need a separate embeddings deployment (a chat deployment can't serve `text-embedding-3-small`), so they are a distinct follow-up.
-- **v1 surface.** Azure's newer undated `/openai/v1/` GA channel is an additive parallel surface; the dated deployment-scoped path this provider uses remains supported and is the broadly-compatible default.
+- **v1 surface.** Azure's newer undated `/openai/v1/` GA channel is an additive parallel surface; the dated deployment-scoped path this provider uses remains supported and is the broadly-compatible default. The hosted gini model does route tool-calling turns through the Responses API on this v1 channel (`/openai/v1/responses`) to get the built-in Bing-grounded `web_search` tool inline; that hosted-only path is gated on `GINI_HOSTED` and does not change the chat-completions routing above (see ADR web-search-connectors.md).
 
 ## Consequences
 

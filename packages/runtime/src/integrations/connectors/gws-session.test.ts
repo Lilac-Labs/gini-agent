@@ -25,6 +25,7 @@ describe("parseGwsAuthStatus", () => {
       installed: true,
       clientConfigured: true,
       signedIn: true,
+      tokenRevoked: false,
       services: { calendar: true, gmail: true, drive: false, docs: false, sheets: false, forms: false, meet: false },
       scopes,
       email: "me@example.com",
@@ -73,6 +74,7 @@ describe("parseGwsAuthStatus", () => {
       installed: true,
       clientConfigured: false,
       signedIn: false,
+      tokenRevoked: false,
       services: { calendar: false, gmail: false, drive: false, docs: false, sheets: false, forms: false, meet: false },
       scopes: [],
       message: "Google sign-in needed"
@@ -111,6 +113,7 @@ describe("parseGwsAuthStatus", () => {
       installed: false,
       clientConfigured: false,
       signedIn: false,
+      tokenRevoked: false,
       services: { calendar: false, gmail: false, drive: false, docs: false, sheets: false, forms: false, meet: false },
       scopes: [],
       message: "gws not installed"
@@ -131,5 +134,108 @@ describe("parseGwsAuthStatus", () => {
     expect(status.installed).toBe(true);
     expect(status.clientConfigured).toBe(true);
     expect(status.signedIn).toBe(false);
+  });
+});
+
+// tokenRevoked distinguishes a revoked/expired grant (a stored refresh token
+// that no longer yields a session — the user must re-authenticate) from a
+// never-signed-in account (no refresh token yet). It is true when signedIn is
+// false AND either gws still holds a refresh token it explained with a
+// token_error, or token_error matches a known revoke/reauth signal.
+describe("parseGwsAuthStatus tokenRevoked", () => {
+  test("the real Google revoke output (has_refresh_token + expired-or-revoked) → tokenRevoked true", () => {
+    // Verbatim shape `gws auth status` prints after a myaccount.google.com
+    // revoke: token_error is Google's human message, NOT an invalid_grant code,
+    // and client_config_exists is false in the hosted baked-creds setup.
+    const status = parseGwsAuthStatus(
+      JSON.stringify({
+        client_config_exists: false,
+        token_valid: false,
+        token_error: "Token has been expired or revoked.",
+        has_refresh_token: true,
+        plain_credentials_exists: true
+      })
+    );
+    expect(status.signedIn).toBe(false);
+    expect(status.tokenRevoked).toBe(true);
+    expect(status.message).toBe("Google sign-in expired — re-auth needed");
+  });
+
+  test("a dead refresh token gws explained with any token_error → tokenRevoked true", () => {
+    // Structural detection: not signed in, a refresh token is present, and gws
+    // gave a reason — independent of Google's exact wording.
+    const status = parseGwsAuthStatus(
+      JSON.stringify({
+        client_config_exists: true,
+        token_valid: false,
+        token_error: "unexpected auth failure",
+        has_refresh_token: true
+      })
+    );
+    expect(status.tokenRevoked).toBe(true);
+  });
+
+  test("has_refresh_token true but no token_error → tokenRevoked false (no explained failure)", () => {
+    const status = parseGwsAuthStatus(
+      JSON.stringify({ client_config_exists: true, token_valid: false, has_refresh_token: true })
+    );
+    expect(status.tokenRevoked).toBe(false);
+  });
+
+  test("no refresh token and an unrecognized token_error → tokenRevoked false", () => {
+    const status = parseGwsAuthStatus(
+      JSON.stringify({ client_config_exists: false, token_valid: false, token_error: "network unreachable" })
+    );
+    expect(status.tokenRevoked).toBe(false);
+  });
+
+  test("a reauth (invalid_rapt) token_error while signed out → tokenRevoked true", () => {
+    const status = parseGwsAuthStatus(
+      JSON.stringify({
+        client_config_exists: true,
+        token_valid: false,
+        token_error: "reauth related error (invalid_rapt)"
+      })
+    );
+    expect(status.signedIn).toBe(false);
+    expect(status.tokenRevoked).toBe(true);
+  });
+
+  test("an invalid_grant token_error while signed out → tokenRevoked true", () => {
+    const status = parseGwsAuthStatus(
+      JSON.stringify({ client_config_exists: true, token_valid: false, token_error: "invalid_grant" })
+    );
+    expect(status.tokenRevoked).toBe(true);
+  });
+
+  test("signed out with no token_error → tokenRevoked false (expired, not revoked)", () => {
+    const status = parseGwsAuthStatus(
+      JSON.stringify({ client_config_exists: true, token_valid: false })
+    );
+    expect(status.signedIn).toBe(false);
+    expect(status.tokenRevoked).toBe(false);
+  });
+
+  test("a valid token with a stale revoke-shaped token_error → tokenRevoked false", () => {
+    // signedIn wins: a live token is never treated as revoked, even if the CLI
+    // still carries a leftover error string.
+    const status = parseGwsAuthStatus(
+      JSON.stringify({ client_config_exists: true, token_valid: true, token_error: "invalid_grant" })
+    );
+    expect(status.signedIn).toBe(true);
+    expect(status.tokenRevoked).toBe(false);
+  });
+
+  test("non-JSON output → notInstalled with tokenRevoked false", () => {
+    const status = parseGwsAuthStatus("zsh: command not found: gws\n");
+    expect(status.installed).toBe(false);
+    expect(status.tokenRevoked).toBe(false);
+  });
+
+  test("the token_error match is case-insensitive", () => {
+    const status = parseGwsAuthStatus(
+      JSON.stringify({ client_config_exists: true, token_valid: false, token_error: "Fatal: Invalid_Grant returned" })
+    );
+    expect(status.tokenRevoked).toBe(true);
   });
 });

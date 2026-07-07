@@ -1,13 +1,16 @@
-// Pure-JS tests (no React/DOM) for the Skills-page activation logic. The
-// new branches under test: the setup skill's pill reflects gws sign-in
-// liveness (session), and a service skill that depends on a setup-skill
-// provider's credential renders a deferral pill whose tone mirrors that
-// same liveness.
+// Pure-JS tests (no React/DOM) for the Skills-page activation logic. Mirrors
+// the runtime gate: a skill is active when every required credential NAME maps
+// to a configured connector that is healthy (or, for a probe-less provider,
+// configured at unknown health), OR — when no connector record exists at all —
+// the owning provider's live `externallySatisfied` bit covers it. In hosted the
+// Google Workspace credential rides that last path: the Google account is
+// connected at sign-in through the host, so no connector record is created and
+// `externallySatisfied` keeps the Workspace skills active.
 
 import { describe, expect, test } from "bun:test";
 import type { ConnectorRecord, SkillRecord } from "@runtime/types";
 import type { ProviderDescriptor } from "@/lib/queries";
-import { deriveActivation, setupSkillLabelFor } from "./_activation";
+import { deriveActivation } from "./_activation";
 
 function skill(overrides: Partial<SkillRecord>): SkillRecord {
   return {
@@ -48,19 +51,21 @@ function connector(overrides: Partial<ConnectorRecord>): ConnectorRecord {
   };
 }
 
-// The google-oauth-desktop provider, as the /api/connectors/providers payload
-// surfaces it: owns the setup skill and seeds the credential name.
-const gwsProvider: ProviderDescriptor = {
-  id: "google-oauth-desktop",
-  label: "Google OAuth Desktop client",
-  description: "",
-  fields: [],
-  hasProbe: false,
-  hasDetect: false,
-  hasSetupSkill: true,
-  setupSkill: "google-workspace-setup",
-  credentialTemplate: { type: "oauth2", name: "google-workspace-oauth" }
-};
+// The google-oauth-desktop provider as the /api/connectors/providers payload
+// surfaces it. On hosted it carries the Google Workspace credential and, when
+// the boot-registered account is present, reports it externally satisfied.
+function gwsProvider(overrides: Partial<ProviderDescriptor> = {}): ProviderDescriptor {
+  return {
+    id: "google-oauth-desktop",
+    label: "Google Workspace OAuth",
+    description: "",
+    fields: [],
+    hasProbe: false,
+    hasDetect: false,
+    credentialTemplate: { type: "oauth2", name: "google-workspace-oauth" },
+    ...overrides
+  };
+}
 
 function byNameOf(connectors: ConnectorRecord[]): Map<string, ConnectorRecord[]> {
   const map = new Map<string, ConnectorRecord[]>();
@@ -72,173 +77,107 @@ function byNameOf(connectors: ConnectorRecord[]): Map<string, ConnectorRecord[]>
   return map;
 }
 
-const providersById = new Map<string, ProviderDescriptor>([[gwsProvider.id, gwsProvider]]);
-const providerByCredentialName = new Map<string, ProviderDescriptor>([
-  ["google-workspace-oauth", gwsProvider]
-]);
-const setupSkillProviders = new Map<string, ProviderDescriptor>([
-  ["google-workspace-setup", gwsProvider]
-]);
-
-function activationFor(s: SkillRecord, connectors: ConnectorRecord[]) {
+// deriveActivation for the Google Workspace credential, with a provider whose
+// externallySatisfied bit is controlled per-test.
+function activationFor(
+  s: SkillRecord,
+  connectors: ConnectorRecord[],
+  provider: ProviderDescriptor = gwsProvider()
+) {
   return deriveActivation(
     s,
     byNameOf(connectors),
-    providersById,
-    providerByCredentialName,
-    setupSkillProviders
+    new Map([[provider.id, provider]]),
+    new Map([["google-workspace-oauth", provider]])
   );
 }
 
-describe("setupSkillLabelFor", () => {
-  test("humanizes the skill name", () => {
-    expect(setupSkillLabelFor("google-workspace-setup")).toBe("Google Workspace setup");
+describe("deriveActivation: skill status short-circuits", () => {
+  test("unsupported validation → unsupported/danger", () => {
+    const s = skill({ validationStatus: "unsupported", requiredCredentials: ["google-workspace-oauth"] });
+    expect(activationFor(s, [])).toEqual({ label: "unsupported", tone: "danger" });
+  });
+
+  test("disabled skill → disabled/neutral", () => {
+    const s = skill({ status: "disabled", requiredCredentials: ["google-workspace-oauth"] });
+    expect(activationFor(s, [])).toEqual({ label: "disabled", tone: "neutral" });
+  });
+
+  test("archived skill → disabled/neutral", () => {
+    const s = skill({ status: "archived", requiredCredentials: ["google-workspace-oauth"] });
+    expect(activationFor(s, [])).toEqual({ label: "disabled", tone: "neutral" });
+  });
+
+  test("no required credentials → active/ok", () => {
+    const s = skill({ requiredCredentials: [] });
+    expect(activationFor(s, [])).toEqual({ label: "active", tone: "ok" });
+  });
+
+  test("undefined requiredCredentials treated as none → active/ok", () => {
+    const s = skill({ requiredCredentials: undefined });
+    expect(activationFor(s, [])).toEqual({ label: "active", tone: "ok" });
   });
 });
 
-describe("deriveActivation: setup skill card reflects sign-in liveness", () => {
-  const setupSkill = skill({ name: "google-workspace-setup", requiredCredentials: [] });
-
-  test("signed in → active/ok (not the unconditional active it gets today)", () => {
-    const conn = connector({ session: { installed: true, clientConfigured: true, signedIn: true, message: "Signed in to Google" } });
-    expect(activationFor(setupSkill, [conn])).toEqual({ label: "active", tone: "ok" });
-  });
-
-  test("client provisioned but session expired → needs sign-in/warn", () => {
-    const conn = connector({ session: { installed: true, clientConfigured: true, signedIn: false, message: "Google sign-in expired — re-auth needed" } });
-    expect(activationFor(setupSkill, [conn])).toEqual({ label: "needs sign-in", tone: "warn" });
-  });
-
-  test("no connector at all → needs setup/warn", () => {
-    expect(activationFor(setupSkill, [])).toEqual({ label: "needs setup", tone: "warn" });
-  });
-
-  test("connector exists but gws not installed (no clientConfigured) → needs setup/warn", () => {
-    const conn = connector({ session: { installed: false, clientConfigured: false, signedIn: false, message: "gws not installed" } });
-    expect(activationFor(setupSkill, [conn])).toEqual({ label: "needs setup", tone: "warn" });
-  });
-});
-
-describe("deriveActivation: service skill defers to the setup skill", () => {
+describe("deriveActivation: record-based credential gate", () => {
   const serviceSkill = skill({
     name: "google-calendar",
     requiredCredentials: ["google-workspace-oauth"]
   });
 
-  // The label always defers (status text lives on the setup card), but the
-  // pill's TONE mirrors the setup connector's sign-in liveness so signing in
-  // visibly changes the row.
-  test("signed in (no per-service map) → green deferral (ok), via back-compat fallback", () => {
-    const conn = connector({ session: { installed: true, clientConfigured: true, signedIn: true, message: "Signed in to Google" } });
-    expect(activationFor(serviceSkill, [conn])).toEqual({
-      label: "via Google Workspace setup",
+  test("configured + healthy record → active/ok", () => {
+    const conn = connector({ status: "configured", health: "healthy" });
+    expect(activationFor(serviceSkill, [conn])).toEqual({ label: "active", tone: "ok" });
+  });
+
+  test("configured + unknown health on a probe-less provider → active/ok (presence-healthy)", () => {
+    const conn = connector({ status: "configured", health: "unknown" });
+    expect(activationFor(serviceSkill, [conn], gwsProvider({ hasProbe: false }))).toEqual({
+      label: "active",
       tone: "ok"
     });
   });
 
-  test("signed in AND this service's scope granted → green", () => {
-    const conn = connector({ session: { installed: true, clientConfigured: true, signedIn: true, services: { calendar: true, gmail: false, drive: false, docs: false, sheets: false, forms: false, meet: false }, message: "Signed in to Google" } });
-    expect(activationFor(serviceSkill, [conn])).toEqual({ label: "via Google Workspace setup", tone: "ok" });
-  });
-
-  test("signed in but this service's scope NOT granted (partial consent) → amber, not falsely green", () => {
-    // google-calendar with calendar:false — the bug this fixes: a Gmail-only
-    // consent must not light up Calendar.
-    const conn = connector({ session: { installed: true, clientConfigured: true, signedIn: true, services: { calendar: false, gmail: true, drive: false, docs: false, sheets: false, forms: false, meet: false }, message: "Signed in to Google" } });
-    expect(activationFor(serviceSkill, [conn])).toEqual({ label: "via Google Workspace setup", tone: "warn" });
-  });
-
-  test("session expired → amber deferral (warn)", () => {
-    const conn = connector({ session: { installed: true, clientConfigured: true, signedIn: false, message: "Google sign-in expired — re-auth needed" } });
-    expect(activationFor(serviceSkill, [conn])).toEqual({
-      label: "via Google Workspace setup",
+  test("configured + unknown health but provider HAS a probe → needs setup/warn", () => {
+    const conn = connector({ status: "configured", health: "unknown" });
+    expect(activationFor(serviceSkill, [conn], gwsProvider({ hasProbe: true }))).toEqual({
+      label: "needs setup",
       tone: "warn"
     });
   });
 
-  test("defers (muted) even when no connector record exists yet (routes by credential name)", () => {
-    expect(activationFor(serviceSkill, [])).toEqual({
-      label: "via Google Workspace setup",
-      tone: "neutral"
+  test("a disabled record does not satisfy and blocks the fallthrough → needs setup/warn", () => {
+    const conn = connector({ status: "disabled", health: "healthy" });
+    expect(activationFor(serviceSkill, [conn], gwsProvider({ externallySatisfied: true }))).toEqual({
+      label: "needs setup",
+      tone: "warn"
     });
   });
 });
 
-describe("deriveActivation: externally satisfied credential (registry-only machine)", () => {
-  // Mirrors the runtime's absent-record fallthrough: the provider's live
-  // `externallySatisfied` bit (registered machine-global Google accounts)
-  // satisfies the credential ONLY when no connector record with that name
-  // exists at all. A disabled record is an explicit operator off and keeps
-  // the record-based gate.
-  const extProvider: ProviderDescriptor = { ...gwsProvider, externallySatisfied: true };
-  const extProvidersById = new Map([[extProvider.id, extProvider]]);
-  const extProviderByCredentialName = new Map([["google-workspace-oauth", extProvider]]);
-  const extSetupSkillProviders = new Map([["google-workspace-setup", extProvider]]);
-
-  function extActivationFor(s: SkillRecord, connectors: ConnectorRecord[]) {
-    return deriveActivation(
-      s,
-      byNameOf(connectors),
-      extProvidersById,
-      extProviderByCredentialName,
-      extSetupSkillProviders
-    );
-  }
-
-  const setupSkill = skill({ name: "google-workspace-setup", requiredCredentials: [] });
-  const serviceSkill = skill({ name: "google-calendar", requiredCredentials: ["google-workspace-oauth"] });
-
-  test("setup card with no connector record → active (runtime gate is satisfied)", () => {
-    expect(extActivationFor(setupSkill, [])).toEqual({ label: "active", tone: "ok" });
+describe("deriveActivation: hosted externally-satisfied fallthrough", () => {
+  const serviceSkill = skill({
+    name: "google-calendar",
+    requiredCredentials: ["google-workspace-oauth"]
   });
 
-  test("service skill with no connector record → green deferral", () => {
-    expect(extActivationFor(serviceSkill, [])).toEqual({
-      label: "via Google Workspace setup",
+  test("no connector record + provider externallySatisfied → active/ok (hosted Google account)", () => {
+    expect(activationFor(serviceSkill, [], gwsProvider({ externallySatisfied: true }))).toEqual({
+      label: "active",
       tone: "ok"
     });
   });
 
-  test("a disabled record blocks the fallthrough: setup card needs setup, service deferral muted", () => {
-    const disabled = connector({ status: "disabled" });
-    expect(extActivationFor(setupSkill, [disabled])).toEqual({ label: "needs setup", tone: "warn" });
-    expect(extActivationFor(serviceSkill, [disabled])).toEqual({
-      label: "via Google Workspace setup",
-      tone: "neutral"
+  test("no connector record + provider NOT externallySatisfied → needs setup/warn", () => {
+    expect(activationFor(serviceSkill, [], gwsProvider({ externallySatisfied: false }))).toEqual({
+      label: "needs setup",
+      tone: "warn"
     });
   });
 
-  test("a credential with no setup skill is satisfied generically when no record exists", () => {
-    const plainProvider: ProviderDescriptor = {
-      id: "plain",
-      label: "Plain",
-      description: "",
-      fields: [],
-      hasProbe: false,
-      hasDetect: false,
-      externallySatisfied: true,
-      credentialTemplate: { type: "api-key", name: "PLAIN_KEY" }
-    };
-    const s = skill({ name: "plain-skill", requiredCredentials: ["PLAIN_KEY"] });
-    const activation = deriveActivation(
-      s,
-      byNameOf([]),
-      new Map([[plainProvider.id, plainProvider]]),
-      new Map([["PLAIN_KEY", plainProvider]]),
-      new Map()
-    );
-    expect(activation).toEqual({ label: "active", tone: "ok" });
-  });
-});
-
-describe("deriveActivation: non-gws skills are unaffected", () => {
-  test("a skill with no required credentials stays active", () => {
-    const plain = skill({ name: "some-skill", requiredCredentials: [] });
-    expect(activationFor(plain, [])).toEqual({ label: "active", tone: "ok" });
-  });
-
-  test("disabled skill stays disabled", () => {
-    const disabled = skill({ name: "google-workspace-setup", status: "disabled" });
-    expect(activationFor(disabled, [])).toEqual({ label: "disabled", tone: "neutral" });
+  test("no connector record + no provider mapped for the credential → needs setup/warn", () => {
+    const s = skill({ name: "needs-unmapped", requiredCredentials: ["UNMAPPED_KEY"] });
+    const activation = deriveActivation(s, byNameOf([]), new Map(), new Map());
+    expect(activation).toEqual({ label: "needs setup", tone: "warn" });
   });
 });

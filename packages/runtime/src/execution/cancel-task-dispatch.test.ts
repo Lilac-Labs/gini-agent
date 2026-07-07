@@ -50,7 +50,7 @@ function stateWithToolsets(toolsets: ToolsetRecord[]): RuntimeState {
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     tasks: [], authorizations: [], setupRequests: [], audit: [], skills: [], jobs: [],
-    connectors: [], improvements: [], skillOutcomes: [], learningFindings: [], pairingCodes: [], pairingRequests: [], devices: [],
+    connectors: [], improvements: [], skillOutcomes: [], learningFindings: [],
     promotions: [], snapshots: [], tools: [], toolsets, subagents: [],
     mcpServers: [], messagingBridges: [], importReports: [], agents: [],
     activeAgentId: undefined, relays: [], notifications: [], emailWatchers: [], events: [],
@@ -181,7 +181,7 @@ describe("cancel_task dispatch", () => {
     // parentTaskId) is still refused before any state change lands.
     const config = makeConfig("cancel-task-serialized");
     const taskId = await seedTask(config);
-    await expect(cancelTask(config, taskId, taskId)).rejects.toThrow(
+    await expect(cancelTask(config, taskId, { parentTaskId: taskId })).rejects.toThrow(
       /cannot cancel the current task/i
     );
     // Task should still be queued — guard fired before any mutation.

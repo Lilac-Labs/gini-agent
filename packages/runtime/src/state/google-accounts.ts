@@ -63,6 +63,31 @@ export function readGoogleAccounts(): GoogleAccount[] {
   }
 }
 
+// The user's chosen primary account id, persisted alongside the accounts as an
+// OPTIONAL registry field (additive: a registry written before the field
+// existed reads as "no primary"). Tolerant like readGoogleAccounts — missing/
+// corrupt file or a non-string value degrades to undefined. Whether the id
+// still names a live row is the ORCHESTRATION layer's concern
+// (effectivePrimaryAccountId in integrations/connectors/google-accounts.ts).
+export function readPrimaryGoogleAccountId(): string | undefined {
+  const path = googleAccountsRegistryPath();
+  try {
+    if (!existsSync(path)) return undefined;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object") return undefined;
+    const id = (parsed as { primaryAccountId?: unknown }).primaryAccountId;
+    return typeof id === "string" && id ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Persist (or clear, with undefined) the primary account id, leaving the
+// account rows untouched.
+export function setPrimaryGoogleAccountId(accountId: string | undefined): void {
+  writeRegistry(readGoogleAccounts(), accountId);
+}
+
 function isGoogleAccount(value: unknown): value is GoogleAccount {
   if (!value || typeof value !== "object") return false;
   const o = value as Record<string, unknown>;
@@ -82,12 +107,22 @@ function isGoogleAccount(value: unknown): value is GoogleAccount {
 // root is forced to 0700 (re-chmod for the same pre-existing-dir reason): it
 // holds each account's per-dir OAuth tokens, so it must not be world-readable.
 export function writeGoogleAccounts(accounts: GoogleAccount[]): void {
+  // Preserve the persisted primary: this writer only replaces the account rows.
+  writeRegistry(accounts, readPrimaryGoogleAccountId());
+}
+
+function writeRegistry(accounts: GoogleAccount[], primaryAccountId: string | undefined): void {
   const root = googleAccountsRoot();
   mkdirSync(root, { recursive: true, mode: 0o700 });
   try { chmodSync(root, 0o700); } catch { /* best-effort tightening */ }
   const path = googleAccountsRegistryPath();
   const tmp = join(root, `accounts.json.${process.pid}.${Date.now()}.tmp`);
-  const body = JSON.stringify({ version: REGISTRY_VERSION, accounts }, null, 2) + "\n";
+  const body =
+    JSON.stringify(
+      { version: REGISTRY_VERSION, accounts, ...(primaryAccountId ? { primaryAccountId } : {}) },
+      null,
+      2
+    ) + "\n";
   writeFileSync(tmp, body, { mode: 0o600 });
   renameSync(tmp, path);
   try { chmodSync(path, 0o600); } catch { /* best-effort tightening */ }
@@ -111,8 +146,11 @@ export function addGoogleAccount(account: GoogleAccount): void {
 export function removeGoogleAccount(accountId: string): void {
   const accounts = readGoogleAccounts();
   const next = accounts.filter((a) => a.id !== accountId);
-  if (next.length === accounts.length) return;
-  writeGoogleAccounts(next);
+  const primary = readPrimaryGoogleAccountId();
+  if (next.length === accounts.length && primary !== accountId) return;
+  // Deleting the primary clears the field: a stale id must not linger and
+  // silently reclaim primacy if the same id were ever re-registered.
+  writeRegistry(next, primary === accountId ? undefined : primary);
 }
 
 // Rename an account's tag. Enforces case-insensitive tag uniqueness against the

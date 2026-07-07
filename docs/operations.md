@@ -70,6 +70,17 @@ The production `default` instance (installed via `curl|bash`) is pinned to memor
 
 Developer worktree instances (auto-derived from the repo directory basename when running `bun run gini`) get deterministic hash-derived ports within a 100-port window starting at 7337 (runtime) / 3000 (web), so parallel worktrees coexist without manual `--port` wrangling. `gini status` prints the live URLs.
 
+## Docker Deployment
+
+To run an instance headless in a container — with the agent's browser driven as a real Chromium under a virtual X display (Xvfb) — use the bundled `Dockerfile` and `docker-compose.yml`:
+
+```sh
+docker compose up --build
+open http://localhost:7777
+```
+
+State persists in a named volume, so chats, sign-ins, memory, and the model cache survive restarts. The container binds the gateway on `0.0.0.0` (so published ports reach it) without weakening the Host/Origin trust gate. See [Docker Deployment](deployment-docker.md) for provider configuration, the container-mode env knobs, logs, and image-trimming options, and [ADR: Docker + Xvfb Deployment](adr/docker-xvfb-deployment.md) for the design.
+
 ## Parallel Smoke Tests
 
 Smoke tests are isolated by default:

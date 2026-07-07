@@ -5,7 +5,7 @@
 // split must remain re-exported here.
 
 export { now, id } from "./ids";
-export { assertInsideWorkspace, assertInsideWorkspaceNoSymlinkEscape, hashSecret } from "./security";
+export { assertInsideWorkspace, assertInsideWorkspaceNoSymlinkEscape } from "./security";
 export {
   createEmptyState,
   readState,
@@ -101,6 +101,7 @@ export {
 } from "./uploads";
 export {
   insertChatBlock,
+  attachTaskToUserTextBlock,
   upsertAssistantTextBlock,
   updateToolCallBlock,
   listChatBlocks,
@@ -146,6 +147,12 @@ export {
   publishChatSession
 } from "./chat-session-events";
 export {
+  buildContainerAttentionIndex,
+  deriveContainerAttention,
+  latestRunOutcome
+} from "./attention";
+export type { ContainerAttentionIndex, ContainerRunOutcome } from "./attention";
+export {
   markRead,
   markUnread,
   markForwardedTopicsRead,
@@ -165,6 +172,11 @@ export {
   createPlanStep,
   createChatSession,
   createTopic,
+  createTaskContainer,
+  acknowledgeContainer,
+  setContainerArchived,
+  setContainerPinned,
+  findChildContainerByCorrelationKey,
   deleteChatSession,
   renameChatSession,
   enqueuePendingChatMessage,
@@ -180,25 +192,6 @@ export {
   createImprovementProposal,
   createSkillOutcome,
   createLearningFinding,
-  createPairingCode,
-  claimPairingCode,
-  revokeDevice,
-  findActiveDeviceByToken,
-  findActiveSessionByToken,
-  touchSessionLastSeen,
-  createPairingRequest,
-  getPairingRequest,
-  listPendingPairingRequests,
-  approvePairingRequest,
-  rejectPairingRequest,
-  cancelPairingRequest,
-  claimPairingRequest,
-  pollPairingRequest,
-  redactPairingRequest,
-  deviceNameFromUserAgent,
-  MAX_PENDING_PAIRING_REQUESTS,
-  PairingCapExceededError,
-  SESSION_COOKIE_MAX_AGE_MS,
   createPromotionProposal,
   decidePromotion,
   createSnapshotRecord,

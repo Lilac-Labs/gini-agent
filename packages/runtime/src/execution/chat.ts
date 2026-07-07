@@ -1,16 +1,22 @@
-import { submitTask } from "../agent";
+import { ApprovalRaceLostError, cancelTask, resolveSetupRequest, submitTask } from "../agent";
+import { persistConnectOutcome, resumeParkIfGatesSettled, safeResume } from "./safe-resume";
 import {
   addAudit,
+  appendEvent,
   appendLog,
+  attachTaskToUserTextBlock,
   createChatMessage,
   createChatSession,
+  createTaskContainer,
   createTopic,
+  deleteChatBlock,
   deleteChatSession,
   enqueuePendingChatMessage,
   getLatestMessagesBySession,
   getMainChatBlock,
   insertChatBlock,
   isTerminalTaskStatus,
+  latestRunOutcome,
   listChatBlocks,
   listThreadBlocks,
   mutateState,
@@ -94,7 +100,10 @@ export function listChatSessions(config: RuntimeConfig) {
     if (setup.status !== "pending" || !setup.taskId) continue;
     pendingByTaskId.set(setup.taskId, (pendingByTaskId.get(setup.taskId) ?? 0) + 1);
   }
-  return state.chatSessions.map((session) => {
+  // Headless containers (a silent watch job's working thread) never surface
+  // in chrome: excluded from this unscoped listing, though still directly
+  // addressable by id (GET /api/chat/:id, deep links).
+  return state.chatSessions.filter((session) => !session.headless).map((session) => {
     const raw = latestByCallId.get(session.id) ?? null;
     const lastMessagePreview = raw
       ? raw.length > LAST_MESSAGE_PREVIEW_CHARS
@@ -157,7 +166,10 @@ export function getChatSession(config: RuntimeConfig, id: string) {
     if (TERMINAL_TASK_STATUSES.has(task.status)) continue;
     if (syncedAssistantTaskIds.has(task.id)) continue;
     let content: string | undefined;
-    if (task.status === "waiting_approval") {
+    if (task.status === "waiting_approval" || task.status === "needs_input") {
+      // A needs_input park is all-chat.choice by construction, so the
+      // SetupRequest-only skip below always suppresses its placeholder —
+      // the choice card is the UI.
       // connector.request approvals now persist their `reason` as a durable
       // assistant message at request_connector time (kind:"approval_reason"),
       // so no placeholder is needed for that case — the real message is in
@@ -442,7 +454,13 @@ type PreparedChatSubmission = Awaited<ReturnType<typeof prepareChatSubmission>>;
 async function runChatSubmission(
   config: RuntimeConfig,
   sessionId: string,
-  prepared: PreparedChatSubmission
+  prepared: PreparedChatSubmission,
+  options?: {
+    // The render-only user_text block inserted at accept time (echo-first
+    // ack). When present, the task binds to that block instead of inserting
+    // a second bubble for the same message.
+    echoBlockId?: string;
+  }
 ) {
   const { content, images, audio, liveSession, clientSurface } = prepared;
   const run = await createConversationRun(config, { conversationId: sessionId, input: content });
@@ -484,17 +502,30 @@ async function runChatSubmission(
   // and a JSON state failure above must not block the chat-block row
   // (the loop's later emissions tolerate missing user_text). Errors are
   // logged via appendLog so operators can spot drift.
+  //
+  // Echo-first ack: when the block already exists (inserted at accept time,
+  // before the routing verdict), bind it to this turn instead of inserting a
+  // duplicate. A vanished echo (session wiped mid-verdict) falls back to a
+  // fresh insert so the turn always has its user_text row.
   try {
-    insertChatBlock(config.instance, {
-      kind: "user_text",
-      sessionId,
-      text: content,
-      taskId: task.id,
-      runId: run.id,
-      agentId: liveSession.agentId ?? null,
-      ...(images.length > 0 ? { images } : {}),
-      ...(audio ? { audio } : {})
-    });
+    const attached = options?.echoBlockId
+      ? attachTaskToUserTextBlock(config.instance, options.echoBlockId, {
+          taskId: task.id,
+          runId: run.id
+        })
+      : null;
+    if (!attached) {
+      insertChatBlock(config.instance, {
+        kind: "user_text",
+        sessionId,
+        text: content,
+        taskId: task.id,
+        runId: run.id,
+        agentId: liveSession.agentId ?? null,
+        ...(images.length > 0 ? { images } : {}),
+        ...(audio ? { audio } : {})
+      });
+    }
   } catch (error) {
     appendLog(config.instance, "chat.user_block.insert_failed", {
       sessionId,
@@ -505,17 +536,185 @@ async function runChatSubmission(
   return { sessionId, runId: run.id, taskId: task.id, status: task.status };
 }
 
+// Supersede rule (design invariant: approval is click-only). When a new user
+// message arrives while the session's ONE live task is parked at
+// waiting_approval on Authorization gates (confirm cards) and the queue is
+// empty, cancel the gated task so the message runs as a fresh turn instead of
+// queueing behind a gate that may never resolve. User text NEVER resolves a
+// gate as approval — even a literal "yes, send it" takes this path (gate
+// cancelled, side effect NOT executed); the only path that executes a gated
+// side effect is the explicit approve endpoint. No affirmation/intent
+// classification, ever.
+//
+// Deliberately narrow:
+//   - non-empty pendingMessages → no supersede (FIFO order is preserved; the
+//     message queues as today);
+//   - mid-loop (running) tasks → no supersede (mid-run steering stays
+//     queue-only);
+//   - any pending SetupRequest gate (chat.choice question, credential card) →
+//     no supersede (the park is a question to answer, not a decision to
+//     override).
+// Returns the cancelled task's id so the caller can stamp
+// `supersededByTaskId` once the replacement task exists.
+async function supersedeGatedTaskForMessage(
+  config: RuntimeConfig,
+  sessionId: string
+): Promise<string | undefined> {
+  const state = readState(config.instance);
+  const session = state.chatSessions.find((item) => item.id === sessionId);
+  if (!session || (session.pendingMessages?.length ?? 0) > 0) return undefined;
+  const liveTasks = state.tasks.filter(
+    (t) => t.chatSessionId === sessionId && !isTerminalTaskStatus(t.status)
+  );
+  if (liveTasks.length !== 1 || liveTasks[0]!.status !== "waiting_approval") return undefined;
+  const liveTask = liveTasks[0]!;
+  const hasPendingAuthorization = state.authorizations.some(
+    (a) => a.taskId === liveTask.id && a.status === "pending"
+  );
+  const hasPendingSetupRequest = state.setupRequests.some(
+    (s) => s.taskId === liveTask.id && s.status === "pending"
+  );
+  if (!hasPendingAuthorization || hasPendingSetupRequest) return undefined;
+  // cancelTask tears the gates down (pending Authorizations → denied, tool_call
+  // rows settle to "denied") and emits the "Superseded by your new message"
+  // system note. The new run is submitted only AFTER this returns.
+  await cancelTask(config, liveTask.id, { reason: "superseded" });
+  return liveTask.id;
+}
+
+// Needs-input answer path. When the session's ONE live task is parked on an
+// ask_user question, a plain message post IS the answer: resolve the pending
+// chat.choice SetupRequest with the freeform-answer semantics of
+// POST /api/setup-requests/:id/complete { choice: { other } } and resume the
+// SAME task — zero client changes for CLI/bridges. Keys on the park-stamped
+// `Task.needsInput.setupRequestId` rather than the status alone so the path
+// also works under the GINI_NEEDS_INPUT_STATUS=0 escape hatch (which exposes
+// the same park as `waiting_approval`).
+//
+// Deliberately disjoint from the supersede path: supersede requires ≥1
+// pending Authorization and ZERO pending SetupRequests; this path requires
+// the park to be all-chat.choice (the stamped SetupRequest still pending).
+// A non-empty queue preserves FIFO order — the message queues as today.
+async function answerNeedsInputForMessage(
+  config: RuntimeConfig,
+  sessionId: string,
+  prepared: PreparedChatSubmission
+): Promise<{ sessionId: string; runId?: string; taskId: string; status: TaskStatus } | undefined> {
+  const content = prepared.content.trim();
+  if (!content) return undefined;
+  const state = readState(config.instance);
+  const session = state.chatSessions.find((item) => item.id === sessionId);
+  if (!session || (session.pendingMessages?.length ?? 0) > 0) return undefined;
+  const liveTasks = state.tasks.filter(
+    (t) => t.chatSessionId === sessionId && !isTerminalTaskStatus(t.status)
+  );
+  if (liveTasks.length !== 1) return undefined;
+  const liveTask = liveTasks[0]!;
+  if (liveTask.status !== "needs_input" && liveTask.status !== "waiting_approval") return undefined;
+  const setupRequestId = liveTask.needsInput?.setupRequestId;
+  if (!setupRequestId) return undefined;
+  const setup = state.setupRequests.find((s) => s.id === setupRequestId);
+  if (!setup || setup.action !== "chat.choice") return undefined;
+  if (setup.status !== "pending") {
+    // The stamp points at an already-settled question: a restart killed the
+    // detached resume after the answer persisted, wedging the park. Kick the
+    // idempotent settled-park heal (a no-op when a live resume is in flight
+    // or a gate is genuinely pending), then let this message take its normal
+    // path — it queues behind the resuming run and drains when it settles.
+    resumeParkIfGatesSettled(config, liveTask.id);
+    return undefined;
+  }
+  const toolCallId = typeof setup.payload.toolCallId === "string" ? setup.payload.toolCallId : undefined;
+  if (!toolCallId) return undefined;
+  // Atomically claim the row first, same order as the /complete handler. A
+  // concurrent /complete (answering from the card) or a racing second
+  // message can win the claim — ApprovalRaceLostError falls through to the
+  // normal queue path so the message is never lost and never double-answers.
+  try {
+    await resolveSetupRequest(config, setupRequestId, "complete", { actor: "user", resumeChatTask: false });
+  } catch (error) {
+    if (error instanceof ApprovalRaceLostError) return undefined;
+    throw error;
+  }
+  await persistConnectOutcome(config, setupRequestId, { ok: true, message: `You answered: ${content}` });
+  // Render the user's answer in the thread. Best-effort, like the submit
+  // path's user_text insert — the answer itself rides the tool result.
+  try {
+    insertChatBlock(config.instance, {
+      kind: "user_text",
+      sessionId,
+      text: prepared.content,
+      taskId: liveTask.id,
+      ...(liveTask.runId ? { runId: liveTask.runId } : {}),
+      agentId: session.agentId ?? null,
+      ...(prepared.images.length > 0 ? { images: prepared.images } : {})
+    });
+  } catch (error) {
+    appendLog(config.instance, "chat.user_block.insert_failed", {
+      sessionId,
+      taskId: liveTask.id,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+  // Detached resume, mirroring the /complete handler: the POST returns
+  // immediately and the resumed turn streams as usual.
+  void safeResume(config, liveTask.id, toolCallId, `User answered: "${content}"`, {
+    context: "chat.choice",
+    approvalId: setupRequestId
+  });
+  // A parked chat task normally carries its runId; omit the field on the
+  // rare stampless legacy park instead of fabricating an empty id.
+  return {
+    sessionId,
+    ...(liveTask.runId ? { runId: liveTask.runId } : {}),
+    taskId: liveTask.id,
+    status: liveTask.status
+  };
+}
+
+// Stamp supersede provenance onto the cancelled task once the replacement
+// turn exists. Best-effort ordering: the stamp lands after the new task is
+// created because its id doesn't exist before then.
+async function stampSupersededBy(
+  config: RuntimeConfig,
+  cancelledTaskId: string,
+  newTaskId: string
+): Promise<void> {
+  await mutateState(config.instance, (current) => {
+    const cancelled = current.tasks.find((t) => t.id === cancelledTaskId);
+    if (cancelled) cancelled.supersededByTaskId = newTaskId;
+  });
+}
+
 // bypassQueue guarantees the run-now shape, so the messaging bridge gets a
 // taskId without narrowing on a `queued` discriminant. The default (and the
 // explicit { bypassQueue: false }) keeps the discriminated union for
 // interactive clients that must handle the queued case.
 type RunNowResult = Awaited<ReturnType<typeof runChatSubmission>>;
+// The needs-input answer path resumes the parked task instead of minting a
+// fresh run, so its result carries the task's runId only when the park has
+// one (see answerNeedsInputForMessage).
+type AnswerResult = NonNullable<Awaited<ReturnType<typeof answerNeedsInputForMessage>>>;
 type QueuedResult = { sessionId: string; queued: true; pendingId: string };
 // A Chat-routed message dispatched into a Topic returns the Topic-shaped result
 // (topicId-keyed instead of sessionId-keyed). submitChatMessage's union widens to
 // include it; the HTTP handler JSON-stringifies the result without destructuring,
 // so the topic shape serializes correctly alongside the chat-direct shapes.
 type TopicDispatchResult = Awaited<ReturnType<typeof dispatchChatMessageToTopic>>;
+// Echo-first instant ack for a routed Chat message: the POST resolves as soon
+// as the user's message is durably rendered, before the routing verdict
+// exists. Run/task ids arrive via the block/session streams once the verdict
+// dispatches the turn. `blockId` is the echo block, so a caller that needs
+// the eventual taskId (e.g. scripts/e2e-browser-tools.ts) can poll for the
+// block gaining one.
+type AcceptedResult = { sessionId: string; accepted: true; blockId?: string };
+
+// Upper bound on the routing verdict. A hung provider must not strand an
+// accepted message un-dispatched forever — on timeout (or any router error)
+// the message runs as a chat-direct turn, the same fallback coerceDecision
+// uses for an unparseable verdict.
+const ROUTE_VERDICT_TIMEOUT_MS = 15_000;
+
 export function submitChatMessage(
   config: RuntimeConfig,
   sessionId: string,
@@ -526,14 +725,14 @@ export function submitChatMessage(
   config: RuntimeConfig,
   sessionId: string,
   input: Record<string, unknown>,
-  options?: { bypassQueue?: boolean }
-): Promise<RunNowResult | QueuedResult | TopicDispatchResult>;
+  options?: { bypassQueue?: boolean; routeTimeoutMs?: number }
+): Promise<RunNowResult | AnswerResult | QueuedResult | TopicDispatchResult | AcceptedResult>;
 export async function submitChatMessage(
   config: RuntimeConfig,
   sessionId: string,
   input: Record<string, unknown>,
-  options?: { bypassQueue?: boolean }
-): Promise<RunNowResult | QueuedResult | TopicDispatchResult> {
+  options?: { bypassQueue?: boolean; routeTimeoutMs?: number }
+): Promise<RunNowResult | AnswerResult | QueuedResult | TopicDispatchResult | AcceptedResult> {
   const prepared = await prepareChatSubmission(config, sessionId, input);
   // The queue is for interactive clients (web/mobile/CLI composer), where a
   // human queues follow-ups while watching a turn. The messaging bridge is a
@@ -543,39 +742,51 @@ export async function submitChatMessage(
   if (options?.bypassQueue) {
     return runChatSubmission(config, sessionId, prepared);
   }
+  // Needs-input answer and supersede carve-outs run BEFORE intake routing: a
+  // message posted while THIS session's own live turn is parked must answer
+  // or supersede that turn in place — routing it into a Topic would strand
+  // the parked gate behind a turn the user has already moved past. Same
+  // order as the topic-dispatch path: answer first, then supersede. See
+  // answerNeedsInputForMessage / supersedeGatedTaskForMessage.
+  const answered = await answerNeedsInputForMessage(config, sessionId, prepared);
+  if (answered) return answered;
+  const supersededTaskId = await supersedeGatedTaskForMessage(config, sessionId);
   // Intake routing (ADR chat-topics-tasks-subagents.md). A message posted in a
-  // user's Chat (kind:"agent") is classified BEFORE context loads — the route
-  // selects which transcript loads. A new/existing Topic dispatches into the
-  // Topic's isolated context; a "chat" decision falls through to the
-  // chat-direct queue/run path below. The bypassQueue run-now path and
-  // non-Chat sessions (topic/channel/bridge) are never routed.
-  if (prepared.liveSession.kind === "agent") {
-    const decision = await routeChatMessage(config, sessionId, prepared.content);
-    if (decision.decision === "new_topic") {
-      const topicId = await mutateState(config.instance, (state) =>
-        createTopic(state, {
-          agentId: prepared.liveSession.agentId,
-          title: decision.title,
-          parentChatSessionId: sessionId,
-          // Seed the topic's routing/retrieval descriptor with the originating
-          // message so the router can recognize a later follow-up by content,
-          // not just the short title — no extra model call. See ADR
-          // chat-topics-tasks-subagents.md (Routing).
-          topicSummary: truncateTopicSummary(prepared.content)
-        }).id
-      );
-      return dispatchChatMessageToTopic(config, sessionId, topicId, prepared);
-    }
-    if (decision.decision === "existing_topic") {
-      return dispatchChatMessageToTopic(config, sessionId, decision.topicId, prepared);
-    }
-    // decision === "chat" → fall through to the chat-direct queue/run below.
+  // user's Chat (kind:"agent") is classified before the turn's context loads —
+  // the route selects which transcript loads. The verdict is a model call
+  // (~1s+), so it must NOT gate the POST: the message is echoed and
+  // acknowledged immediately, and routing + dispatch continue off the request
+  // path. The bypassQueue run-now path and non-Chat sessions
+  // (topic/channel/bridge) are never routed — and neither is a message that
+  // just superseded this Chat's parked turn: the replacement run belongs in
+  // this session.
+  if (prepared.liveSession.kind === "agent" && supersededTaskId === undefined) {
+    return acceptRoutedChatMessage(config, sessionId, prepared, options?.routeTimeoutMs);
   }
-  // Enqueue instead of running when a turn is already in flight for this
-  // session, or when the queue is already non-empty (so a later submit can't
-  // jump ahead of earlier queued messages while the current turn runs). The
-  // gateway is the source of truth — concurrent submits serialize here rather
-  // than starting parallel tasks. See ADR chat-message-queue.md.
+  return queueOrRunChatSubmission(config, sessionId, prepared, undefined, supersededTaskId);
+}
+
+// Chat-direct queue-or-run, shared by the non-routed synchronous path and the
+// post-verdict continuation. Enqueue instead of running when a turn is already
+// in flight for this session, or when the queue is already non-empty (so a
+// later submit can't jump ahead of earlier queued messages while the current
+// turn runs). The gateway is the source of truth — concurrent submits
+// serialize here rather than starting parallel tasks. See ADR
+// chat-message-queue.md.
+//
+// The state read happens AFTER any supersede carve-out so the cancelled task
+// no longer counts as in-flight — and doubles as the queue-drain race guard:
+// if a concurrent submit (or the cancel's own drain) started a new turn in
+// the window, the in-flight check queues this message as usual instead of
+// running a second turn. When the caller superseded a parked turn, the
+// replacement run is stamped onto the cancelled task (supersededByTaskId).
+async function queueOrRunChatSubmission(
+  config: RuntimeConfig,
+  sessionId: string,
+  prepared: PreparedChatSubmission,
+  echoBlockId: string | undefined,
+  supersededTaskId?: string
+): Promise<RunNowResult | QueuedResult> {
   const state = readState(config.instance);
   const session = state.chatSessions.find((item) => item.id === sessionId);
   const shouldQueue =
@@ -586,14 +797,140 @@ export async function submitChatMessage(
       enqueuePendingChatMessage(current, sessionId, {
         content,
         ...(images.length > 0 ? { images } : {}),
-        ...(clientSurface ? { clientSurface } : {})
+        ...(clientSurface ? { clientSurface } : {}),
+        ...(echoBlockId ? { echoBlockId } : {})
       })
     );
     const updated = readState(config.instance).chatSessions.find((item) => item.id === sessionId);
     if (updated) publishChatSession(config.instance, updated);
     return { sessionId, queued: true as const, pendingId: pending.id };
   }
-  return runChatSubmission(config, sessionId, prepared);
+  const result = await runChatSubmission(config, sessionId, prepared, { echoBlockId });
+  if (supersededTaskId) await stampSupersededBy(config, supersededTaskId, result.taskId);
+  return result;
+}
+
+// Echo-first instant ack (the responsiveness contract): render the user's
+// message NOW, resolve the POST NOW, and let the routing verdict + dispatch
+// finish off the request path. No run/task exists until the verdict lands, so
+// every queue/busy invariant in ADR chat-message-queue.md still evaluates at
+// dispatch time exactly as before — the only reordering is that the user's
+// bubble and the 201 no longer wait ~1s+ on the router's model call.
+async function acceptRoutedChatMessage(
+  config: RuntimeConfig,
+  sessionId: string,
+  prepared: PreparedChatSubmission,
+  routeTimeoutMs: number | undefined
+): Promise<AcceptedResult> {
+  const { content, images, audio, liveSession } = prepared;
+  // Same render-only echo shape dispatchChatMessageToTopic writes into Chat:
+  // no taskId/runId yet. Chat-direct dispatch later binds the block to its
+  // turn (attachTaskToUserTextBlock); a topic verdict leaves it as the Chat
+  // echo of the Topic turn. Best-effort — an insert failure must not reject
+  // the message.
+  let echoBlockId: string | undefined;
+  try {
+    echoBlockId = insertChatBlock(config.instance, {
+      kind: "user_text",
+      sessionId,
+      text: content,
+      agentId: liveSession.agentId ?? null,
+      ...(images.length > 0 ? { images } : {}),
+      ...(audio ? { audio } : {})
+    }).id;
+  } catch (error) {
+    appendLog(config.instance, "chat.user_block.insert_failed", {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+  void routeAndDispatchChatMessage(config, sessionId, prepared, echoBlockId, routeTimeoutMs).catch(
+    (error) => {
+      appendLog(config.instance, "chat.accept.dispatch_failed", {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      // The POST already succeeded, so a dispatch failure would otherwise be
+      // silent — surface it in the transcript instead of today's HTTP 500.
+      try {
+        insertChatBlock(config.instance, {
+          kind: "system_note",
+          sessionId,
+          text: "That message could not start a turn. Please try sending it again."
+        });
+      } catch {
+        // Best-effort: the appendLog above is the durable record.
+      }
+    }
+  );
+  return { sessionId, accepted: true as const, ...(echoBlockId ? { blockId: echoBlockId } : {}) };
+}
+
+// Post-ack continuation: obtain the routing verdict (bounded, never throws
+// into the void — timeout and router errors degrade to "chat") and dispatch
+// the prepared message to the destination the verdict selects.
+async function routeAndDispatchChatMessage(
+  config: RuntimeConfig,
+  sessionId: string,
+  prepared: PreparedChatSubmission,
+  echoBlockId: string | undefined,
+  routeTimeoutMs: number | undefined
+): Promise<void> {
+  let decision: Awaited<ReturnType<typeof routeChatMessage>> = { decision: "chat" };
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  try {
+    decision = await Promise.race([
+      routeChatMessage(config, sessionId, prepared.content, { excludeBlockId: echoBlockId }),
+      new Promise<never>((_resolve, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(new Error("chat-route verdict timed out")),
+          routeTimeoutMs ?? ROUTE_VERDICT_TIMEOUT_MS
+        );
+      })
+    ]);
+  } catch (error) {
+    appendLog(config.instance, "chat.route.failed", {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  } finally {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+  }
+  // The session can be deleted while the verdict is pending; its blocks (the
+  // echo included) die with it, so there is nothing to dispatch or clean up.
+  if (!readState(config.instance).chatSessions.find((item) => item.id === sessionId)) return;
+  if (decision.decision === "new_topic") {
+    // Deliberately UNPINNED (createTopic sets `pinned` only on request):
+    // pinning is a user gesture, so a router-minted container surfaces on
+    // home — never in the sidebar — until the user pins it. See ADR
+    // task-containers-and-runs.md.
+    const topicId = await mutateState(config.instance, (state) =>
+      createTopic(state, {
+        agentId: prepared.liveSession.agentId,
+        title: decision.title,
+        parentChatSessionId: sessionId,
+        // Seed the topic's routing/retrieval descriptor with the originating
+        // message so the router can recognize a later follow-up by content,
+        // not just the short title — no extra model call. See ADR
+        // chat-topics-tasks-subagents.md (Routing).
+        topicSummary: truncateTopicSummary(prepared.content)
+      }).id
+    );
+    await dispatchChatMessageToTopic(config, sessionId, topicId, prepared, { skipChatEcho: true });
+    return;
+  }
+  if (decision.decision === "existing_topic") {
+    // The candidate was validated at verdict time, but the topic can vanish
+    // in the gap — fall back to the chat-direct path instead of failing the
+    // already-accepted message.
+    if (readState(config.instance).chatSessions.find((item) => item.id === decision.topicId)) {
+      await dispatchChatMessageToTopic(config, sessionId, decision.topicId, prepared, {
+        skipChatEcho: true
+      });
+      return;
+    }
+  }
+  await queueOrRunChatSubmission(config, sessionId, prepared, echoBlockId);
 }
 
 // Auto-dispatch the next queued message for a session when the current turn
@@ -642,7 +979,9 @@ export async function dispatchNextPendingChatMessage(config: RuntimeConfig, sess
         alsoToMain: popped.alsoToMain
       });
     } else {
-      await runChatSubmission(config, sessionId, prepared);
+      // A queued echo-first message already has its bubble on screen — bind
+      // the drained turn to that block instead of inserting a second one.
+      await runChatSubmission(config, sessionId, prepared, { echoBlockId: popped.echoBlockId });
     }
   } catch (error) {
     appendLog(config.instance, "chat.queue.dispatch_failed", {
@@ -660,10 +999,19 @@ export async function removePendingChatMessageById(
   sessionId: string,
   pendingId: string
 ): Promise<boolean> {
+  // Capture the echo block before the pending record is gone: an echo-first
+  // message that gets dequeued must also lose its bubble, or the transcript
+  // keeps a message that will never run. (Live SSE subscribers see no
+  // retraction — deleteChatBlock emits none — but the remover's own refetch
+  // and every later load drop it.)
+  const echoBlockId = readState(config.instance)
+    .chatSessions.find((item) => item.id === sessionId)
+    ?.pendingMessages?.find((item) => item.id === pendingId)?.echoBlockId;
   const removed = await mutateState(config.instance, (current) =>
     removePendingChatMessage(current, sessionId, pendingId)
   );
   if (removed) {
+    if (echoBlockId) deleteChatBlock(config.instance, echoBlockId);
     const updated = readState(config.instance).chatSessions.find((item) => item.id === sessionId);
     if (updated) publishChatSession(config.instance, updated);
   }
@@ -907,6 +1255,133 @@ export async function runTopicSubmission(
   return { topicId, runId: run.id, taskId: task.id, status: task.status };
 }
 
+// Direct start (POST /api/containers): mint an UNPINNED task container under
+// the agent's root Chat session and run the message as its first turn,
+// bypassing the intake router. Reuses prepareChatSubmission (attachment/STT
+// validation) and runTopicSubmission, so blocks, queueing, and session-scoped
+// context continuity behave exactly like a router-dispatched Topic turn.
+// Pinning stays a user gesture — a directly-started container surfaces on
+// home, never in the sidebar, until the user pins it.
+export async function startTaskContainer(
+  config: RuntimeConfig,
+  input: Record<string, unknown>
+): Promise<{ containerId: string; taskId: string; status: TaskStatus }> {
+  const effective = resolveEffectiveContext(readState(config.instance), config);
+  const agentId = typeof input.agentId === "string" && input.agentId ? input.agentId : effective.agentId;
+  if (!agentId) throw new Error("No agent available to own the task container.");
+  // Optional creation-gesture fact (which composer mode minted the
+  // container). Validated up front so a bad value 400s before anything is
+  // minted; absent stays absent — unknown is meaningful on old records.
+  let startedAs: "task" | "message" | undefined;
+  if (input.startedAs !== undefined && input.startedAs !== null) {
+    if (input.startedAs !== "task" && input.startedAs !== "message") {
+      throw new Error(`Invalid input: startedAs must be "task" or "message" (got ${String(input.startedAs)})`);
+    }
+    startedAs = input.startedAs;
+  }
+  // Parent edge = the agent's canonical Chat session (same shape the router's
+  // new_topic mint uses), resolved BEFORE the container exists so a validation
+  // failure in prepareChatSubmission below leaves no orphan container behind.
+  const agentChat = await getOrCreateAgentChat(config.instance, agentId);
+  const prepared = await prepareChatSubmission(config, agentChat.id, input);
+  const requestedTitle = typeof input.title === "string" ? input.title.trim() : "";
+  const containerId = await mutateState(config.instance, (state) =>
+    createTaskContainer(state, {
+      agentId,
+      // No client-supplied title → title from the user's brief (createChatSession
+      // caps it at 80 chars).
+      title: requestedTitle || prepared.content,
+      parentChatSessionId: agentChat.id,
+      // Same routing/retrieval descriptor seeding as the router's new_topic
+      // path, so a later Chat follow-up can be routed here by content.
+      topicSummary: truncateTopicSummary(prepared.content),
+      ...(startedAs ? { startedAs } : {})
+    }).id
+  );
+  const result = await runTopicSubmission(config, containerId, prepared);
+  return { containerId, taskId: result.taskId, status: result.status };
+}
+
+// Retry a failed container run (POST /api/containers/:id/retry): re-submit
+// the newest failed run's original input as a fresh message into the
+// container, through the SAME submitChatMessage machinery a thread post
+// uses, so follow-up continuity, queueing rules, and events all hold.
+// Preconditions: the target is a task container (not the agent's root Chat)
+// and is non-headless, no run is in flight and no backlog is queued (409 —
+// the live or queued work is already the failure's replacement), and the
+// newest terminal run outcome is "failed" (a completed or cancelled outcome
+// has nothing to retry).
+export async function retryFailedContainerRun(
+  config: RuntimeConfig,
+  containerId: string
+): Promise<{ taskId: string; status: TaskStatus }> {
+  const state = readState(config.instance);
+  const session = state.chatSessions.find((item) => item.id === containerId);
+  if (!session) throw new Error(`Chat session not found: ${containerId}`);
+  // Retry targets task containers only. The agent's root Chat (kind:"agent")
+  // has no retry affordance — and a re-submit into it would pass through
+  // intake routing, minting (and then withdrawing) the run against a
+  // different session than the one the caller named.
+  if (session.kind === "agent") {
+    throw new Error(`Invalid input: ${containerId} is a Chat session, not a task container — nothing to retry.`);
+  }
+  if (session.headless) {
+    throw new Error(`Invalid input: container ${containerId} is headless — it has no retry affordance.`);
+  }
+  // statusFromErrorMessage maps this prefix to 409.
+  if (sessionHasInFlightChatTask(state, containerId)) {
+    throw new Error(`Container already has a live run: ${containerId}`);
+  }
+  const outcome = latestRunOutcome(state, session);
+  if (!outcome || outcome.status !== "failed") {
+    throw new Error(`Invalid input: the newest run outcome for ${containerId} is not "failed" — nothing to retry.`);
+  }
+  const failedRun = state.tasks.find((item) => item.id === outcome.taskId);
+  const input = failedRun?.input?.trim();
+  if (!input) {
+    throw new Error(`Invalid input: the failed run for ${containerId} recorded no input to retry.`);
+  }
+  const result = await submitChatMessage(config, containerId, {
+    content: input,
+    // Carry the failed run's image attachments so the retry re-submits the
+    // ORIGINAL submission faithfully (parseAttachments re-validates the
+    // upload ids against stored bytes, same as a fresh client submit).
+    ...(failedRun?.images && failedRun.images.length > 0 ? { images: failedRun.images } : {})
+  });
+  if ("queued" in result) {
+    // The message queued instead of running: either a turn started in the
+    // window between the in-flight check and the submit, or the container's
+    // queue already held a backlog. Withdraw the just-queued entry and
+    // report the conflict truthfully — the user can retry once the
+    // container drains.
+    await removePendingChatMessageById(config, containerId, result.pendingId);
+    throw new Error(`Container already has a live run or queued backlog: ${containerId}`);
+  }
+  if ("accepted" in result) {
+    // Structurally unreachable: retry rejects kind:"agent" containers above,
+    // and only kind:"agent" sessions take the echo-first accepted path.
+    throw new Error(`Container retry unexpectedly took the routed-chat path: ${containerId}`);
+  }
+  // Same event shape as acknowledgeContainer so the ops event feed carries
+  // the user gesture alongside the run-lifecycle rows the submit emitted.
+  await mutateState(config.instance, (current) => {
+    const live = current.chatSessions.find((item) => item.id === containerId);
+    if (!live) return;
+    appendEvent(
+      current,
+      {
+        kind: "task",
+        action: "chat.session.retried",
+        target: live.id,
+        risk: "low",
+        summary: `Container retried: ${live.title}`
+      },
+      { sessionId: live.id }
+    );
+  });
+  return { taskId: result.taskId, status: result.status };
+}
+
 // Dispatch a Chat-routed message into a Topic (ADR
 // chat-topics-tasks-subagents.md). The orchestrator the router calls once it has
 // chosen a Topic for a Chat message:
@@ -924,32 +1399,58 @@ export async function dispatchChatMessageToTopic(
   config: RuntimeConfig,
   chatSessionId: string,
   topicId: string,
-  prepared: PreparedChatSubmission
+  prepared: PreparedChatSubmission,
+  options?: {
+    // Set by the echo-first submit path, which already rendered the user's
+    // message into Chat at accept time — inserting it again here would paint
+    // a duplicate bubble. The echo shape is identical either way (render-only,
+    // no taskId/runId).
+    skipChatEcho?: boolean;
+  }
 ): Promise<
-  | { topicId: string; runId: string; taskId: string; status: TaskStatus }
+  | { topicId: string; runId?: string; taskId: string; status: TaskStatus }
   | { topicId: string; queued: true; pendingId: string }
 > {
   const { content, images, audio, liveSession, clientSurface } = prepared;
   // Echo the user's message into Chat as a render-only block. Best-effort.
-  try {
-    insertChatBlock(config.instance, {
-      kind: "user_text",
-      sessionId: chatSessionId,
-      text: content,
-      agentId: liveSession.agentId ?? null,
-      ...(images.length > 0 ? { images } : {}),
-      ...(audio ? { audio } : {})
-    });
-  } catch (error) {
-    appendLog(config.instance, "chat.user_block.insert_failed", {
-      sessionId: chatSessionId,
-      error: error instanceof Error ? error.message : String(error)
-    });
+  if (!options?.skipChatEcho) {
+    try {
+      insertChatBlock(config.instance, {
+        kind: "user_text",
+        sessionId: chatSessionId,
+        text: content,
+        agentId: liveSession.agentId ?? null,
+        ...(images.length > 0 ? { images } : {}),
+        ...(audio ? { audio } : {})
+      });
+    } catch (error) {
+      appendLog(config.instance, "chat.user_block.insert_failed", {
+        sessionId: chatSessionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
+  // Needs-input answer BEFORE the supersede check, scoped to the TOPIC: a
+  // Topic turn parked on an ask_user question consumes this message as its
+  // answer and resumes the SAME task. See answerNeedsInputForMessage.
+  const answered = await answerNeedsInputForMessage(config, topicId, prepared);
+  if (answered) {
+    return {
+      topicId,
+      ...(answered.runId ? { runId: answered.runId } : {}),
+      taskId: answered.taskId,
+      status: answered.status
+    };
+  }
+  // Supersede check BEFORE the queue decision, scoped to the TOPIC: a Topic
+  // turn parked on Authorization gates with an empty queue is cancelled so
+  // this message runs now. See supersedeGatedTaskForMessage.
+  const supersededTaskId = await supersedeGatedTaskForMessage(config, topicId);
   // Serialize behind any live Topic turn, exactly like submitChatMessage but
   // scoped to the TOPIC's queue: a message routed in mid-turn queues onto the
   // Topic instead of spawning a second competing task. See ADR
-  // chat-message-queue.md.
+  // chat-message-queue.md. Re-read AFTER the supersede (queue-drain race
+  // guard — a turn started concurrently in the window queues this message).
   const liveState = readState(config.instance);
   const topicSession = liveState.chatSessions.find((item) => item.id === topicId);
   const shouldQueue =
@@ -966,7 +1467,9 @@ export async function dispatchChatMessageToTopic(
     if (updated) publishChatSession(config.instance, updated);
     return { topicId, queued: true as const, pendingId: pending.id };
   }
-  return runTopicSubmission(config, topicId, prepared);
+  const result = await runTopicSubmission(config, topicId, prepared);
+  if (supersededTaskId) await stampSupersededBy(config, supersededTaskId, result.taskId);
+  return result;
 }
 
 export async function syncChatTaskResult(config: RuntimeConfig, sessionId: string, taskId: string) {

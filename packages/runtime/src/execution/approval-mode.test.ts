@@ -35,6 +35,14 @@ function buildConfig(workspaceRoot: string, instance: string, opts: Partial<Runt
   };
 }
 
+// Poll granularity is deliberately tight (5ms): the echo-provider dispatch
+// settles in ~25ms for a single-turn pause and ~30-140ms for a two-turn
+// completion, so a coarse 20ms tick spends most of its budget in dead wait
+// between the task flipping terminal and this loop observing it. 5ms keeps
+// the observation responsive without changing the 5000ms deadline — the
+// task genuinely completes fast, we just stop over-sleeping past it.
+const POLL_TICK_MS = 5;
+
 async function waitForTerminal(config: RuntimeConfig, taskId: string, timeoutMs = 5000): Promise<Task> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -43,7 +51,7 @@ async function waitForTerminal(config: RuntimeConfig, taskId: string, timeoutMs 
     if (task && (task.status === "completed" || task.status === "failed" || task.status === "cancelled" || task.status === "waiting_approval")) {
       return task;
     }
-    await Bun.sleep(20);
+    await Bun.sleep(POLL_TICK_MS);
   }
   throw new Error(`Task ${taskId} did not reach terminal state within ${timeoutMs}ms`);
 }
@@ -61,7 +69,7 @@ async function waitForFinalTerminal(config: RuntimeConfig, taskId: string, timeo
     if (task && (task.status === "completed" || task.status === "failed" || task.status === "cancelled")) {
       return task;
     }
-    await Bun.sleep(20);
+    await Bun.sleep(POLL_TICK_MS);
   }
   throw new Error(`Task ${taskId} did not reach a final terminal state within ${timeoutMs}ms`);
 }
@@ -761,8 +769,11 @@ describe("approvalMode dispatch matrix", () => {
     const paused = await waitForTerminal(config, task.id);
     expect(paused.status).toBe("waiting_approval");
 
+    // decideApproval returns at decision durability; the side effect +
+    // resume run detached, so wait for the final status (the parked
+    // status would satisfy waitForTerminal immediately).
     await decideApproval(config, paused.approvalIds[0]!, "approve");
-    const finished = await waitForTerminal(config, task.id);
+    const finished = await waitForFinalTerminal(config, task.id);
     expect(finished.status).toBe("completed");
 
     const state = readState(config.instance);

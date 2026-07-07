@@ -1,10 +1,10 @@
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import type { Authorization, ConnectorRecord, Instance, PairingRequestStatus, PairingStatus, ProviderConfig, RuntimeConfig, RuntimeState, SetupRequest, SetupRequestAction, SetupRequestStatus, TaskStatus } from "../types";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import type { Authorization, ConnectorRecord, Instance, ProviderConfig, RuntimeConfig, RuntimeState, SetupRequest, SetupRequestAction, SetupRequestStatus, TaskStatus } from "../types";
 import { ensureDir, instanceRoot, statePath } from "../paths";
 import { now } from "./ids";
 import { defaultAgent, defaultTools, defaultToolsets } from "./defaults";
 import { addAudit } from "./audit";
-import { createChatSession, pairedDeviceIdentityKey } from "./records";
+import { createChatSession } from "./records";
 import { getMemoryDb, memoryDbPath } from "./memory-db";
 import { canonicalCredentialName, getProvider } from "../integrations/connectors/registry";
 
@@ -48,9 +48,6 @@ export function createEmptyState(instance: Instance): RuntimeState {
     improvements: [],
     skillOutcomes: [],
     learningFindings: [],
-    pairingCodes: [],
-    pairingRequests: [],
-    devices: [],
     promotions: [],
     snapshots: [],
     tools: defaultTools(instance, at),
@@ -106,7 +103,23 @@ export function writeState(instance: Instance, state: RuntimeState): void {
   // writers never touch each other's temp; renameSync stays atomic, so a
   // reader still sees the prior or next state, never a torn write.
   const tempPath = `${path}.${process.pid}.${(writeStateSeq += 1)}.tmp`;
-  writeFileSync(tempPath, `${JSON.stringify(state, null, 2)}\n`);
+  // Durability, not just atomicity. renameSync is atomic — a reader sees the
+  // prior or next file, never a torn one — but atomicity is NOT durability.
+  // With ext4 delayed allocation, writeFileSync leaves the JSON in page cache
+  // while the rename's metadata can still commit to the journal; a power loss
+  // (or a hard guest poweroff mid-write) then replays the rename over data
+  // blocks that were never written, leaving a correctly-sized, ALL-ZERO
+  // state.json that fails JSON.parse on the next boot (a runtime-fatal crash
+  // loop). fsync the temp's DATA to stable storage before the rename, and the
+  // directory entry after, so a crash yields the old file or the complete new
+  // one — never zeros.
+  const fd = openSync(tempPath, "w");
+  try {
+    writeSync(fd, `${JSON.stringify(state, null, 2)}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   try {
     renameSync(tempPath, path);
   } catch (error) {
@@ -119,6 +132,26 @@ export function writeState(instance: Instance, state: RuntimeState): void {
       // Cleanup is best-effort; the rename error is the one that matters.
     }
     throw error;
+  }
+  // Persist the directory entry the rename created, so the name -> new-inode
+  // link is itself durable even if the parent dir's metadata was still cached.
+  fsyncDir(instanceRoot(instance));
+}
+
+// fsync a directory so a create/rename within it survives a power loss. Best
+// effort: some filesystems reject fsync on a read-only directory fd, and the
+// file-level fsync above is the guarantee that actually protects state
+// contents — this only hardens the rename's visibility.
+function fsyncDir(dir: string): void {
+  let dfd: number | undefined;
+  try {
+    dfd = openSync(dir, "r");
+    fsyncSync(dfd);
+  } catch {
+    // Directory fsync is a best-effort durability boost; ignore if the
+    // platform disallows it.
+  } finally {
+    if (dfd !== undefined) closeSync(dfd);
   }
 }
 
@@ -159,61 +192,6 @@ export async function mutateState<T>(instance: Instance, fn: (state: RuntimeStat
   return next;
 }
 
-export function expirePairingCodes(state: RuntimeState): void {
-  const at = Date.now();
-  for (const pairing of state.pairingCodes) {
-    if (pairing.status === "pending" && new Date(pairing.expiresAt).getTime() <= at) {
-      pairing.status = "expired" satisfies PairingStatus;
-    }
-  }
-}
-
-// Most recent terminal pairing requests retained for the operator's
-// recent-activity view; older terminal rows are pruned so a public create
-// endpoint can't grow durable state without bound (mirrors the events ring
-// buffer cap in src/state/audit.ts).
-const RETAINED_TERMINAL_PAIRING_REQUESTS = 50;
-// "approved" is deliberately NOT terminal: an approved request is still
-// claimable and cancellable, so it must never be pruned and must still expire.
-const TERMINAL_PAIRING_STATUSES = new Set<PairingRequestStatus>([
-  "rejected",
-  "cancelled",
-  "claimed",
-  "expired"
-]);
-
-// Lazily expire stale pairing requests, mirroring expirePairingCodes, then prune
-// terminal rows so the array stays bounded. Called at the top of every
-// pairing-request read/mutate. Both pending AND approved-but-unclaimed requests
-// expire once past their deadline — so a claim arriving after expiry sees
-// "expired", not a stale "approved".
-export function expirePairingRequests(state: RuntimeState): void {
-  const at = Date.now();
-  for (const request of state.pairingRequests) {
-    if (
-      (request.status === "pending" || request.status === "approved")
-      && new Date(request.expiresAt).getTime() <= at
-    ) {
-      request.status = "expired" satisfies PairingRequestStatus;
-      // Stamp the expiry moment unconditionally (not ??=) so an approved row that
-      // later expires sorts by its true expiry time in the retention prune below,
-      // not by its earlier approval timestamp — otherwise it could be evicted
-      // ahead of genuinely-older terminal rows and a claim would see 404 instead
-      // of an "expired"/not-approved state.
-      request.resolvedAt = now();
-    }
-  }
-  // Keep every non-terminal (pending) row plus the newest N terminal rows.
-  const pending = state.pairingRequests.filter((r) => !TERMINAL_PAIRING_STATUSES.has(r.status));
-  const terminal = state.pairingRequests
-    .filter((r) => TERMINAL_PAIRING_STATUSES.has(r.status))
-    .sort((a, b) => (b.resolvedAt ?? b.createdAt).localeCompare(a.resolvedAt ?? a.createdAt))
-    .slice(0, RETAINED_TERMINAL_PAIRING_REQUESTS);
-  if (terminal.length !== state.pairingRequests.length - pending.length) {
-    state.pairingRequests = [...pending, ...terminal];
-  }
-}
-
 // Pre-rename state files persisted a `lane` field on every record (top-level
 // state.lane plus a lane field on every Task/Audit/Memory/Skill/etc.). After
 // the lane→instance rename these files still exist on disk; we rewrite them
@@ -239,9 +217,6 @@ function migrateLaneFieldToInstance(state: RuntimeState): void {
     "jobs",
     "connectors",
     "improvements",
-    "pairingCodes",
-    "pairingRequests",
-    "devices",
     "promotions",
     "snapshots",
     "tools",
@@ -860,65 +835,6 @@ function archiveOrphanJobChannels(state: RuntimeState): void {
   }
 }
 
-// One-time heal for the stale-duplicate session pileup: before supersede-on-
-// re-pair existed, every re-pair of the same device minted a fresh session and
-// left the prior one "active" forever, so an operator's Active Sessions list
-// grew an entry per re-pair (same label, same relay origin). Collapse each
-// identity group (origin + clientId, or origin + derived name for rows with no
-// clientId; see pairedDeviceIdentityKey) down to the single most-recently-seen
-// ACTIVE session, revoking the older siblings.
-// Originless rows (legacy code-claimed mobile bearer devices) key to null and
-// are skipped — they are long-lived credentials, never supersession targets.
-// Revocation (not deletion) preserves the audit trail; the isListedSession UI
-// filter drops the revoked rows. Idempotent: once a group has one active
-// session, a re-run finds no second active sibling to revoke.
-function dedupeStaleDeviceSessions(state: RuntimeState): void {
-  if (!Array.isArray(state.devices) || state.devices.length === 0) return;
-  // Group active sessions by identity key, preserving array order.
-  const groups = new Map<string, RuntimeState["devices"]>();
-  for (const device of state.devices) {
-    if (device.status !== "active") continue;
-    const key = pairedDeviceIdentityKey(device);
-    if (key === null) continue;
-    const group = groups.get(key);
-    if (group) group.push(device);
-    else groups.set(key, [device]);
-  }
-  // Most-recent-activity timestamp for picking the survivor: lastSeenAt when
-  // present, else updatedAt, else createdAt. Higher wins.
-  const activityAt = (d: RuntimeState["devices"][number]): number =>
-    new Date(d.lastSeenAt ?? d.updatedAt ?? d.createdAt).getTime();
-  let revoked = 0;
-  for (const group of groups.values()) {
-    if (group.length < 2) continue;
-    // Keep the freshest; revoke the rest.
-    let survivor = group[0]!;
-    for (const candidate of group) {
-      if (activityAt(candidate) > activityAt(survivor)) survivor = candidate;
-    }
-    for (const device of group) {
-      if (device === survivor) continue;
-      device.status = "revoked";
-      device.updatedAt = now();
-      device.revokedAt = device.updatedAt;
-      revoked += 1;
-    }
-  }
-  if (revoked > 0) {
-    addAudit(
-      state,
-      {
-        actor: "runtime",
-        action: "device.superseded",
-        target: state.instance,
-        risk: "low",
-        evidence: { reason: "stale.duplicate.session.backfill", revoked }
-      },
-      { system: true }
-    );
-  }
-}
-
 // Backfill Task.chatSessionId from the chatMessages join for records that
 // pre-date the field. The Tasks page reads task.chatSessionId directly so it
 // no longer has to pull /state for the chatMessages list — but state files
@@ -1035,6 +951,60 @@ function migrateJobsToTopics(state: RuntimeState): void {
     );
   }
   dyn.migrations = { ...(dyn.migrations ?? {}), jobsToTopics: now() };
+}
+
+// Default `deliveryPolicy: "always"` on pre-existing jobs. "always" preserves
+// today's semantics exactly — including the [SILENT] sentinel suppression,
+// which is honored under every policy (jobs/finalize.ts). Marker-gated on
+// `state.migrations.jobsDeliveryPolicyDefaulted` so a job the user later
+// flips to another policy isn't reset on the next load.
+function migrateJobsDeliveryPolicyDefaulted(state: RuntimeState): void {
+  const dyn = state as unknown as {
+    migrations?: { jobsDeliveryPolicyDefaulted?: string };
+  };
+  if (dyn.migrations?.jobsDeliveryPolicyDefaulted) return;
+  for (const job of state.jobs) {
+    job.deliveryPolicy ??= "always";
+  }
+  dyn.migrations = { ...(dyn.migrations ?? {}), jobsDeliveryPolicyDefaulted: now() };
+}
+
+// Backfill `pinned: true` on existing non-archived Topics. The sidebar's
+// topics section moves from a kind-based filter (`kind === "topic"`) to a
+// pinned-based one (`pinned === true`) — without this one-time backfill,
+// every topic the user already relies on would vanish from the sidebar on
+// upgrade. Only legacy rows are pinned here: from this point on pinning is a
+// user gesture, and router/agent-minted containers stay unpinned.
+// Marker-gated on `state.migrations.topicsPinnedBackfilled` so it runs at
+// most ONCE per instance — re-running would re-pin containers the user has
+// since unpinned.
+function migrateTopicsPinned(state: RuntimeState): void {
+  const dyn = state as unknown as {
+    migrations?: { topicsPinnedBackfilled?: string };
+  };
+  if (dyn.migrations?.topicsPinnedBackfilled) return;
+  for (const session of state.chatSessions) {
+    if (session.kind === "topic" && !session.archivedAt) session.pinned = true;
+  }
+  dyn.migrations = { ...(dyn.migrations ?? {}), topicsPinnedBackfilled: now() };
+}
+
+// Seed `acknowledgedAt` on every pre-existing session so the first boot after
+// the home attention queue ships doesn't derive `done_unacknowledged` for
+// every historical container and flood home with stale rows. Sessions created
+// after this one-time pass start unacknowledged, so new outcomes surface
+// normally. Marker-gated on `state.migrations.containersAckSeeded` — a
+// re-run would wipe out real "this outcome is new" state by re-stamping.
+function migrateContainersAckSeeded(state: RuntimeState): void {
+  const dyn = state as unknown as {
+    migrations?: { containersAckSeeded?: string };
+  };
+  if (dyn.migrations?.containersAckSeeded) return;
+  const at = now();
+  for (const session of state.chatSessions) {
+    session.acknowledgedAt ??= at;
+  }
+  dyn.migrations = { ...(dyn.migrations ?? {}), containersAckSeeded: at };
 }
 
 // Stamp the active-at-migration-time agent onto records that pre-date the
@@ -1357,9 +1327,12 @@ export function normalizeState(instance: Instance, state: RuntimeState): Runtime
   state.audit ??= [];
   state.skills ??= [];
   state.jobs ??= [];
-  state.pairingCodes ??= [];
-  state.pairingRequests ??= [];
-  state.devices ??= [];
+  // The device-pairing subsystem is gone (auth is owner-token-only; see ADR
+  // owner-token-auth.md). Old state files still carry its collections — drop
+  // them on read so the next write sheds the legacy keys.
+  delete (state as unknown as Record<string, unknown>).pairingCodes;
+  delete (state as unknown as Record<string, unknown>).pairingRequests;
+  delete (state as unknown as Record<string, unknown>).devices;
   state.promotions ??= [];
   state.snapshots ??= [];
   state.tools ??= defaultTools(instance, now());
@@ -1528,15 +1501,19 @@ export function normalizeState(instance: Instance, state: RuntimeState): Runtime
   // channel-kind backfill above so a job pointed at a real kind:"agent" Chat is
   // unambiguously a legacy deliverTo:"chat" rebind result. Marker-gated.
   migrateJobsToTopics(state);
+  // Default deliveryPolicy on jobs that predate the field. Marker-gated.
+  migrateJobsDeliveryPolicyDefaulted(state);
   // Archive job channels orphaned by a pre-cleanup job deletion (issue #369).
   // Runs after the channel-kind backfill above so a legacy `origin:"job"`
   // session that just gained `kind:"channel"` is in scope, and after
   // `state.jobs` is defaulted so the surviving-job reference scan is safe.
   archiveOrphanJobChannels(state);
-  // Collapse the pre-existing stale-duplicate session pileup (one row per
-  // re-pair) now that supersede-on-re-pair prevents new ones. Runs after
-  // `state.devices` is defaulted above so the array is always present.
-  dedupeStaleDeviceSessions(state);
+  // Home attention-queue backfills (both marker-gated): pin legacy topics for
+  // the pinned-based sidebar, and seed acknowledgedAt so the first boot after
+  // upgrade doesn't flood home. Run after the session-shape backfills above
+  // so any session they minted or re-kinded is covered on the same first pass.
+  migrateTopicsPinned(state);
+  migrateContainersAckSeeded(state);
   for (const run of state.runs) {
     run.planStepIds ??= [];
     run.childRunIds ??= [];
@@ -1630,6 +1607,5 @@ export function normalizeState(instance: Instance, state: RuntimeState): Runtime
   // tunnel-connectivity.md). Backfill null so legacy state files and
   // hand-edited files alike present a consistent shape to consumers.
   state.tunnel ??= null;
-  expirePairingCodes(state);
   return state;
 }

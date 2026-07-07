@@ -74,9 +74,11 @@ export function BlockRenderer({
         <BlockAuthorizationRequested block={block} />
       );
     case "setup_requested":
+      // `agent` names the chat.choice question bubble (it renders as the
+      // agent speaking); the other setup cards ignore it.
       return block.forwardedFromTopicId ? (
         <div className="space-y-2">
-          <BlockSetupRequested block={block} />
+          <BlockSetupRequested block={block} agent={agent} />
           <div className="pl-[46px]">
             <TopicForwardChip
               topicId={block.forwardedFromTopicId}
@@ -85,7 +87,7 @@ export function BlockRenderer({
           </div>
         </div>
       ) : (
-        <BlockSetupRequested block={block} />
+        <BlockSetupRequested block={block} agent={agent} />
       );
     case "system_note":
       return <BlockSystemNote block={block} />;

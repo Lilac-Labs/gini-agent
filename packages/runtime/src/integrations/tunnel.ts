@@ -202,7 +202,7 @@ export async function defaultRunCommand(argv: string[], timeoutMs = 15_000): Pro
     killTimer = setTimeout(() => {
       proc.kill(9);
       bailTimer = setTimeout(() => bail.resolve(null), 500);
-    }, 2_000);
+    }, killEscalationMs());
   }, timeoutMs);
   const settled = await Promise.race([
     Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]),

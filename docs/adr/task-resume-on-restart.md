@@ -33,10 +33,37 @@ the pass only ever claims true orphans from the previous process. `bootStartedAt
 is captured at the top of boot, before any state work, precisely so it sits
 earlier than every timestamp this process will write.
 
-`waiting_approval` and all terminal statuses (`completed`, `failed`,
-`cancelled`) are NEVER touched. `waiting_approval` is a durable, legitimate park
-waiting on the user — not an orphan — so the common side-effect path (a
-side-effecting tool parked at an approval gate) is never re-run by a restart.
+Terminal statuses (`completed`, `failed`, `cancelled`) are NEVER touched. A
+park (`waiting_approval` / `needs_input`) with any PENDING gate is likewise
+never touched: it is a durable, legitimate pause waiting on the user — not an
+orphan — so the common side-effect path (a side-effecting tool parked at an
+approval gate) is never re-run by a restart.
+
+A park whose gates are ALL terminal is different: every gate resolution
+persists its outcome FIRST and resumes the chat-task loop through a DETACHED
+call second, so a process death in between leaves the task parked with
+nothing left to ever move it — /complete sees a non-pending row, a thread
+message finds no pending gate to answer. The reconcile passes these parked
+candidates (cutoff-guarded like orphans) to `resumeParkIfGatesSettled`
+(`packages/runtime/src/execution/safe-resume.ts`), the idempotent settled-park
+heal shared with the /complete replay and message-into-wedged-container entry
+points. It re-checks the wedge signature from durable state, synthesizes each
+settled gate's tool result from its persisted outcome (chat-choice answers
+rebuild the exact live strings from `connectOutcome`; an approved
+Authorization gets an honest interrupted marker because its side effect's
+real result died with the process), and kicks the standard detached
+`resumeChatTask` — never `dispatch`, which would replay the turn from the
+user message instead of continuing from the park. The approved-Authorization
+hedge consults `state.audit` for the approvalId-stamped side-effect row
+written at execution time: row present → executed, do NOT re-run (with the
+row's evidence quoted); absent → the honest hedge. The approve endpoint
+responding at decision-durability (execution detached) WIDENS the
+durable-but-not-executed window this branch covers, but the proof semantics
+are unchanged — the execution audit row is still written only at execution
+time. Double kicks are safe: the
+park→running flip inside `resumeChatTask` is the claim, so exactly one
+concurrent resumer re-enters the loop, and a live in-process resume declines
+the heal via an in-flight registry.
 
 ## Resume vs. fail
 
@@ -102,3 +129,8 @@ separate, larger reliability concern and is future work, not solved here.
   `waiting_approval` and terminal tasks untouched; a `running` chat task with
   `updatedAt >= cutoffIso` untouched (race guard); subagent and imperative
   orphans fail without dispatch; a chat orphan at the cap fails without dispatch.
+- `packages/runtime/src/execution/chat-needs-input.test.ts` ("wedged park
+  recovery") covers the settled-park heal: both park flavors resume at boot
+  (needs_input with a completed chat.choice gate; waiting_approval with an
+  approved Authorization), a park with a PENDING gate stays untouched, and
+  the /complete-replay and message entry points kick the same heal.

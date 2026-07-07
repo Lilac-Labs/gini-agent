@@ -1,7 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/PageHeader";
 import { api } from "@/lib/api";
 import { useInvalidate, useStatus } from "@/lib/queries";
@@ -12,7 +14,6 @@ import type { AgentRow } from "@/lib/view-types";
 import { ToolsetsCard, type ToolsetRow } from "./_components/ToolsetsCard";
 import { McpCard, type McpRow } from "./_components/McpCard";
 import { MessagingCard, type MessagingRow } from "./_components/MessagingCard";
-import { DevicesCard, type DeviceRow } from "./_components/DevicesCard";
 import { BrowserSettingsCard } from "./_components/BrowserSettingsCard";
 
 export default function SettingsPage() {
@@ -45,11 +46,6 @@ export default function SettingsPage() {
     queryKey: ["messaging"],
     queryFn: () => api<MessagingRow[]>("/messaging")
   });
-  const devices = useQuery({
-    queryKey: ["devices"],
-    queryFn: () => api<DeviceRow[]>("/devices")
-  });
-
   const toolsetToggle = useMutation({
     mutationFn: ({ id, op }: { id: string; op: "enable" | "disable" }) =>
       api(`/toolsets/${encodeURIComponent(id)}/${op}`, { method: "POST" }),
@@ -81,18 +77,6 @@ export default function SettingsPage() {
     onError: (error: Error) => toast.error(error.message)
   });
 
-  const deviceRevoke = useMutation({
-    mutationFn: (id: string) => api(`/devices/${encodeURIComponent(id)}/revoke`, { method: "POST" }),
-    onSuccess: () => { toast.success("Device revoked"); invalidate(["devices", "state"]); },
-    onError: (error: Error) => toast.error(error.message)
-  });
-
-  const createPairing = useMutation({
-    mutationFn: () => api<{ code: string; expiresAt: string }>("/pairing", { method: "POST", body: JSON.stringify({ ttlSeconds: 600 }) }),
-    onSuccess: (result) => toast.success(`Pairing code: ${result.code} (expires ${new Date(result.expiresAt).toLocaleTimeString()})`),
-    onError: (error: Error) => toast.error(error.message)
-  });
-
   // The INSTANCE provider (config.provider) — the transport behind the
   // default model and the fallback for override-less agents. The provider
   // rows use it to gate removal and prefill the Edit dialog; model
@@ -107,7 +91,15 @@ export default function SettingsPage() {
 
   return (
     <>
-      <PageHeader title="Settings" description="Providers, browser, toolsets, integrations, devices" />
+      <PageHeader
+        title="Settings"
+        description="Providers, browser, toolsets, integrations"
+        actions={
+          <Button asChild variant="ghost" size="sm" className="text-muted-foreground">
+            <Link href="/overview">Overview</Link>
+          </Button>
+        }
+      />
       <div className="flex-1 space-y-4 overflow-auto p-6">
         <DefaultModelControl />
 
@@ -142,14 +134,6 @@ export default function SettingsPage() {
           removePending={messagingRemove.isPending}
           onHealth={(id) => messagingHealth.mutate(id)}
           onRemove={(id) => messagingRemove.mutate(id)}
-        />
-
-        <DevicesCard
-          devices={devices.data ?? []}
-          revokePending={deviceRevoke.isPending}
-          createPending={createPairing.isPending}
-          onRevoke={(id) => deviceRevoke.mutate(id)}
-          onCreatePairing={() => createPairing.mutate()}
         />
       </div>
     </>

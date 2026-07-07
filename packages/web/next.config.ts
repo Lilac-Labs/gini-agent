@@ -30,6 +30,14 @@ const nextConfig: NextConfig = {
   // tunnel (the browser's Origin is the relay subdomain even though the gateway
   // forwards a loopback Host). Dev-only; not a trust grant.
   allowedDevOrigins: ["127.0.0.1", "localhost", `*.${relayDomain}`],
+  logging: {
+    // The Google login callback carries a single-use OAuth authorization code
+    // in its query string; keep it out of the dev access log (production
+    // `next start` logs no incoming requests, so this is dev-only hygiene).
+    incomingRequests: {
+      ignore: [/\/api\/runtime\/google\/login\/callback/]
+    }
+  },
   turbopack: {
     // The workspace root, not this package dir. Bun's isolated installs
     // symlink packages/web/node_modules entries into the root

@@ -72,6 +72,26 @@ export function subagentDepth(state: RuntimeState, taskId: string | undefined): 
 
 export const MAX_SUBAGENT_DEPTH = 3;
 
+// Walk the parentChatSessionId chain up from `sessionId` and return the
+// number of container ancestors. The root Chat (`kind:"agent"`) has depth 0;
+// a topic under it depth 1; a spawned child container under that depth 2.
+// spawn_task enforces MAX_SUBAGENT_DEPTH against this walk IN ADDITION to
+// subagentDepth: each spawned child's follow-up runs start with a fresh
+// task chain (no subagentId ancestry), so the task-chain walk alone could
+// not cap container nesting.
+export function containerChainDepth(state: RuntimeState, sessionId: string | undefined): number {
+  let depth = 0;
+  let cursor = sessionId;
+  // Cap the walk to avoid infinite loops if data is corrupted.
+  for (let i = 0; i < 32 && cursor; i += 1) {
+    const session = state.chatSessions.find((s) => s.id === cursor);
+    if (!session?.parentChatSessionId) break;
+    depth += 1;
+    cursor = session.parentChatSessionId;
+  }
+  return depth;
+}
+
 // Public spawner. Accepts an `input` bag (HTTP body / tool-call args).
 // Returns the SubagentRecord (status "running" once the child task is
 // submitted; legacy callers don't await completion).

@@ -1743,6 +1743,224 @@ describe("runWatches — multi-watch (one shared job)", () => {
     expect(r.state.triage!.cursor).toBe("3000");
   });
 
+  // A `threads get format=metadata` response (thread mode's poll shape) for the
+  // specificity-order tests below, where a thread watch runs alongside
+  // query-listing watches in one tick.
+  function threadDocResponse(threadId: string, metas: Meta[]): string {
+    return (
+      PREAMBLE +
+      JSON.stringify({
+        id: threadId,
+        messages: metas.map((m) => ({
+          id: m.id,
+          threadId,
+          internalDate: m.internalDate,
+          snippet: m.snippet ?? "",
+          payload: {
+            headers: [
+              { name: "From", value: m.from ?? "" },
+              { name: "Subject", value: m.subject ?? "" },
+              { name: "Date", value: m.date ?? "" }
+            ]
+          }
+        }))
+      })
+    );
+  }
+
+  test("a thread watch beats a sender watch on the same message (one owner per tick)", async () => {
+    // Alice posts m1 INSIDE watched thread t-1, and alice is ALSO sender-watched.
+    // The thread watch is MORE specific, so it claims m1 even though the sender
+    // watch comes first in the watches list; the sender watch is stripped of its
+    // only match — it opens no bucket and drafts nothing, but its cursor still
+    // advances over what it consumed.
+    const spawn: GwsSpawn = async (args) => {
+      const joined = args.join(" ");
+      if (joined.includes("auth status")) return PREAMBLE + '{"token_valid":true}';
+      if (joined.includes("getProfile")) return PREAMBLE + '{"emailAddress":"me@example.com"}';
+      if (joined.includes("threads get")) {
+        return threadDocResponse("t-1", [
+          { id: "m0", internalDate: "1000", from: "me@example.com", subject: "opened" },
+          { id: "m1", internalDate: "3000", from: "Alice <alice@x.com>", subject: "re: case" }
+        ]);
+      }
+      if (joined.includes("messages list")) return listResponse(["m1"]);
+      if (joined.includes("messages get")) {
+        return getArgId(joined) === "m1"
+          ? metadataResponse({ id: "m1", internalDate: "3000", from: "Alice <alice@x.com>", subject: "re: case" })
+          : PREAMBLE + "{}";
+      }
+      return PREAMBLE + "{}";
+    };
+    const r = await runWatches(
+      {
+        // Sender watch FIRST in the list — the specificity sort, not list order,
+        // must decide the owner.
+        watches: [
+          { watcherId: "w-alice", routeKey: "w-alice", query: "from:alice@x.com", sender: "alice@x.com" },
+          { watcherId: "w-thread", routeKey: "w-thread", query: "thread:t-1", threadId: "t-1" }
+        ],
+        state: { "w-alice": { cursor: "1000", seen: [] }, "w-thread": { cursor: "1000", seen: ["m0"] } }
+      },
+      spawn
+    );
+    expect(r.kind).toBe("context");
+    expect(draftedIds(r.buckets!["w-thread"])).toEqual(["m1"]);
+    // The losing sender watch opens no bucket at all.
+    expect(r.buckets!["w-alice"]).toBeUndefined();
+    expect(Object.keys(r.buckets!)).toEqual(["w-thread"]);
+    // ...but still commits its advanced cursor, so it won't re-list m1.
+    expect(r.state["w-alice"]!.cursor).toBe("3000");
+    expect(r.state["w-alice"]!.status).toBe("ok");
+  });
+
+  test("a sender watch losing a thread-claimed id still drafts the same sender's mail outside the thread", async () => {
+    // Alice posts m1 inside watched thread t-1 AND m2 in a fresh thread on the
+    // SAME tick. The thread watch owns m1; the sender watch keeps m2.
+    const spawn: GwsSpawn = async (args) => {
+      const joined = args.join(" ");
+      if (joined.includes("auth status")) return PREAMBLE + '{"token_valid":true}';
+      if (joined.includes("getProfile")) return PREAMBLE + '{"emailAddress":"me@example.com"}';
+      if (joined.includes("threads get")) {
+        return threadDocResponse("t-1", [
+          { id: "m0", internalDate: "1000", from: "me@example.com", subject: "opened" },
+          { id: "m1", internalDate: "3000", from: "Alice <alice@x.com>", subject: "re: case" }
+        ]);
+      }
+      if (joined.includes("messages list")) return listResponse(["m2", "m1"]);
+      if (joined.includes("messages get")) {
+        const hit = getArgId(joined);
+        const byId: Record<string, Meta> = {
+          m1: { id: "m1", internalDate: "3000", from: "Alice <alice@x.com>", subject: "re: case" },
+          m2: { id: "m2", internalDate: "4000", from: "Alice <alice@x.com>", subject: "new topic" }
+        };
+        return hit && byId[hit] ? metadataResponse(byId[hit]) : PREAMBLE + "{}";
+      }
+      return PREAMBLE + "{}";
+    };
+    const r = await runWatches(
+      {
+        watches: [
+          { watcherId: "w-alice", routeKey: "w-alice", query: "from:alice@x.com", sender: "alice@x.com" },
+          { watcherId: "w-thread", routeKey: "w-thread", query: "thread:t-1", threadId: "t-1" }
+        ],
+        state: { "w-alice": { cursor: "1000", seen: [] }, "w-thread": { cursor: "1000", seen: ["m0"] } }
+      },
+      spawn
+    );
+    expect(r.kind).toBe("context");
+    expect(draftedIds(r.buckets!["w-thread"])).toEqual(["m1"]);
+    // The sender watch loses m1 to the thread watch but keeps its own m2.
+    expect(draftedIds(r.buckets!["w-alice"])).toEqual(["m2"]);
+    expect(r.state["w-alice"]!.cursor).toBe("4000");
+  });
+
+  test("a sender watch beats a plain query watch on the same message", async () => {
+    // m1 (from alice) matches BOTH a user query watch (label:receipts) and the
+    // alice sender watch. The sender watch is more specific, so it owns m1 even
+    // though the query watch comes first in the watches list; the stripped query
+    // watch opens no bucket but its cursor still advances.
+    const spawn: GwsSpawn = async (args) => {
+      const joined = args.join(" ");
+      if (joined.includes("auth status")) return PREAMBLE + '{"token_valid":true}';
+      if (joined.includes("getProfile")) return PREAMBLE + '{"emailAddress":"me@example.com"}';
+      if (joined.includes("messages list")) return listResponse(["m1"]);
+      if (joined.includes("messages get")) {
+        return getArgId(joined) === "m1"
+          ? metadataResponse({ id: "m1", internalDate: "3000", from: "Alice <alice@x.com>", subject: "receipt" })
+          : PREAMBLE + "{}";
+      }
+      return PREAMBLE + "{}";
+    };
+    const r = await runWatches(
+      {
+        watches: [
+          { watcherId: "w-q", routeKey: "w-q", query: "label:receipts" },
+          { watcherId: "w-alice", routeKey: "w-alice", query: "from:alice@x.com", sender: "alice@x.com" }
+        ],
+        state: { "w-q": { cursor: "1000", seen: [] }, "w-alice": { cursor: "1000", seen: [] } }
+      },
+      spawn
+    );
+    expect(r.kind).toBe("context");
+    expect(draftedIds(r.buckets!["w-alice"])).toEqual(["m1"]);
+    expect(r.buckets!["w-q"]).toBeUndefined();
+    expect(Object.keys(r.buckets!)).toEqual(["w-alice"]);
+    expect(r.state["w-q"]!.cursor).toBe("3000");
+  });
+
+  test("a plain query watch beats the synthetic triage concern on the same message", async () => {
+    // m1 matches a user query watch AND the broad triage concern; the user watch
+    // owns it (triage is the least specific tier) regardless of list order.
+    // Triage keeps only its unclaimed remainder m2.
+    const spawn: GwsSpawn = async (args) => {
+      const joined = args.join(" ");
+      if (joined.includes("auth status")) return PREAMBLE + '{"token_valid":true}';
+      if (joined.includes("getProfile")) return PREAMBLE + '{"emailAddress":"me@example.com"}';
+      if (joined.includes("messages list")) {
+        const q = joined.match(/"q":"([^"]*)"/)?.[1]?.replace(/ after:\d+$/, "") ?? "";
+        if (q.startsWith("subject:invoice")) return listResponse(["m1"]);
+        return listResponse(["m2", "m1"]); // in:inbox lists both, newest-first
+      }
+      if (joined.includes("messages get")) {
+        const hit = getArgId(joined);
+        const byId: Record<string, Meta> = {
+          m1: { id: "m1", internalDate: "3000", from: "Alice <alice@x.com>", subject: "invoice 42" },
+          m2: { id: "m2", internalDate: "4000", from: "Carol <carol@x.com>", subject: "random" }
+        };
+        return hit && byId[hit] ? metadataResponse(byId[hit]) : PREAMBLE + "{}";
+      }
+      return PREAMBLE + "{}";
+    };
+    const r = await runWatches(
+      {
+        // Triage FIRST in the list — the tier sort must still run it LAST.
+        watches: [
+          { watcherId: "w-triage", routeKey: "triage", query: "in:inbox" },
+          { watcherId: "w-q", routeKey: "w-q", query: "subject:invoice" }
+        ],
+        state: { "w-q": { cursor: "1000", seen: [] }, triage: { cursor: "1000", seen: [] } }
+      },
+      spawn
+    );
+    expect(r.kind).toBe("context");
+    expect(draftedIds(r.buckets!["w-q"])).toEqual(["m1"]);
+    expect(draftedIds(r.buckets!["triage"])).toEqual(["m2"]);
+    expect(r.state.triage!.cursor).toBe("4000");
+  });
+
+  test("within a tier, the first-created watch wins the claim (stable list order)", async () => {
+    // Two same-tier query watches both match m1. The watches list carries
+    // creation order, and the stable tier sort preserves it — so the FIRST watch
+    // owns m1 and the second is stripped (no bucket, cursor still advances).
+    const spawn: GwsSpawn = async (args) => {
+      const joined = args.join(" ");
+      if (joined.includes("auth status")) return PREAMBLE + '{"token_valid":true}';
+      if (joined.includes("getProfile")) return PREAMBLE + '{"emailAddress":"me@example.com"}';
+      if (joined.includes("messages list")) return listResponse(["m1"]);
+      if (joined.includes("messages get")) {
+        return getArgId(joined) === "m1"
+          ? metadataResponse({ id: "m1", internalDate: "3000", from: "Alice <alice@x.com>", subject: "invoice 42" })
+          : PREAMBLE + "{}";
+      }
+      return PREAMBLE + "{}";
+    };
+    const r = await runWatches(
+      {
+        watches: [
+          { watcherId: "w-q1", routeKey: "w-q1", query: "subject:invoice" },
+          { watcherId: "w-q2", routeKey: "w-q2", query: "label:receipts" }
+        ],
+        state: { "w-q1": { cursor: "1000", seen: [] }, "w-q2": { cursor: "1000", seen: [] } }
+      },
+      spawn
+    );
+    expect(r.kind).toBe("context");
+    expect(draftedIds(r.buckets!["w-q1"])).toEqual(["m1"]);
+    expect(r.buckets!["w-q2"]).toBeUndefined();
+    expect(r.state["w-q2"]!.cursor).toBe("3000");
+  });
+
   test("per-bucket state round-trips by routeKey for the generic commit", async () => {
     // The returned state is keyed by routeKey at the TOP level (NOT nested under
     // byWatcher), so the generic persistFanOutState can merge ONLY the dispatched

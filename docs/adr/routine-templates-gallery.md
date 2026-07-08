@@ -30,25 +30,33 @@ Two callers share the catalog:
 
 | Endpoint | Behavior |
 | --- | --- |
-| `GET /api/routines/templates` | The catalog joined with installed state — the live job carrying each `templateId`, scoped by `?agentId=` like `GET /api/jobs`. |
+| `GET /api/routines/templates` | The catalog joined with installed state — the live job carrying each `templateId`, scoped by `?agentId=` like `GET /api/jobs`. `installed.options` carries the job's persisted `templateOptions` (absent on templates without options and on jobs predating the field). |
 | `POST /api/routines/templates/<id>/install` | Body `{ timezone?, options? }`. Missing option keys fall back to the template defaults; timezone precedence is payload > onboarding record > UTC. Idempotent per-template replace scoped to the active agent: skills are pre-validated (`assertSkillNamesResolve`, a clean 400 with zero side effects), then the owning agent's job with this `templateId` is deleted and one fresh job created via `createScheduledJob` — the same call `POST /api/jobs` makes. The owning agent is resolved server-side (never caller-supplied), the same way `createScheduledJob` stamps `agentId`. Returns the `JobRecord`. |
 | `DELETE /api/routines/templates/<id>` | Removes the active agent's installed job(s) with this `templateId` (same server-side agent resolution as install); 404 when that agent has none. |
 
 Installed jobs link back to their template through an optional
 `JobRecord.templateId`, stamped by `buildSpec` on both the gallery and
 onboarding paths and threaded through `createScheduledJob` like any other
-create-payload field. The field is optional, so no state migration; ordinary
-jobs never carry it. A selection that yields no behavior (an Auto-inbox with
+create-payload field. Templates with options also stamp the resolved option
+state as `JobRecord.templateOptions` (defaults merged with the caller's
+overrides) so the detail page's Settings view can render the installed
+selection. Both fields are optional, so no state migration; ordinary jobs
+never carry them. A selection that yields no behavior (an Auto-inbox with
 every sub-option off) builds no spec — the onboarding path skips it, the
 install endpoint rejects it with a 400.
 
-The web page (`packages/web/src/app/routines/page.tsx`, linked from the
-sidebar) renders a card per template — icon, name, description, sub-option
-checkboxes that drive the install payload, schedule hint — and flips to an
-installed state (badge, link to the job in /jobs, Remove) off the GET's
-`installed` join. Errors surface as toasts; the install endpoint's
-skill-resolve 400 is the connector-readiness signal (no pre-flight on the
-card).
+The web gallery (`packages/web/src/app/routines/page.tsx`, linked from the
+sidebar) renders a card per template — icon, name, description — with a
+one-click Add that installs the catalog defaults, split into My routines
+(installed) and Explore (catalog) views off the GET's `installed` join. An
+installed card opens the detail page
+(`packages/web/src/app/routines/[templateId]/page.tsx`): pause/resume and
+Run Now proxy the job endpoints (`POST /api/jobs/<id>/{pause,resume,run}`),
+Recent sessions lists the job's run history, Settings edits the template
+options and saves by re-installing (the idempotent per-template replace —
+the jobId changes), and Delete routine uninstalls. Errors surface as toasts;
+the install endpoint's skill-resolve 400 is the connector-readiness signal
+(no pre-flight on the card).
 
 ## Consequences
 

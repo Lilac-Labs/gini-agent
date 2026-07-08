@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { CalendarCheckIcon, CheckIcon, InboxIcon, MoreHorizontalIcon, SunriseIcon, type LucideIcon } from "lucide-react";
+import { CheckIcon, MoreHorizontalIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,21 +20,10 @@ import {
   useUninstallRoutineTemplate,
   type RoutineTemplateView
 } from "@/lib/queries";
-
-// Icon-key → presentation mapping for the catalog's `icon` hints. Chip colors
-// come from the GiniRoutines design handoff (Auto-inbox blue, Morning Briefing
-// gold, Meeting Briefing green); unknown keys fall back to the inbox treatment.
-const CHIPS: Record<string, { icon: LucideIcon; bg: string }> = {
-  inbox: { icon: InboxIcon, bg: "bg-[#4277FB]" },
-  sunrise: { icon: SunriseIcon, bg: "bg-[#E8A317]" },
-  "calendar-check": { icon: CalendarCheckIcon, bg: "bg-[#1FA463]" }
-};
-
-function chipFor(template: RoutineTemplateView) {
-  return CHIPS[template.icon] ?? CHIPS.inbox!;
-}
+import { chipFor } from "./chips";
 
 export default function RoutinesPage() {
+  const router = useRouter();
   const templates = useRoutineTemplates();
   const install = useInstallRoutineTemplate();
   const uninstall = useUninstallRoutineTemplate();
@@ -96,14 +86,18 @@ export default function RoutinesPage() {
             ) : (
               <div className="mt-[18px] grid gap-[18px] md:grid-cols-2 xl:grid-cols-3">
                 {mine.map((template) => {
-                  const { icon: Icon, bg } = chipFor(template);
+                  const { icon: Icon, color } = chipFor(template.icon);
                   return (
                     <div
                       key={template.id}
-                      className="flex min-h-[150px] flex-col gap-3.5 rounded-xl border border-border bg-card p-5 transition-colors hover:border-foreground/20"
+                      onClick={() => router.push(`/routines/${encodeURIComponent(template.id)}`)}
+                      className="flex min-h-[150px] cursor-pointer flex-col gap-3.5 rounded-xl border border-border bg-card p-5 transition-colors hover:border-foreground/20"
                     >
                       <div className="flex items-start justify-between gap-3">
-                        <span className={cn("flex size-10 shrink-0 items-center justify-center rounded-[11px]", bg)}>
+                        <span
+                          className="flex size-10 shrink-0 items-center justify-center rounded-[11px]"
+                          style={{ backgroundColor: color }}
+                        >
                           <Icon className="size-5 text-white" aria-hidden />
                         </span>
                         <DropdownMenu>
@@ -111,6 +105,9 @@ export default function RoutinesPage() {
                             <button
                               type="button"
                               aria-label={`${template.name} options`}
+                              // Keep the menu from also triggering the card's
+                              // navigate-to-detail click.
+                              onClick={(event) => event.stopPropagation()}
                               className="flex size-[26px] shrink-0 items-center justify-center rounded-[7px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                             >
                               <MoreHorizontalIcon className="size-[18px]" aria-hidden />
@@ -146,14 +143,17 @@ export default function RoutinesPage() {
             </div>
             <div className="mt-[18px] grid gap-[18px] md:grid-cols-2 xl:grid-cols-3">
               {all.map((template) => {
-                const { icon: Icon, bg } = chipFor(template);
+                const { icon: Icon, color } = chipFor(template.icon);
                 return (
                   <div
                     key={template.id}
                     className="flex min-h-[118px] flex-col gap-3 rounded-xl border border-border bg-card p-[18px]"
                   >
                     <div className="flex items-start justify-between gap-3">
-                      <span className={cn("flex size-9 shrink-0 items-center justify-center rounded-[10px]", bg)}>
+                      <span
+                        className="flex size-9 shrink-0 items-center justify-center rounded-[10px]"
+                        style={{ backgroundColor: color }}
+                      >
                         <Icon className="size-[18px] text-white" aria-hidden />
                       </span>
                       {template.installed ? (

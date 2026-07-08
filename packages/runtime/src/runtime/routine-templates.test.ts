@@ -9,11 +9,14 @@
 //     replace, timezone precedence (payload > onboarding record > UTC),
 //     skill-resolve 400 with zero side effects, payload validation, unknown
 //     template → 404
+//   - install persists the resolved options (defaults merged with overrides)
+//     as templateOptions, and GET exposes them as installed.options
 //   - uninstall: removes the installed job, 404 when nothing is installed
 //   - install/uninstall are agent-scoped: one agent's install never touches
 //     another agent's job for the same template
-//   - the onboarding routines path stamps the same templateIds, and its
-//     replace pass reconciles gallery installs (one live job per template)
+//   - the onboarding routines path stamps the same templateIds (and
+//     templateOptions), and its replace pass reconciles gallery installs
+//     (one live job per template)
 //
 // Hermetic: HOME + GINI_STATE_ROOT point at a per-test scratch dir so
 // instance state never touches the developer machine; the provider is the
@@ -186,6 +189,56 @@ describe("routine templates", () => {
     expect(second.prompt).not.toContain("- Label new mail");
     const jobs = readState(config.instance).jobs.filter((j) => j.templateId === "auto-inbox");
     expect(jobs.map((j) => j.id)).toEqual([second.id]);
+  });
+
+  test("install persists the resolved options and GET exposes them as installed.options", async () => {
+    const config = testConfig(root, "templates-options");
+    const handler = createHandler(config);
+    await seedWorkspaceSkills(handler, config);
+
+    // Options omitted → the template defaults, persisted in full.
+    const first = await call(handler, config, "/api/routines/templates/auto-inbox/install", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    expect(first.templateOptions).toEqual({
+      labelNewMail: true,
+      archiveUnimportant: false,
+      assistScheduling: true,
+      draftReplies: true
+    });
+
+    // Partial overrides merge over the defaults before persisting.
+    const second = await call(handler, config, "/api/routines/templates/auto-inbox/install", {
+      method: "POST",
+      body: JSON.stringify({ options: { archiveUnimportant: true, draftReplies: false } })
+    });
+    expect(second.templateOptions).toEqual({
+      labelNewMail: true,
+      archiveUnimportant: true,
+      assistScheduling: true,
+      draftReplies: false
+    });
+
+    const listed = await call(handler, config, "/api/routines/templates");
+    const autoInbox = listed.templates.find((t: { id: string }) => t.id === "auto-inbox");
+    expect(autoInbox.installed).toEqual({
+      jobId: second.id,
+      status: "active",
+      options: {
+        labelNewMail: true,
+        archiveUnimportant: true,
+        assistScheduling: true,
+        draftReplies: false
+      }
+    });
+
+    // A template without options carries no templateOptions at all.
+    const meeting = await call(handler, config, "/api/routines/templates/meeting-briefing/install", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    expect(meeting.templateOptions).toBeUndefined();
   });
 
   test("install timezone precedence: payload > onboarding record > UTC", async () => {
@@ -392,6 +445,19 @@ describe("routine templates", () => {
       "meeting-briefing",
       "morning-briefing"
     ]);
+
+    // The onboarding path persists the toggle state as templateOptions too.
+    const jobsByTemplate = new Map(applied.jobs.map((j: { templateId?: string }) => [j.templateId, j]));
+    expect((jobsByTemplate.get("auto-inbox") as { templateOptions?: unknown }).templateOptions).toEqual({
+      labelNewMail: true,
+      archiveUnimportant: false,
+      assistScheduling: true,
+      draftReplies: true
+    });
+    expect((jobsByTemplate.get("morning-briefing") as { templateOptions?: unknown }).templateOptions).toEqual({
+      personalizedNews: true
+    });
+    expect((jobsByTemplate.get("meeting-briefing") as { templateOptions?: unknown }).templateOptions).toBeUndefined();
 
     // The gallery reflects onboarding-created installs.
     const listed = await call(handler, config, "/api/routines/templates");

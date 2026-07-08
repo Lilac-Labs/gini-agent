@@ -408,6 +408,22 @@ export async function createScheduledJob(
     }
     templateId = input.templateId;
   }
+  // Resolved routine-template options (JobRecord.templateOptions): the
+  // option state buildSpec composed the spec from, stamped next to
+  // templateId so the gallery's Settings view can render the installed
+  // selection.
+  let templateOptions: Record<string, boolean> | undefined;
+  if (input.templateOptions !== undefined && input.templateOptions !== null) {
+    if (typeof input.templateOptions !== "object" || Array.isArray(input.templateOptions)) {
+      throw new Error("Invalid input: templateOptions must be an object of booleans");
+    }
+    for (const [key, value] of Object.entries(input.templateOptions as Record<string, unknown>)) {
+      if (typeof value !== "boolean") {
+        throw new Error(`Invalid input: templateOptions.${key} must be a boolean (got ${String(value)})`);
+      }
+    }
+    templateOptions = { ...(input.templateOptions as Record<string, boolean>) };
+  }
   // A parent task that has already transitioned terminal must not
   // create a durable scheduled job. Without this, a `cancelTask`
   // queued between the dispatcher's lock-free pre-check and our
@@ -511,6 +527,7 @@ export async function createScheduledJob(
       context: Array.isArray(input.context) ? input.context.map(String) : [],
       skillNames,
       templateId,
+      templateOptions,
       retryLimit,
       timeoutSeconds,
       costBudget: typeof input.costBudget === "number" ? input.costBudget : undefined,

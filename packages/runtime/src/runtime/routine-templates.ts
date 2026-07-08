@@ -38,9 +38,11 @@ export interface RoutineTemplate {
   scheduleHint: string;
   options: RoutineTemplateOption[];
   // Compose the createScheduledJob payload for the given option state.
-  // Returns undefined when the selection yields no behavior at all (an
-  // Auto-inbox with every sub-option off), mirroring the onboarding rule
-  // that such a selection creates no job.
+  // Templates with options stamp the resolved state as `templateOptions`
+  // (next to `templateId`) so the installed job records the selection it
+  // was built from. Returns undefined when the selection yields no behavior
+  // at all (an Auto-inbox with every sub-option off), mirroring the
+  // onboarding rule that such a selection creates no job.
   buildSpec(options: Record<string, boolean>, timezone: string): Record<string, unknown> | undefined;
 }
 
@@ -79,6 +81,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
       return {
         name: "Auto-inbox",
         templateId: "auto-inbox",
+        templateOptions: { ...options },
         cronExpression: "*/30 * * * *",
         cronTimezone: timezone,
         skillNames: options.assistScheduling ? ["google-gmail", "google-calendar"] : ["google-gmail"],
@@ -100,6 +103,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     buildSpec: (options, timezone) => ({
       name: "Morning Briefing",
       templateId: "morning-briefing",
+      templateOptions: { ...options },
       cronExpression: "0 8 * * *",
       cronTimezone: timezone,
       skillNames: ["google-gmail", "google-calendar"],
@@ -138,7 +142,9 @@ export function routineTemplate(id: string): RoutineTemplate | undefined {
 
 // The gallery's wire shape: the template presentation fields plus the live
 // installed state — the job carrying this templateId (scoped to `agentId`
-// when supplied, like GET /api/jobs).
+// when supplied, like GET /api/jobs). `installed.options` is the resolved
+// option state the job was installed with (absent on templates without
+// options and on jobs predating templateOptions).
 export interface RoutineTemplateView {
   id: string;
   name: string;
@@ -146,7 +152,7 @@ export interface RoutineTemplateView {
   icon: string;
   scheduleHint: string;
   options: RoutineTemplateOption[];
-  installed: { jobId: string; status: JobStatus } | null;
+  installed: { jobId: string; status: JobStatus; options?: Record<string, boolean> } | null;
 }
 
 // GET /api/routines/templates
@@ -162,7 +168,7 @@ export function listRoutineTemplates(config: RuntimeConfig, agentId?: string): {
         icon: template.icon,
         scheduleHint: template.scheduleHint,
         options: template.options,
-        installed: job ? { jobId: job.id, status: job.status } : null
+        installed: job ? { jobId: job.id, status: job.status, options: job.templateOptions } : null
       };
     })
   };

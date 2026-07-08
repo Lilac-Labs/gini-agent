@@ -2053,6 +2053,12 @@ export interface JobRecord {
   // per-template replace/remove on it. Optional — ordinary jobs carry no
   // templateId, so no state migration. See ADR routine-templates-gallery.md.
   templateId?: string;
+  // Resolved option state the template was installed with (template defaults
+  // merged with the caller's overrides), stamped by the catalog's buildSpec
+  // alongside templateId so the gallery's Settings view can render the
+  // current selection. Absent on ordinary jobs and on templates without
+  // options; optional, so no state migration.
+  templateOptions?: Record<string, boolean>;
   retryLimit: number;
   timeoutSeconds: number;
   costBudget?: number;

@@ -486,7 +486,9 @@ export interface RoutineTemplateView {
   icon: string;
   scheduleHint: string;
   options: RoutineTemplateOption[];
-  installed: { jobId: string; status: JobRecord["status"] } | null;
+  // `options` is the resolved option state the job was installed with —
+  // absent on templates without options and on jobs predating it.
+  installed: { jobId: string; status: JobRecord["status"]; options?: Record<string, boolean> } | null;
 }
 
 // GET /api/routines/templates — the catalog joined with installed state,

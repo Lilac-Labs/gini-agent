@@ -13,8 +13,10 @@
 //     routineJobSpecs maps its POST body onto the same buildSpec calls
 //
 // Validation errors throw with the "Invalid input:" prefix the gateway maps
-// to a 400; an unknown template id throws "Routine template not found" (404).
+// to a 400; an unknown template id — and an uninstall when the owning agent
+// has nothing installed — throws "Routine template not found" (404).
 
+import { resolveEffectiveContext } from "../execution/effective-context";
 import { assertSkillNamesResolve, createScheduledJob, removeJob } from "../jobs";
 import { readState } from "../state";
 import { readOnboarding } from "../state/onboarding";
@@ -168,10 +170,14 @@ export function listRoutineTemplates(config: RuntimeConfig, agentId?: string): {
 
 // POST /api/routines/templates/<id>/install body: { timezone?, options? }.
 // Missing option keys fall back to the template defaults. Idempotent
-// per-template replace: any job already carrying this templateId is deleted,
-// then one fresh job is created — the same createScheduledJob call POST
-// /api/jobs makes. Skills are pre-validated so a disabled Workspace skill
-// surfaces as a clean 400 with zero side effects (nothing deleted).
+// per-template replace: any job the OWNING AGENT already has carrying this
+// templateId is deleted, then one fresh job is created — the same
+// createScheduledJob call POST /api/jobs makes. The owning agent is resolved
+// server-side (never caller-supplied), exactly as createScheduledJob stamps
+// the new job's agentId — so install/uninstall mutate only the active
+// agent's install and another agent's job with the same templateId is never
+// touched. Skills are pre-validated so a disabled Workspace skill surfaces
+// as a clean 400 with zero side effects (nothing deleted).
 export async function installRoutineTemplate(
   config: RuntimeConfig,
   templateId: string,
@@ -190,7 +196,8 @@ export async function installRoutineTemplate(
   }
   const state = readState(config.instance);
   assertSkillNamesResolve(state, spec.skillNames as string[]);
-  for (const job of state.jobs.filter((j) => j.templateId === template.id)) {
+  const owningAgentId = resolveEffectiveContext(state, config).agentId;
+  for (const job of state.jobs.filter((j) => j.templateId === template.id && j.agentId === owningAgentId)) {
     try {
       await removeJob(config, job.id);
     } catch {
@@ -200,18 +207,21 @@ export async function installRoutineTemplate(
   return createScheduledJob(config, spec);
 }
 
-// DELETE /api/routines/templates/<id> — remove the installed job(s) carrying
-// this templateId. 404 when none is installed, so the gallery's Remove is an
-// honest one-click inverse of Install.
+// DELETE /api/routines/templates/<id> — remove the owning agent's installed
+// job(s) carrying this templateId (owning agent resolved server-side, same
+// as install). 404 when that agent has none installed, so the gallery's
+// Remove is an honest one-click inverse of Install.
 export async function uninstallRoutineTemplate(
   config: RuntimeConfig,
   templateId: string
 ): Promise<{ removed: string[] }> {
   const template = routineTemplate(templateId);
   if (!template) throw new Error(`Routine template not found: ${templateId}`);
-  const jobs = readState(config.instance).jobs.filter((j) => j.templateId === template.id);
+  const state = readState(config.instance);
+  const owningAgentId = resolveEffectiveContext(state, config).agentId;
+  const jobs = state.jobs.filter((j) => j.templateId === template.id && j.agentId === owningAgentId);
   if (jobs.length === 0) {
-    throw new Error(`Job not found: routine template "${templateId}" is not installed`);
+    throw new Error(`Routine template not found: "${templateId}" is not installed`);
   }
   const removed: string[] = [];
   for (const job of jobs) {

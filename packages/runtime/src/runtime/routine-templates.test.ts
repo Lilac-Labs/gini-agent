@@ -10,7 +10,10 @@
 //     skill-resolve 400 with zero side effects, payload validation, unknown
 //     template → 404
 //   - uninstall: removes the installed job, 404 when nothing is installed
-//   - the onboarding routines path stamps the same templateIds
+//   - install/uninstall are agent-scoped: one agent's install never touches
+//     another agent's job for the same template
+//   - the onboarding routines path stamps the same templateIds, and its
+//     replace pass reconciles gallery installs (one live job per template)
 //
 // Hermetic: HOME + GINI_STATE_ROOT point at a per-test scratch dir so
 // instance state never touches the developer machine; the provider is the
@@ -294,6 +297,80 @@ describe("routine templates", () => {
     expect(again.status).toBe(404);
     const unknown = await rawCall(handler, config, "/api/routines/templates/nope", { method: "DELETE" });
     expect(unknown.status).toBe(404);
+  });
+
+  test("install and uninstall mutate only the active agent's install", async () => {
+    const config = testConfig(root, "templates-cross-agent");
+    const handler = createHandler(config);
+    await seedWorkspaceSkills(handler, config);
+
+    const initial = await call(handler, config, "/api/agents");
+    const defaultAgentId = initial.activeAgentId as string;
+    const jobA = await call(handler, config, "/api/routines/templates/meeting-briefing/install", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    expect(jobA.agentId).toBe(defaultAgentId);
+
+    const second = await call(handler, config, "/api/agents", {
+      method: "POST",
+      body: JSON.stringify({ name: "scout" })
+    });
+    await call(handler, config, `/api/agents/${second.id}/use`, { method: "POST" });
+
+    // The second agent's uninstall 404s while the first agent's install is
+    // live — "installed" is per agent, not global.
+    const before = await rawCall(handler, config, "/api/routines/templates/meeting-briefing", { method: "DELETE" });
+    expect(before.status).toBe(404);
+
+    // The second agent's install replaces nothing of the first agent's: both
+    // jobs are live afterwards, each stamped with its owner.
+    const jobB = await call(handler, config, "/api/routines/templates/meeting-briefing/install", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    expect(jobB.agentId).toBe(second.id);
+    const live = readState(config.instance).jobs.filter((j) => j.templateId === "meeting-briefing");
+    expect(live.map((j) => j.id).sort()).toEqual([jobA.id, jobB.id].sort());
+
+    // Scoped GET mirrors GET /api/jobs: each agent sees only its own install.
+    const scopedA = await call(handler, config, `/api/routines/templates?agentId=${encodeURIComponent(defaultAgentId)}`);
+    expect(scopedA.templates.find((t: { id: string }) => t.id === "meeting-briefing").installed?.jobId).toBe(jobA.id);
+    const scopedB = await call(handler, config, `/api/routines/templates?agentId=${encodeURIComponent(second.id)}`);
+    expect(scopedB.templates.find((t: { id: string }) => t.id === "meeting-briefing").installed?.jobId).toBe(jobB.id);
+
+    // The second agent's uninstall removes only its own job; the first
+    // agent's install survives.
+    const removed = await call(handler, config, "/api/routines/templates/meeting-briefing", { method: "DELETE" });
+    expect(removed).toEqual({ removed: [jobB.id] });
+    expect(readState(config.instance).jobs.map((j) => j.id)).toEqual([jobA.id]);
+  });
+
+  test("onboarding apply reconciles gallery installs to one live job per template", async () => {
+    const config = testConfig(root, "templates-reconcile");
+    const handler = createHandler(config);
+    await seedWorkspaceSkills(handler, config);
+
+    const payload = {
+      timezone: "America/New_York",
+      autoInbox: { enabled: true, labelNewMail: true, archiveUnimportant: false, assistScheduling: true, draftReplies: true },
+      morningBriefing: { enabled: true, personalizedNews: true },
+      meetingBriefing: { enabled: true }
+    };
+    await call(handler, config, "/api/onboarding/routines", { method: "POST", body: JSON.stringify(payload) });
+
+    // A gallery reinstall replaces the onboarding job for that template but
+    // leaves the onboarding record tracking the stale id — the next apply's
+    // replace pass must reconcile by templateId, not just tracked ids.
+    await call(handler, config, "/api/routines/templates/morning-briefing/install", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+
+    const applied = await call(handler, config, "/api/onboarding/routines", { method: "POST", body: JSON.stringify(payload) });
+    const jobs = readState(config.instance).jobs;
+    expect(jobs.map((j) => j.templateId).sort()).toEqual(["auto-inbox", "meeting-briefing", "morning-briefing"]);
+    expect(jobs.map((j) => j.id).sort()).toEqual(applied.jobs.map((j: { id: string }) => j.id).sort());
   });
 
   test("the onboarding routines path stamps the same templateIds", async () => {

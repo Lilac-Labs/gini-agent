@@ -31,8 +31,8 @@ Two callers share the catalog:
 | Endpoint | Behavior |
 | --- | --- |
 | `GET /api/routines/templates` | The catalog joined with installed state — the live job carrying each `templateId`, scoped by `?agentId=` like `GET /api/jobs`. |
-| `POST /api/routines/templates/<id>/install` | Body `{ timezone?, options? }`. Missing option keys fall back to the template defaults; timezone precedence is payload > onboarding record > UTC. Idempotent per-template replace: skills are pre-validated (`assertSkillNamesResolve`, a clean 400 with zero side effects), then any job with this `templateId` is deleted and one fresh job created via `createScheduledJob` — the same call `POST /api/jobs` makes. Returns the `JobRecord`. |
-| `DELETE /api/routines/templates/<id>` | Removes the installed job(s) with this `templateId`; 404 when none. |
+| `POST /api/routines/templates/<id>/install` | Body `{ timezone?, options? }`. Missing option keys fall back to the template defaults; timezone precedence is payload > onboarding record > UTC. Idempotent per-template replace scoped to the active agent: skills are pre-validated (`assertSkillNamesResolve`, a clean 400 with zero side effects), then the owning agent's job with this `templateId` is deleted and one fresh job created via `createScheduledJob` — the same call `POST /api/jobs` makes. The owning agent is resolved server-side (never caller-supplied), the same way `createScheduledJob` stamps `agentId`. Returns the `JobRecord`. |
+| `DELETE /api/routines/templates/<id>` | Removes the active agent's installed job(s) with this `templateId` (same server-side agent resolution as install); 404 when that agent has none. |
 
 Installed jobs link back to their template through an optional
 `JobRecord.templateId`, stamped by `buildSpec` on both the gallery and
@@ -55,13 +55,16 @@ card).
 - Installed routines are ordinary `active` jobs: the user can pause, edit,
   or delete them in /jobs, and the job scheduler/channel provisioning are
   inherited unchanged from `createScheduledJob`.
-- Because install is a per-template replace keyed on `templateId`
-  (instance-wide, like the delete), re-installing with different options
-  never duplicates a routine — but it re-creates the job, so run history on
-  the replaced job is dropped with it.
-- A gallery Remove leaves a stale id in the onboarding record's
-  `routineJobIds`; the onboarding replace pass already ignores ids that no
-  longer exist.
+- Because install is a per-template replace keyed on `templateId` and the
+  owning agent (like the delete), re-installing with different options never
+  duplicates a routine — but it re-creates the job, so run history on the
+  replaced job is dropped with it. Each agent can hold its own install of
+  the same template; one agent's install/remove never touches another's.
+- A gallery install or Remove leaves a stale id in the onboarding record's
+  `routineJobIds`. The onboarding replace pass ignores ids that no longer
+  exist AND additionally deletes the owning agent's live jobs carrying a
+  catalog `templateId`, so "at most one live job per template per agent"
+  holds no matter which writer (gallery or onboarding) ran last.
 - The gallery reflects onboarding-created installs (same `templateId`
   stamp), so a user who enabled routines during onboarding sees them as
   installed on /routines.

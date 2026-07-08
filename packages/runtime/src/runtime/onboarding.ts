@@ -26,13 +26,14 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { resolveEffectiveContext } from "../execution/effective-context";
 import { assertSkillNamesResolve, createScheduledJob, removeJob } from "../jobs";
 import { appendEvent, mutateState, readState } from "../state";
 import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../state/google-accounts";
 import { now } from "../state/ids";
 import { defaultOnboardingRecord, readOnboarding, writeOnboarding } from "../state/onboarding";
 import { runProfileScan } from "./onboarding-scan";
-import { routineTemplate, validateTimezone } from "./routine-templates";
+import { ROUTINE_TEMPLATES, routineTemplate, validateTimezone } from "./routine-templates";
 import type { ChatSessionRecord, JobRecord, OnboardingProfile, OnboardingRecord, OnboardingScan, RuntimeConfig, Task } from "../types";
 
 // A running scan older than this is treated as orphaned by a runtime restart
@@ -221,9 +222,11 @@ function resolveScanConfigDir(): string | undefined {
 //   { timezone?, autoInbox?: { enabled, labelNewMail, archiveUnimportant,
 //     assistScheduling, draftReplies }, morningBriefing?: { enabled,
 //     personalizedNews }, meetingBriefing?: { enabled } }
-// Idempotent replace: delete the jobs a previous pass created (ids that no
-// longer exist are ignored), then create one job per enabled routine via the
-// jobs module — the same createScheduledJob call POST /api/jobs makes.
+// Idempotent replace: delete the jobs a previous pass created — plus the
+// owning agent's live jobs carrying a catalog templateId, which the
+// /routines gallery may have installed — then create one job per enabled
+// routine via the jobs module (the same createScheduledJob call POST
+// /api/jobs makes).
 export async function applyOnboardingRoutines(
   config: RuntimeConfig,
   payload: Record<string, unknown>
@@ -239,7 +242,23 @@ export async function applyOnboardingRoutines(
   for (const spec of specs) {
     assertSkillNamesResolve(state, spec.skillNames as string[]);
   }
-  for (const jobId of record.routineJobIds) {
+  // The replace pass deletes BOTH the ids this record tracks AND any live
+  // job of the owning agent stamped with a catalog templateId: the /routines
+  // gallery (src/runtime/routine-templates.ts) installs the same templates
+  // without updating routineJobIds, so record ids alone can go stale — the
+  // templateId sweep is what keeps "at most one live job per template per
+  // agent" an invariant across both writers. Owning agent resolved
+  // server-side, same as createScheduledJob stamps agentId on the
+  // replacements below.
+  const owningAgentId = resolveEffectiveContext(state, config).agentId;
+  const catalogIds = new Set(ROUTINE_TEMPLATES.map((template) => template.id));
+  const staleJobIds = new Set([
+    ...record.routineJobIds,
+    ...state.jobs
+      .filter((j) => j.templateId !== undefined && catalogIds.has(j.templateId) && j.agentId === owningAgentId)
+      .map((j) => j.id)
+  ]);
+  for (const jobId of staleJobIds) {
     try {
       await removeJob(config, jobId);
     } catch {

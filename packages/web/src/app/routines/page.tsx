@@ -122,7 +122,16 @@ export default function RoutinesPage() {
                               <MoreHorizontalIcon className="size-[18px]" aria-hidden />
                             </button>
                           </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end" className="w-40">
+                          {/* The menu renders in a portal, but React portals bubble
+                              events through the REACT tree — a click on a menu item
+                              would reach the card's navigate-to-detail onClick and
+                              clobber the item's own navigation. Stop it at the
+                              content boundary. */}
+                          <DropdownMenuContent
+                            align="end"
+                            className="w-40"
+                            onClick={(event) => event.stopPropagation()}
+                          >
                             <DropdownMenuItem asChild>
                               <Link href={`/jobs?job=${encodeURIComponent(template.installed!.jobId)}`}>
                                 View in Jobs

@@ -365,6 +365,23 @@ export function useGoogleAuthMode() {
   });
 }
 
+// Whether this deployment is platform-managed (GET /api/setup/status →
+// `managed`, true when the runtime carries the hosted marker GINI_HOSTED=1).
+// The platform provisions the model provider, updates, and ingress, so the
+// web hides its self-serve surfaces when managed: the tunnel menu, the
+// self-update row, the provider settings sections, /setup, and
+// /settings/add-provider. Consumers treat a missing answer as unmanaged, so
+// a self-hosted deployment renders identically even before (or without) a
+// response. Fixed per deployment, so the answer never goes stale. See ADR
+// managed-deployment-mode.md.
+export function useManagedMode() {
+  return useQuery<{ managed: boolean }>({
+    queryKey: ["setup-status"],
+    queryFn: () => api<{ managed: boolean }>("/setup/status"),
+    staleTime: Infinity
+  });
+}
+
 // First-run onboarding record (GET /api/onboarding). The deterministic profile
 // scan finalizes by pushing an `onboarding` event over the SSE stream, which
 // RuntimeStreamBridge maps to this query key — so a running scan reveals its

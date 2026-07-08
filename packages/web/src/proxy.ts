@@ -14,7 +14,12 @@ import { parseTrustedOriginUrls } from "@/lib/trusted-origins";
 
 const PROXY_STATUS_TIMEOUT_MS = 1500;
 
-async function isProviderConfigured(): Promise<boolean | null> {
+// One probe answers both setup-gate questions: is a provider configured, and
+// is this a managed (platform-hosted) deployment. Managed deployments have
+// their provider provisioned by the platform, so the gate must never bounce
+// them to /setup — even if the runtime were to report providerConfigured
+// false. See ADR managed-deployment-mode.md.
+async function fetchSetupStatus(): Promise<{ providerConfigured: boolean; managed: boolean } | null> {
   const url = `${runtimeUrl()}/api/setup/status`;
   try {
     const response = await fetch(url, {
@@ -22,8 +27,8 @@ async function isProviderConfigured(): Promise<boolean | null> {
       signal: AbortSignal.timeout(PROXY_STATUS_TIMEOUT_MS)
     });
     if (!response.ok) return null;
-    const data = (await response.json()) as { providerConfigured?: unknown };
-    return data.providerConfigured === true;
+    const data = (await response.json()) as { providerConfigured?: unknown; managed?: unknown };
+    return { providerConfigured: data.providerConfigured === true, managed: data.managed === true };
   } catch {
     return null;
   }
@@ -133,8 +138,8 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
       && !pathname.startsWith("/setup")
       && !pathname.startsWith("/api/")
     ) {
-      const configured = await isProviderConfigured();
-      if (configured === false) {
+      const status = await fetchSetupStatus();
+      if (status !== null && !status.managed && !status.providerConfigured) {
         // The gateway rewrites Host to loopback before proxying, so this absolute
         // redirect resolves to the loopback web port — which would point a remote
         // tunnel browser at its own 127.0.0.1. The gateway rewrites a loopback

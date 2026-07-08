@@ -97,6 +97,13 @@ export interface SetupStatus {
   // Echoed from providerHealth so the browser knows why setup is needed
   // (e.g. "Set OPENAI_API_KEY to use the openai provider").
   message: string;
+  // True when this runtime is a managed (platform-hosted) deployment —
+  // keyed on GINI_HOSTED=1, the same marker googleAuthMode and owner-token
+  // auth read. The platform provisions the model provider, updates, and
+  // ingress, so the web hides its self-serve surfaces (provider settings,
+  // /setup, tunnel menu, self-update) when this is true. See ADR
+  // managed-deployment-mode.md.
+  managed: boolean;
 }
 
 export function getSetupStatus(config: RuntimeConfig): SetupStatus {
@@ -126,7 +133,8 @@ export function getSetupStatus(config: RuntimeConfig): SetupStatus {
     selectedProvider: current,
     activeProvider: usingFallback ? dispatch.provider.name : current,
     usingFallback,
-    message: typeof health.message === "string" ? health.message : ""
+    message: typeof health.message === "string" ? health.message : "",
+    managed: process.env.GINI_HOSTED === "1"
   };
 }
 

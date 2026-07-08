@@ -63,6 +63,7 @@ Each file in this directory captures one architecture decision: the context, the
 - [Declarative Approval Gating For Skill Scripts](skill-script-approval-gating.md)
 - [Multiple Tagged Google Accounts For The Workspace Skills](google-multi-account.md)
 - [Web Onboarding Flow](web-onboarding-flow.md)
+- [Managed Deployment Mode](managed-deployment-mode.md)
 - [Chat-Driven Credential Provisioning](chat-credential-provisioning.md)
 - [Provider Re-Authentication Guidance](provider-reauth-guidance.md)
 - [Voice Messages With Gateway-Side Local Speech-To-Text](voice-messages-and-local-stt.md)

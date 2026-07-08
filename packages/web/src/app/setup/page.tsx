@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
+import { useInvalidate } from "@/lib/queries";
 import { ProviderPicker } from "@/components/ProviderPicker";
 
 // The /setup page. First-run onboarding for a fresh Gini install: the runtime
@@ -33,6 +34,7 @@ type SetupStatus = {
 
 export default function SetupPage() {
   const router = useRouter();
+  const invalidate = useInvalidate();
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -80,7 +82,18 @@ export default function SetupPage() {
           ) : null}
           {error ? <p className="text-xs text-destructive">{error}</p> : null}
         </div>
-        <ProviderPicker submitLabel="Save and continue" pendingLabel="Saving…" onSaved={() => router.replace("/")} />
+        <ProviderPicker
+          submitLabel="Save and continue"
+          pendingLabel="Saving…"
+          onSaved={() => {
+            // The shared ["setup-status"] cache (staleTime Infinity) still
+            // says providerConfigured: false; refresh it so an incomplete
+            // funnel entered after this save doesn't show a spurious
+            // provider step (needsProviderStep — ADR web-onboarding-flow.md).
+            invalidate(["setup-status"]);
+            router.replace("/");
+          }}
+        />
       </div>
     </div>
   );

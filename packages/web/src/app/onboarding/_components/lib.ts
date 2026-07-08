@@ -20,16 +20,36 @@ export function defaultRoutinesState(): RoutinesState {
   };
 }
 
+// Whether the wizard shows the capability-derived provider step between
+// sign-in and the welcome step: only on a DEFINITE "self-hosted and no
+// provider configured" answer from /api/setup/status. Managed deployments
+// provision the provider at the platform (ADR managed-deployment-mode.md),
+// and an unresolved/failed probe must not block the funnel on a guess — the
+// scan gating below degrades gracefully either way. The same predicate gates
+// the Gmail scan kickoff: the scan's synthesis calls need the model, so
+// without a provider it could only ever fail.
+export function needsProviderStep(
+  status: { managed: boolean; providerConfigured: boolean } | undefined
+): boolean {
+  return status !== undefined && !status.managed && !status.providerConfigured;
+}
+
 // Which body the step-3 profile card renders. "idle" normally means the
 // page's kickoff POST is about to fire, so it shows the loading state rather
 // than flashing the fallback — but once the kickoff mutation has failed, idle
 // would spin forever (nothing is running server-side), so it falls through to
-// the friendly fallback instead.
+// the friendly fallback instead. `scanUnavailable` (no provider configured —
+// the user skipped the provider step, so the scan was never kicked off and
+// retrying is pointless) short-circuits everything but a ready profile to the
+// connect-a-model state: without it an idle scan would spin forever and a
+// failed one would offer a "Try again" that can never succeed.
 export function profileCardView(
   scan: OnboardingScan | undefined,
-  kickoffFailed: boolean
-): "loading" | "profile" | "fallback" {
+  kickoffFailed: boolean,
+  scanUnavailable = false
+): "loading" | "profile" | "fallback" | "unavailable" {
   if (scan?.status === "ready") return "profile";
+  if (scanUnavailable) return "unavailable";
   if (!scan || scan.status === "running" || (scan.status === "idle" && !kickoffFailed)) return "loading";
   return "fallback";
 }
@@ -205,12 +225,33 @@ export function signInCta(accounts: GoogleAccountStatus[]): "continue" | "connec
   return "connect";
 }
 
+// The wizard's step sequence, held by NAME (not index): the provider step is
+// capability-derived and can join the sequence after mount (the setup-status
+// probe resolves async), so a numeric position could silently re-label the
+// step the user is on. Sign-in and the provider step are prerequisite gates
+// and carry no progress dot — the five product steps from "welcome" on are
+// the dotted wizard regardless of which prerequisites a deployment needs.
+export type OnboardingStep =
+  | "signin"
+  | "provider"
+  | "welcome"
+  | "routines"
+  | "profile"
+  | "accounts"
+  | "tasks";
+
+export function onboardingSteps(withProviderStep: boolean): OnboardingStep[] {
+  return withProviderStep
+    ? ["signin", "provider", "welcome", "routines", "profile", "accounts", "tasks"]
+    : ["signin", "welcome", "routines", "profile", "accounts", "tasks"];
+}
+
 // Wizard step named by the ?step= query param. Adding a Google account is a
 // same-tab OAuth round trip in both auth modes, so it returns the browser to
 // /onboarding?step=accounts — the wizard re-enters on the accounts step
-// instead of restarting at sign-in. Unknown or absent names start at step 0.
-const STEP_PARAMS: Record<string, number> = { accounts: 4 };
+// instead of restarting at sign-in. Unknown or absent names start at sign-in.
+const STEP_PARAMS: Record<string, OnboardingStep> = { accounts: "accounts" };
 
-export function initialOnboardingStep(param: string | null | undefined): number {
-  return STEP_PARAMS[param ?? ""] ?? 0;
+export function initialOnboardingStep(param: string | null | undefined): OnboardingStep {
+  return STEP_PARAMS[param ?? ""] ?? "signin";
 }

@@ -31,13 +31,47 @@ function makeRequest(opts: { url: string; host: string; method?: string; secFetc
 // Stub the setup-status probe the loopback setup gate calls. `managed`
 // mirrors the runtime's managed-deployment flag (ADR
 // managed-deployment-mode.md); omitting it exercises the pre-managed payload
-// shape, which the gate must read as self-hosted.
+// shape, which the gate must read as self-hosted. The same payload also
+// answers the follow-up /api/onboarding probe — it carries no `completed`
+// field, which the gate must read as "not definitively incomplete" and keep
+// the /setup bounce (the pre-onboarding behavior these tests pin).
 function stubSetupStatus(providerConfigured: boolean, managed?: boolean): void {
   globalThis.fetch = (async () =>
     new Response(JSON.stringify(managed === undefined ? { providerConfigured } : { providerConfigured, managed }), {
       status: 200,
       headers: { "content-type": "application/json" }
     })) as unknown as typeof fetch;
+}
+
+// URL-routing stub for the gate's two probes: /api/setup/status answers
+// self-hosted with the given configured flag; /api/onboarding answers the
+// given completion state ("error" → 500, exercising the failed-probe
+// default). Returns a counter of onboarding probes, so a test can pin that
+// the second probe is never made on a path that doesn't need it.
+function stubGateProbes(
+  providerConfigured: boolean,
+  onboardingCompleted: boolean | "error"
+): { onboardingProbes: number } {
+  const calls = { onboardingProbes: 0 };
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.endsWith("/api/setup/status")) {
+      return new Response(JSON.stringify({ providerConfigured, managed: false }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    if (url.endsWith("/api/onboarding")) {
+      calls.onboardingProbes += 1;
+      if (onboardingCompleted === "error") return new Response("boom", { status: 500 });
+      return new Response(JSON.stringify({ completed: onboardingCompleted }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    throw new Error(`unexpected probe: ${url}`);
+  }) as unknown as typeof fetch;
+  return calls;
 }
 
 function failIfFetched(reason: string): void {
@@ -126,5 +160,42 @@ describe("proxy loopback setup gate", () => {
     expect(res.status).toBeGreaterThanOrEqual(300);
     expect(res.status).toBeLessThan(400);
     expect(res.headers.get("location")).toContain("/setup");
+  });
+
+  test("unconfigured + incomplete onboarding passes through — the wizard owns first-run provider setup", async () => {
+    // A fresh instance must reach /onboarding (whose capability-derived
+    // provider step replaces the /setup detour — ADR web-onboarding-flow.md);
+    // the client-side OnboardingGate routes it there.
+    stubGateProbes(false, false);
+    const res = await proxy(makeRequest({ url: "http://localhost/", host: "localhost", secFetchDest: "document" }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  test("unconfigured + completed onboarding still bounces to /setup", async () => {
+    // e.g. a grandfathered or skipped-provider instance: /setup stays the
+    // standing surface for an operator whose provider is missing.
+    stubGateProbes(false, true);
+    const res = await proxy(makeRequest({ url: "http://localhost/chat", host: "localhost", secFetchDest: "document" }));
+    expect(res.status).toBeGreaterThanOrEqual(300);
+    expect(res.status).toBeLessThan(400);
+    expect(res.headers.get("location")).toContain("/setup");
+  });
+
+  test("a failed onboarding probe keeps the /setup bounce (pre-onboarding default)", async () => {
+    stubGateProbes(false, "error");
+    const res = await proxy(makeRequest({ url: "http://localhost/chat", host: "localhost", secFetchDest: "document" }));
+    expect(res.status).toBeGreaterThanOrEqual(300);
+    expect(res.status).toBeLessThan(400);
+    expect(res.headers.get("location")).toContain("/setup");
+  });
+
+  test("configured provider never probes onboarding", async () => {
+    // The onboarding probe exists only to spare an incomplete funnel from
+    // the /setup bounce; the configured path must stay a single probe.
+    const calls = stubGateProbes(true, false);
+    const res = await proxy(makeRequest({ url: "http://localhost/chat", host: "localhost", secFetchDest: "document" }));
+    expect(res.status).toBe(200);
+    expect(calls.onboardingProbes).toBe(0);
   });
 });

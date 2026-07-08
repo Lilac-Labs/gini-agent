@@ -1,5 +1,6 @@
 // Unit tests for the pure onboarding helpers: routines-step wizard-state
-// defaults, suggested-task selection (scan-ready suggestions vs static
+// defaults, the capability-derived step sequence (provider step + scan
+// gating), suggested-task selection (scan-ready suggestions vs static
 // fallbacks), late scan-result adoption on the tasks step, timezone labels,
 // email linkification segments, and primary-account resolution and ordering.
 // Pure-JS tests
@@ -14,6 +15,8 @@ import {
   defaultRoutinesState,
   FALLBACK_SUGGESTED_TASKS,
   initialOnboardingStep,
+  needsProviderStep,
+  onboardingSteps,
   primaryAccountId,
   profileCardView,
   reloginPrimaryUrl,
@@ -78,6 +81,57 @@ describe("profileCardView", () => {
 
   test.each(["failed", "no_account"] as const)("%s scan renders the fallback", (status) => {
     expect(profileCardView({ status }, false)).toBe("fallback");
+  });
+
+  test("scanUnavailable short-circuits every non-ready state to the connect-a-model view", () => {
+    // Idle would otherwise spin forever (the scan was never kicked off) and a
+    // failed scan would offer a "Try again" that can never succeed.
+    expect(profileCardView(undefined, false, true)).toBe("unavailable");
+    expect(profileCardView({ status: "idle" }, false, true)).toBe("unavailable");
+    expect(profileCardView({ status: "idle" }, true, true)).toBe("unavailable");
+    expect(profileCardView({ status: "running" }, false, true)).toBe("unavailable");
+    expect(profileCardView({ status: "failed" }, false, true)).toBe("unavailable");
+  });
+
+  test("a ready profile wins over scanUnavailable", () => {
+    const scan: OnboardingScan = { status: "ready", profile: { displayName: "U", sections: [] } };
+    expect(profileCardView(scan, false, true)).toBe("profile");
+  });
+});
+
+describe("needsProviderStep", () => {
+  test("true only on a definite self-hosted-and-unconfigured answer", () => {
+    expect(needsProviderStep({ managed: false, providerConfigured: false })).toBe(true);
+  });
+
+  test("an unresolved probe never blocks the funnel on a guess", () => {
+    expect(needsProviderStep(undefined)).toBe(false);
+  });
+
+  test("managed deployments never see the provider step (ADR managed-deployment-mode.md)", () => {
+    expect(needsProviderStep({ managed: true, providerConfigured: false })).toBe(false);
+  });
+
+  test("a configured provider needs no step", () => {
+    expect(needsProviderStep({ managed: false, providerConfigured: true })).toBe(false);
+  });
+});
+
+describe("onboardingSteps", () => {
+  test("the provider step slots between sign-in and the wizard proper", () => {
+    expect(onboardingSteps(true)).toEqual([
+      "signin",
+      "provider",
+      "welcome",
+      "routines",
+      "profile",
+      "accounts",
+      "tasks"
+    ]);
+  });
+
+  test("without the provider step the sequence is unchanged in order", () => {
+    expect(onboardingSteps(false)).toEqual(onboardingSteps(true).filter((s) => s !== "provider"));
   });
 });
 
@@ -277,13 +331,13 @@ describe("accountsPrimaryFirst", () => {
 
 describe("initialOnboardingStep", () => {
   test("?step=accounts re-enters the wizard on the accounts step", () => {
-    expect(initialOnboardingStep("accounts")).toBe(4);
+    expect(initialOnboardingStep("accounts")).toBe("accounts");
   });
 
-  test.each([null, undefined, "", "unknown", "ACCOUNTS", "4"])(
+  test.each([null, undefined, "", "unknown", "ACCOUNTS", "4", "provider"])(
     "%p starts at the sign-in step",
     (param) => {
-      expect(initialOnboardingStep(param)).toBe(0);
+      expect(initialOnboardingStep(param)).toBe("signin");
     }
   );
 });

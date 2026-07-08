@@ -260,7 +260,7 @@ export default function IntegrationsPage() {
                         {tile.initial}
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[14.5px] font-semibold">{tile.provider.label}</span>
+                        <span className="block truncate text-[14.5px] font-semibold">{tile.label}</span>
                         {tile.connected ? (
                           <span className="mt-0.5 flex items-center gap-1.5">
                             <span className="size-[7px] shrink-0 rounded-full bg-emerald-500" />
@@ -366,6 +366,13 @@ export default function IntegrationsPage() {
         defaultName={dialog.suggestedName}
         lockProvider
         mode={dialog.mode}
+        // Create mode here is only ever the "Add MCP server" header action, so
+        // frame the dialog after it. Rotate mode renders its own title/copy
+        // and ignores these.
+        title="Add MCP server"
+        description="Register a custom MCP server. The API key is stored encrypted and sent as a bearer token to the server URL."
+        namePlaceholder="MCP_SERVER_API_KEY"
+        secretPlaceholder="paste the server's API key"
       />
 
       <ManualCredentialDialog

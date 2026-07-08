@@ -70,6 +70,14 @@ describe("buildTiles", () => {
     expect(tiles[0]).toMatchObject({ color: "#5E6AD2", initial: "L" });
     expect(tiles[1]).toMatchObject({ color: "#6B7280", initial: "E" });
   });
+
+  test("Google tile displays the override label, not the descriptor label", () => {
+    const google = provider({ id: GOOGLE_PROVIDER_ID, label: "Google Workspace OAuth" });
+    const [tile] = buildTiles([google], [], 0);
+    expect(tile!.label).toBe("Google");
+    // Providers without an override keep the descriptor label.
+    expect(buildTiles([provider({})], [], 0)[0]!.label).toBe("Linear");
+  });
 });
 
 describe("tileCounts / filterTiles", () => {
@@ -92,6 +100,12 @@ describe("tileCounts / filterTiles", () => {
   test("search is case-insensitive on the label and composes with the chip", () => {
     expect(filterTiles(tiles, "all", "  bLaNd ").map((t) => t.provider.id)).toEqual(["bland"]);
     expect(filterTiles(tiles, "connected", "exa")).toHaveLength(0);
+  });
+
+  test("search matches the displayed label for overridden tiles", () => {
+    const google = provider({ id: GOOGLE_PROVIDER_ID, label: "Google Workspace OAuth" });
+    const googleTiles = buildTiles([google], [], 0);
+    expect(filterTiles(googleTiles, "all", "goog")).toHaveLength(1);
   });
 
   test("no matches → empty list (empty state)", () => {

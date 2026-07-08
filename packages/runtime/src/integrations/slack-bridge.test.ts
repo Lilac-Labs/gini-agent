@@ -3,7 +3,7 @@ import { rmSync } from "node:fs";
 import type { RuntimeConfig } from "../types";
 import { mutateState, readState } from "../state";
 import { addMessagingBridge, resetMessagingDeps, setMessagingDeps } from "./messaging";
-import { createSlackBridgeSupervisor } from "./slack-bridge";
+import { __internalsForTests, createSlackBridgeSupervisor } from "./slack-bridge";
 import { setMaxTaskWaitMsForTests } from "./messaging-poller-helpers";
 import type { PollerSupervisor } from "./discord-poller";
 import type { SlackClient } from "./slack";
@@ -382,6 +382,86 @@ describe("slack bridge supervisor", () => {
     expect(String(live?.message)).toContain("Socket Mode");
 
     await supervisor.stopAll();
+  });
+
+  test("stopAll cancels a hung startup probe via the loop signal without flipping the bridge to error", async () => {
+    const config = testConfig("slk-hung-auth");
+    const { client } = programmableClient();
+    // authTest never answers on its own — it only rejects when the
+    // caller's signal aborts, the shape of a request cancelled by
+    // stopAll. Without the signal threaded through, stopAll would hang
+    // on the loop forever; without the aborted-guard in the catch, the
+    // rejection would durably flip the bridge to "error".
+    let probeSignal: AbortSignal | undefined;
+    const hungClient: SlackClient = {
+      ...client,
+      authTest(signal) {
+        probeSignal = signal;
+        return new Promise((_, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("probe cancelled")), { once: true });
+        });
+      }
+    };
+    setMessagingDeps({ slackClientFactory: () => hungClient });
+    const bridge = await addSlackBridge(config);
+
+    const slot: Parameters<typeof capturingSocket>[0] = {};
+    const supervisor = createTrackedSupervisor(config, {
+      clientFactory: () => hungClient,
+      socketConnector: capturingSocket(slot),
+      statusCheckIntervalMs: 20
+    });
+    supervisor.reconcile();
+    await waitFor(() => probeSignal !== undefined, "startup probe to receive the loop signal");
+
+    await supervisor.stopAll();
+    expect(supervisor.size()).toBe(0);
+    expect(probeSignal?.aborted).toBe(true);
+    // The abort-time rejection is not a token problem — the bridge
+    // stays "configured" so the next boot picks it up again.
+    const live = readState(config.instance).messagingBridges.find((b) => b.id === bridge.id);
+    expect(live?.status).toBe("configured");
+  });
+
+  test("a hung addReaction never gates the reply mirror, and the worker reaps the reaction before settling", async () => {
+    const config = testConfig("slk-hung-reaction");
+    const { client, postCalls } = programmableClient();
+    // addReaction stalls until the test releases it — the reply must
+    // still post, and the worker must not settle until the reaction
+    // promise is reaped (a fire-and-forget leak would let the request
+    // outlive the stopAll drain).
+    const { promise: reactionGate, resolve: releaseReaction } = Promise.withResolvers<true>();
+    const stallingClient: SlackClient = {
+      ...client,
+      addReaction: () => reactionGate
+    };
+    setMessagingDeps({ slackClientFactory: () => stallingClient });
+    const bridge = await addSlackBridge(config);
+
+    const controller = new AbortController();
+    let settled = false;
+    const worker = __internalsForTests
+      .routeInboundAndMirrorReply(
+        config,
+        bridge.id,
+        { channelId: "D1", ts: "1700000001.000100", threadTs: "1700000001.000100", text: "hi gini" },
+        stallingClient,
+        controller.signal
+      )
+      .then(() => {
+        settled = true;
+      });
+
+    // Reply dispatches while the reaction is still pending.
+    await waitFor(() => postCalls.length >= 1, "reply dispatch while the reaction is stalled");
+    expect(postCalls[0]?.threadTs).toBe("1700000001.000100");
+    // The worker holds open until its own I/O drains.
+    await Bun.sleep(20);
+    expect(settled).toBe(false);
+
+    releaseReaction(true);
+    await waitFor(() => settled, "worker to settle once the reaction resolves");
+    await worker;
   });
 
   test("runLoop self-exits when the bridge status flips between ticks (no reconcile)", async () => {

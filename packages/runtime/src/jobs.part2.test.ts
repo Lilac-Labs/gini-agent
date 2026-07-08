@@ -931,6 +931,69 @@ describe("cron lifecycle", () => {
     expect(readState(config.instance).jobs).toHaveLength(0);
   });
 
+  test("create_job dispatch rejects a Slack bridge with no configured delivery channel", async () => {
+    const config = testConfig("jobs-create-tool-delivery-slack-dm");
+    const { addMessagingBridge } = await import("./integrations/messaging");
+    // A DM-only Slack bridge has empty deliveryTargets by design (DM
+    // channels are discovered at event time) — accepting it here would
+    // make generic dispatch fall back to the literal "local" target and
+    // fail with channel_not_found on every fire.
+    await addMessagingBridge(config, {
+      name: "slk",
+      kind: "slack",
+      deliveryTargets: [],
+      botToken: "xoxb-TOK",
+      appToken: "xapp-TOK"
+    });
+    const taskId = await mutateState(config.instance, (state) => {
+      const task = createTask(state.instance, "test", undefined, undefined, undefined, undefined);
+      upsertTask(state, task);
+      return task.id;
+    });
+
+    await expect(
+      dispatchToolCall(
+        config,
+        taskId,
+        "create_job",
+        "call_delivery_slack_dm",
+        JSON.stringify({ name: "briefing", intervalSeconds: 60, prompt: "x", deliveryTargets: ["slk"] })
+      )
+    ).rejects.toThrow(/Slack bridge 'slk' has no delivery channel configured/);
+    expect(readState(config.instance).jobs).toHaveLength(0);
+  });
+
+  test("create_job dispatch accepts a Slack bridge that has a delivery channel configured", async () => {
+    const config = testConfig("jobs-create-tool-delivery-slack-channel");
+    const { addMessagingBridge } = await import("./integrations/messaging");
+    // The manual channel-id escape hatch: an operator-configured
+    // channel gives the text-only job dispatch a real target.
+    const bridge = await addMessagingBridge(config, {
+      name: "slk",
+      kind: "slack",
+      deliveryTargets: ["C123"],
+      botToken: "xoxb-TOK",
+      appToken: "xapp-TOK"
+    });
+    const taskId = await mutateState(config.instance, (state) => {
+      const task = createTask(state.instance, "test", undefined, undefined, undefined, undefined);
+      upsertTask(state, task);
+      return task.id;
+    });
+
+    await dispatchToolCall(
+      config,
+      taskId,
+      "create_job",
+      "call_delivery_slack_channel",
+      JSON.stringify({ name: "briefing", intervalSeconds: 60, prompt: "x", deliveryTargets: ["slk"] })
+    );
+
+    const jobs = readState(config.instance).jobs;
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.deliveryTargets).toEqual([bridge.id]);
+  });
+
   test("create_job dispatch rejects an ambiguous deliveryTargets entry, listing the candidates", async () => {
     const config = testConfig("jobs-create-tool-delivery-ambiguous");
     const { addMessagingBridge } = await import("./integrations/messaging");

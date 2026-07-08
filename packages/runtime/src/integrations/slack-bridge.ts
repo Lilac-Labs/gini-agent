@@ -264,9 +264,16 @@ async function runLoop(
       // instead of routing events it could never reply to.
       if (botUserId === undefined) {
         try {
-          const me = await client.authTest();
+          // The loop signal rides along so stopAll can cancel a hung
+          // probe instead of waiting it out.
+          const me = await client.authTest(signal);
           botUserId = me.userId;
         } catch (error) {
+          // A rejection caused by shutdown (the abort just cancelled
+          // the in-flight probe) is not a token problem — flipping the
+          // bridge to "error" here would durably disable it across
+          // restarts for a probe that never got an answer.
+          if (signal.aborted) return;
           await markBridgeError(
             config,
             bridgeId,
@@ -370,8 +377,8 @@ function extractIncomingEvent(
 // Inbound routing + reply mirror for one message. Matches the Discord
 // poller's maintainTypingAndMirrorReply in spirit, minus the typing
 // pulse (Slack has no bot typing API — the 👀 reaction is the ack):
-// receive → react → awaitTerminalTask → syncChatTaskResult →
-// sendMessagingOutput.
+// receive → react (concurrent) → awaitTerminalTask →
+// syncChatTaskResult → sendMessagingOutput.
 async function routeInboundAndMirrorReply(
   config: RuntimeConfig,
   bridgeId: string,
@@ -387,28 +394,50 @@ async function routeInboundAndMirrorReply(
   });
 
   // Ack the message with an 👀 reaction so the user sees the bridge
-  // picked it up while the task runs. Best-effort: requires the
-  // reactions:write scope, and a failure (missing scope, deleted
-  // message) must never gate the reply.
-  try {
-    await client.addReaction(incoming.channelId, incoming.ts, "eyes", signal);
-  } catch (error) {
-    if (!signal.aborted) {
-      appendLog(config.instance, "messaging.slack.reaction_error", {
-        bridgeId,
-        channelId: incoming.channelId,
-        error: error instanceof Error ? error.message : String(error)
-      });
+  // picked it up while the task runs. Best-effort AND non-blocking:
+  // requires the reactions:write scope, and a failure (missing scope,
+  // deleted message) — or a stalled reactions.add — must never gate the
+  // reply. Started unawaited; the finally below reaps it so the tracked
+  // worker still drains its own I/O before settling (the same
+  // decoupling shape as the Discord typing pulse). The loop signal
+  // rides along so a hung call cancels on shutdown.
+  const reactionDone = client.addReaction(incoming.channelId, incoming.ts, "eyes", signal).then(
+    () => undefined,
+    (error: unknown) => {
+      if (!signal.aborted) {
+        appendLog(config.instance, "messaging.slack.reaction_error", {
+          bridgeId,
+          channelId: incoming.channelId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
     }
-  }
+  );
 
-  if (!record.taskId) return;
+  try {
+    await mirrorReply(config, bridgeId, incoming, signal, record.taskId);
+  } finally {
+    await reactionDone;
+  }
+}
+
+// Terminal-wait + reply dispatch for one routed message. Split from
+// routeInboundAndMirrorReply so the reaction ack above can be reaped in
+// a single finally regardless of which early return ends the mirror.
+async function mirrorReply(
+  config: RuntimeConfig,
+  bridgeId: string,
+  incoming: IncomingSlackMessage,
+  signal: AbortSignal,
+  taskId: string | undefined
+): Promise<void> {
+  if (!taskId) return;
 
   // Gate the reply on the task actually reaching terminal state —
   // syncChatTaskResult throws "not ready for chat sync" otherwise.
   const terminalStatus: TaskStatus | undefined = await awaitTerminalTask(
     config,
-    record.taskId,
+    taskId,
     signal,
     "messaging.slack.task_wait_timeout"
   );
@@ -418,7 +447,7 @@ async function routeInboundAndMirrorReply(
   if (terminalStatus === undefined || !isTerminalTaskStatus(terminalStatus)) {
     appendLog(config.instance, "messaging.slack.reply_skip_non_terminal", {
       bridgeId,
-      taskId: record.taskId,
+      taskId,
       status: terminalStatus
     });
     return;
@@ -429,12 +458,12 @@ async function routeInboundAndMirrorReply(
 
   let replyText: string | undefined;
   try {
-    const message = await syncChatTaskResult(config, session.id, record.taskId);
+    const message = await syncChatTaskResult(config, session.id, taskId);
     if (message && message.role === "assistant") replyText = message.content;
   } catch (error) {
     appendLog(config.instance, "messaging.slack.sync_error", {
       bridgeId,
-      taskId: record.taskId,
+      taskId,
       error: error instanceof Error ? error.message : String(error)
     });
     return;
@@ -465,7 +494,7 @@ async function routeInboundAndMirrorReply(
   } catch (error) {
     appendLog(config.instance, "messaging.slack.reply_error", {
       bridgeId,
-      taskId: record.taskId,
+      taskId,
       error: error instanceof Error ? error.message : String(error)
     });
   }

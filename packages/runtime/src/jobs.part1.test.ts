@@ -1526,6 +1526,53 @@ describe("job deliveryTargets delivery", () => {
     }
   });
 
+  test("a Slack bridge with no configured channel records a delivery failure instead of posting to 'local'", async () => {
+    const config = testConfig("jobs-delivery-slack-no-channel");
+    const { addMessagingBridge, setMessagingDeps, resetMessagingDeps } = await import("./integrations/messaging");
+    const { finalizeJobRunFromTask } = await import("./jobs/finalize");
+    const postCalls: Array<{ channel: string; text: string }> = [];
+    setMessagingDeps({
+      slackClientFactory: () => ({
+        async authTest() {
+          return { userId: "UBOT", user: "gini", teamId: "T1", team: "Acme" };
+        },
+        async postMessage(channel: string, text: string) {
+          postCalls.push({ channel, text });
+          return { channel, ts: "1" };
+        },
+        async addReaction() {
+          return true as const;
+        }
+      })
+    });
+    try {
+      // A DM-only Slack bridge (empty deliveryTargets) — create_job now
+      // rejects it as a target, but jobs saved before the bridge lost
+      // its channel and raw POST /api/jobs entries can still name one.
+      // Generic dispatch would otherwise fall back to the literal
+      // "local" target and fail with channel_not_found on every fire.
+      const bridge = await addMessagingBridge(config, {
+        name: "slk",
+        kind: "slack",
+        deliveryTargets: [],
+        botToken: "xoxb-TOK",
+        appToken: "xapp-TOK"
+      });
+      const task = await seedJobRun(config, { deliveryTargets: ["slk"], summary: "Briefing with no channel." });
+      await finalizeJobRunFromTask(config, task);
+      // No Slack POST ever fires — not even against "local".
+      expect(postCalls).toHaveLength(0);
+      const run = readState(config.instance).jobRuns.find((r) => r.id === "run_delivery");
+      expect(run?.status).toBe("completed");
+      const audit = readState(config.instance).audit.find((a) => a.action === "job.delivery.failed");
+      expect(audit?.target).toBe("job_delivery");
+      expect(audit?.evidence?.bridgeId).toBe(bridge.id);
+      expect(audit?.evidence?.reason).toContain("no delivery channel configured");
+    } finally {
+      resetMessagingDeps();
+    }
+  });
+
   test("a provider send failure surfaces as job.delivery.target.error + job.delivery.failed without failing the run", async () => {
     const config = testConfig("jobs-delivery-send-failure");
     const { addMessagingBridge, setMessagingDeps, resetMessagingDeps } = await import("./integrations/messaging");

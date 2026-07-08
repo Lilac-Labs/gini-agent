@@ -1844,7 +1844,19 @@ function parseDeliveryTargets(config: RuntimeConfig, raw: unknown): string[] | u
         `Invalid input: deliveryTargets entry '${value}' is ambiguous — matches ${candidates}. Use the bridge name or id.`
       );
     }
-    resolved.push(matches[0]!.id);
+    const bridge = matches[0]!;
+    // A slack bridge with no configured channel is DM-only: inbound DM
+    // channels are discovered at event time and never persisted, so
+    // generic job dispatch would fall back to the literal "local"
+    // target and fail with channel_not_found on every fire. Reject at
+    // save time with the fix in hand. A slack bridge WITH a configured
+    // channel id passes — the text-only send works there.
+    if (bridge.kind === "slack" && bridge.deliveryTargets.length === 0) {
+      throw new Error(
+        `Invalid input: Slack bridge '${bridge.name}' has no delivery channel configured, so scheduled-job output has nowhere to post. Add a channel id to that bridge's deliveryTargets, or pick a different bridge.`
+      );
+    }
+    resolved.push(bridge.id);
   }
   return resolved;
 }

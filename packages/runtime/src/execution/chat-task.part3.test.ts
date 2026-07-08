@@ -1076,13 +1076,36 @@ describe("chat-task loop", () => {
     await mutateState(config.instance, (state) => {
       for (const toolset of state.toolsets) toolset.status = "disabled";
     });
+    // Pin the tool-catalog floor so the trim geometry below is decoupled
+    // from the live always-on catalog size (cleared in afterEach). The
+    // accumulated transcript is calibrated to sit under the high-water mark
+    // through call 12; with the live catalog, growing any always-on tool
+    // description could push the pre-usage estimate across the mark and
+    // flip this test from pure pruning into compaction. file_read replaces
+    // read_skill as the dispatched tool; the filler tools set the floor.
+    __setBaseToolCatalogForTests([
+      {
+        toolset: "file",
+        type: "function",
+        function: {
+          name: "file_read",
+          description: "Read a UTF-8 text file from the workspace. Returns up to 12000 characters.",
+          parameters: {
+            type: "object",
+            properties: { path: { type: "string", description: "Workspace-relative path." } },
+            required: ["path"]
+          }
+        }
+      },
+      ...FIXED_COMPACTION_CATALOG.slice(1)
+    ]);
 
     // Twelve tool-call turns reading DISTINCT files (so no loop-breaker
     // trips), each result ~3k chars — elidable (>200 chars) but the total
     // stays under every estimate-driven threshold. Only the LAST response
     // reports usage; the resulting calibration gap forces the pre-call trim
     // ahead of the 13th call. The per-read filler is sized so the accumulated
-    // transcript sits below the chars/4 high-water mark given the always-on
+    // transcript sits below the chars/4 high-water mark given the pinned
     // tool-schema floor and system-prompt slice.
     for (let i = 0; i < 12; i++) {
       writeFileSync(join(workspaceRoot, `chunk${i}.md`), `chunk-${i} `.repeat(325));

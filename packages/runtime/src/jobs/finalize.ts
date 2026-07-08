@@ -535,6 +535,23 @@ async function dispatchJobReplyToDeliveryTargets(
     }
     if (dispatchedBridgeIds.has(bridge.id)) continue;
     dispatchedBridgeIds.add(bridge.id);
+    // A slack bridge with no configured channel is DM-only — generic
+    // dispatch would fall back to the literal "local" target and fail
+    // with channel_not_found on every fire. parseDeliveryTargets
+    // rejects the shape at save time; this guards jobs saved before the
+    // bridge's channel was removed and raw entries persisted through
+    // POST /api/jobs, and records a failure the operator can act on
+    // instead of an opaque Slack API error.
+    if (bridge.kind === "slack" && bridge.deliveryTargets.length === 0) {
+      await recordDeliveryFailure(config, {
+        jobId: job.id,
+        taskId: task.id,
+        target: entry,
+        bridgeId: bridge.id,
+        reason: "Slack bridge has no delivery channel configured — job output has nowhere to post. Add a channel id to the bridge's deliveryTargets."
+      });
+      continue;
+    }
     try {
       const { sendMessagingOutput } = await import("../integrations/messaging");
       const record = await sendMessagingOutput(config, bridge.id, { text: replyText });

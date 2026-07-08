@@ -5,7 +5,10 @@
 // a complete profile instead of skipping past a half-built one, and must
 // RE-ENABLE it the moment the scan turns ready or falls back (failed / no
 // account / kickoff-failed idle) so a slow or failed scan never traps the user
-// on this step. The onboarding record is seeded straight into the query cache
+// on this step. scanUnavailable (the user skipped the provider step, so no
+// scan was ever kicked off) must render the connect-a-model state — no
+// eternal spinner, no "Try again" that can only fail — while a ready profile
+// still wins. The onboarding record is seeded straight into the query cache
 // (fresh + Infinity staleTime → no refetch on mount); fetch is stubbed to hang
 // so a running scan's 2.5s poll never touches the network if the timer fires.
 
@@ -25,14 +28,20 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-function renderStep(scan: OnboardingScan, opts: { kickoffFailed?: boolean } = {}) {
+function renderStep(scan: OnboardingScan, opts: { kickoffFailed?: boolean; scanUnavailable?: boolean } = {}) {
   const onDone = mock(() => {});
   const record: OnboardingRecord = { version: 1, completed: false, scan, routineJobIds: [] };
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
   client.setQueryData(["onboarding"], record);
   render(
     <QueryClientProvider client={client}>
-      <StepProfile kickoffFailed={opts.kickoffFailed ?? false} onRetry={() => {}} retryPending={false} onDone={onDone} />
+      <StepProfile
+        kickoffFailed={opts.kickoffFailed ?? false}
+        scanUnavailable={opts.scanUnavailable ?? false}
+        onRetry={() => {}}
+        retryPending={false}
+        onDone={onDone}
+      />
     </QueryClientProvider>
   );
   const continueButton = () => screen.getByRole("button", { name: /continue/i }) as HTMLButtonElement;
@@ -72,5 +81,27 @@ describe("StepProfile Continue gating", () => {
   test("enables Continue when a kickoff-failed idle scan falls back", () => {
     const { continueButton } = renderStep({ status: "idle" }, { kickoffFailed: true });
     expect(continueButton().disabled).toBe(false);
+  });
+});
+
+describe("StepProfile connect-a-model state (provider skipped)", () => {
+  test("an idle scan renders the connect-a-model copy with no spinner and no Try again", () => {
+    // With no provider the scan was never kicked off: idle would otherwise
+    // spin forever, and a retry could only fail the same way.
+    const { onDone, continueButton } = renderStep({ status: "idle" }, { scanUnavailable: true });
+    expect(screen.getByText(/connect a model first/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /try again/i })).toBeNull();
+    expect(continueButton().disabled).toBe(false);
+    fireEvent.click(continueButton());
+    expect(onDone).toHaveBeenCalledTimes(1);
+  });
+
+  test("a ready profile still renders even when the provider was later removed", () => {
+    renderStep(
+      { status: "ready", profile: { displayName: "Ada Lovelace", sections: [] } },
+      { scanUnavailable: true }
+    );
+    expect(screen.getByText("Ada Lovelace")).toBeTruthy();
+    expect(screen.queryByText(/connect a model first/i)).toBeNull();
   });
 });

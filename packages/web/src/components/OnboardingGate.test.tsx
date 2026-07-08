@@ -9,9 +9,10 @@
 // `session` query param) must render immediately and never redirect —
 // onboarding's "Add account" opens exactly that URL in a new tab for the
 // Google OAuth chat, and hijacking (or blanking) it makes the OAuth flow
-// unreachable mid-funnel. /setup gets the same exemption: the wizard has no
-// provider step, so on a fresh instance the proxy's / → /setup bounce must
-// not be re-redirected into a funnel the agent can't run without a provider.
+// unreachable mid-funnel. /setup gets the same exemption: it stays the
+// provider-setup surface for a completed instance whose provider is missing
+// (the proxy still bounces that state to /setup), and re-redirecting it into
+// the funnel would break it.
 //
 // LEAK SAFETY + COVERAGE SCOPE: mock.module is process-wide in `bun test`, so
 // only next/navigation is mocked (spread + overrides, reverted in afterAll —
@@ -116,7 +117,7 @@ describe("OnboardingGate", () => {
     expect(childVisible()).toBe(false);
   });
 
-  test("/setup renders untouched while incomplete (provider setup precedes onboarding)", () => {
+  test("/setup renders untouched while incomplete (exempt provider-setup surface)", () => {
     pathname = "/setup";
     renderGate(buildRecord());
     expect(replace).not.toHaveBeenCalled();

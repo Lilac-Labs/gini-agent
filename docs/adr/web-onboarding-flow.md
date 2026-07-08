@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-02
-- **See also:** [Multiple Tagged Google Accounts](./google-multi-account.md), [Chat Topics, Tasks, Subagents](./chat-topics-tasks-subagents.md), [Job Skill Attachments](./job-skill-attachments.md)
+- **See also:** [Multiple Tagged Google Accounts](./google-multi-account.md), [Chat Topics, Tasks, Subagents](./chat-topics-tasks-subagents.md), [Job Skill Attachments](./job-skill-attachments.md), [Managed Deployment Mode](./managed-deployment-mode.md)
 
 ## Decision
 
@@ -13,10 +13,14 @@ durable and product-defining: the onboarding record, the Gmail profile scan
 renderer over the `/api/onboarding` contract — it never composes prompts or
 cron expressions.
 
-The funnel opens with a **sign-in step (step 0)** — Google access is the
-app's top-level prerequisite, so an incomplete funnel always shows it first
-(no progress dots; the five wizard steps that follow carry them). The step
-adapts to the account registry (`GET /api/google/accounts`, polled while the
+The funnel opens with **prerequisite steps** ahead of the five dotted wizard
+steps (which are the same for every deployment): always a **sign-in step**,
+and — on a self-hosted deployment with no model provider configured — a
+**capability-derived provider step** (see "Capability-derived steps and the
+skip paths" below). Prerequisite steps carry no progress dots. Google access
+is the app's top-level prerequisite, so an incomplete funnel always shows
+sign-in first. The step adapts to the account registry
+(`GET /api/google/accounts`, polled while the
 step is up): with a signed-in account it offers "Continue as \<primary
 email\>", otherwise "Continue with Google" starts the connect flow and the
 button swaps once the account registers. The step's OAuth buttons ("Continue
@@ -30,10 +34,13 @@ reads the primary from the server-resolved `primary: true` row of
 See ADR google-multi-account.md, "The primary account and OAuth intents". The client-side OnboardingGate is
 render-blocking: authenticated content stays hidden until the record resolves
 (and while a redirect is in flight), so an incomplete user never flashes the
-home chrome before landing on `/onboarding`. The gate's one exemption is an
-explicit `/chat?session=…` deep link — a user following a direct link to a
-specific conversation asked for that exact surface, so it is never blanked or
-redirected mid-funnel.
+home chrome before landing on `/onboarding`. The gate has two exemptions,
+never blanked or redirected: an explicit `/chat?session=…` deep link — a user
+following a direct link to a specific conversation asked for that exact
+surface — and `/setup`, the standing provider-setup page for a **completed**
+instance whose provider is missing (the proxy's setup gate still bounces that
+state there; an incomplete funnel instead passes through the proxy and gets
+the wizard's own provider step — see below).
 
 ## Auth-mode switch and step re-entry
 
@@ -82,6 +89,55 @@ sign-in. The param only matters for an incomplete record (the gate redirects
 a completed user off `/onboarding` regardless). A failed add round trip comes
 back with `?googleAddError=1`, surfaced as a one-shot error toast at the page
 level (it can land on either returnTo).
+
+## Capability-derived steps and the skip paths
+
+The wizard derives its step sequence from deployment capabilities instead of
+persisting step state in the onboarding record. Steps are held by **name**
+(`onboardingSteps` / `OnboardingStep` in `_components/lib.ts`): the provider
+step can join the sequence after mount (the capability probe resolves
+async), so a numeric position could silently re-label the step the user is
+on. Sign-in and the provider step sit before `welcome` in the sequence, which
+is also how the page renders them dotless — the five product dots are stable
+for every deployment.
+
+- **Provider step** (`StepProvider`): shown only when `GET /api/setup/status`
+  answers a definite "self-hosted and no provider configured"
+  (`needsProviderStep`: `managed: false` AND `providerConfigured: false`; an
+  unresolved or failed probe never blocks the funnel on a guess). It renders
+  the shared `ProviderPicker` — the exact surface `/setup` renders — inside
+  the wizard frame, so the catalog, per-provider config forms, and
+  `POST /api/setup/provider` are all inherited. It sits between sign-in and
+  the wizard proper because the Gmail profile scan needs the model. A save
+  advances, invalidates the cached probe, and kicks the scan; "Skip for now"
+  (rendered by the step itself, so it survives a loading or failed catalog)
+  advances without one. Managed deployments never see the step — the platform
+  provisions the provider (ADR managed-deployment-mode.md).
+- **Scan gating:** the same `needsProviderStep` predicate gates the scan
+  kickoff — the scan's synthesis calls need the model, so without a provider
+  it could only fail. When the provider step is shown, sign-in's continue
+  defers the kick to the provider step's save; if the user skips instead, the
+  scan is never submitted and the profile step renders a **connect-a-model
+  state** (no eternal spinner, no "Try again" that can only fail; Continue
+  stays available) and the tasks step falls back to its static suggestions.
+- **Sign-in skip:** the sign-in step carries a quiet "Skip for now" that
+  completes onboarding minimally — `PATCH /api/onboarding` with
+  `completed: true` plus the browser-resolved timezone (theme keeps the app
+  default) — so a user without a Google account still reaches the app and can
+  connect one later via settings or skills. The page withholds the skip when
+  managed (the edge's Google sign-in IS the session, so the managed funnel is
+  unchanged). Skipping sign-in skips the whole funnel, provider step
+  included; a provider-less instance then falls under the `/setup` bounce
+  below, the standing surface for that state.
+- **Proxy interplay** (`packages/web/src/proxy.ts`): the setup gate's
+  "unconfigured self-hosted → 307 `/setup`" bounce yields to an incomplete
+  funnel. When the status probe reports unconfigured+unmanaged, the proxy
+  probes `GET /api/onboarding`; only an explicit `completed: false` passes
+  the request through (OnboardingGate then routes it to `/onboarding`, whose
+  provider step replaces the `/setup` detour). Completed, an unexpected
+  payload, or a failed probe all keep the bounce — and the GET's server-side
+  grandfathering means a used instance answers `completed: true`, so existing
+  installs never see the funnel.
 
 - **Persistence:** `~/.gini/instances/<instance>/onboarding.json`
   (`packages/runtime/src/state/onboarding.ts`) — deliberately NOT part of
@@ -177,11 +233,14 @@ The runtime must own the model call regardless: skill scripts receive only
 Google OAuth connector secrets, never model API keys — so keeping the fetch in
 runtime too (rather than a new skill) is the natural fit.
 
-The web kicks the scan off from the **sign-in step's continue action** — the
-moment Gmail access is confirmed — not on page mount (a mount-time kick fired
-spurious runs on every visit, including the brief mount a completed user gets
-before the gate redirects). The same mutation backs the profile step's "Try
-again" after a failure: `POST /api/onboarding/scan` resubmits a `failed` scan
+The web kicks the scan off the moment its two prerequisites hold — Google
+access confirmed at the **sign-in step's continue action**, and a provider to
+synthesize with (when the capability-derived provider step is shown, the kick
+moves to that step's save; a skipped provider step means no kick at all — see
+"Capability-derived steps and the skip paths") — not on page mount (a
+mount-time kick fired spurious runs on every visit, including the brief mount
+a completed user gets before the gate redirects). The same mutation backs the
+profile step's "Try again" after a failure: `POST /api/onboarding/scan` resubmits a `failed` scan
 (clearing the previous error) while staying idempotent for `running`/`ready`
 and refusing entirely on a completed record. Should the scan still be running
 when the user reaches the tasks step, that step shows a hint and adopts the

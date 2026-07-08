@@ -365,21 +365,34 @@ export function useGoogleAuthMode() {
   });
 }
 
-// Whether this deployment is platform-managed (GET /api/setup/status →
-// `managed`, true when the runtime carries the hosted marker GINI_HOSTED=1).
-// The platform provisions the model provider, updates, and ingress, so the
-// web hides its self-serve surfaces when managed: the tunnel menu, the
-// self-update row, the provider settings sections, /setup, and
-// /settings/add-provider. Consumers treat a missing answer as unmanaged, so
-// a self-hosted deployment renders identically even before (or without) a
-// response. Fixed per deployment, so the answer never goes stale. See ADR
-// managed-deployment-mode.md.
-export function useManagedMode() {
-  return useQuery<{ managed: boolean }>({
+// The deployment's setup status (GET /api/setup/status), the probe behind two
+// capability decisions:
+//   - `managed`: true when the runtime carries the hosted marker
+//     GINI_HOSTED=1. The platform provisions the model provider, updates, and
+//     ingress, so the web hides its self-serve surfaces when managed: the
+//     tunnel menu, the self-update row, the provider settings sections,
+//     /setup, and /settings/add-provider. See ADR managed-deployment-mode.md.
+//   - `providerConfigured`: whether turns can actually dispatch (a real
+//     provider is configured, directly or via fallback). The onboarding
+//     wizard derives its provider step from it (shown only when unmanaged AND
+//     unconfigured — ADR web-onboarding-flow.md) and gates the Gmail scan on
+//     it (the scan's synthesis needs the model).
+// Consumers treat a missing answer as unmanaged/configured, so a self-hosted
+// deployment renders identically even before (or without) a response. `managed`
+// is fixed per deployment and `providerConfigured` only changes through the
+// wizard's own save (which invalidates this key), so Infinity staleness holds.
+export function useSetupStatus() {
+  return useQuery<{ managed: boolean; providerConfigured: boolean }>({
     queryKey: ["setup-status"],
-    queryFn: () => api<{ managed: boolean }>("/setup/status"),
+    queryFn: () => api<{ managed: boolean; providerConfigured: boolean }>("/setup/status"),
     staleTime: Infinity
   });
+}
+
+// The managed-mode view of the setup-status probe, kept for the surfaces that
+// only gate on `managed` (sidebar footer, provider settings, add-provider).
+export function useManagedMode() {
+  return useSetupStatus();
 }
 
 // First-run onboarding record (GET /api/onboarding). The deterministic profile

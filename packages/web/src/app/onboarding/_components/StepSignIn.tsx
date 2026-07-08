@@ -24,8 +24,20 @@ import { useConnectGoogleAccount, useReloginPrimary } from "./useConnectGoogleAc
 // /auth/google/add or the gateway's loopback PKCE flow — see
 // useConnectGoogleAccount), returning to /onboarding so the funnel restarts
 // at this step with the fresh account visible.
+// `onSkip` (self-hosted only — the page withholds it when managed, where the
+// edge's Google sign-in is the session itself) renders a quiet "Skip for now"
+// that completes onboarding minimally, so a user without a Google account
+// still reaches the app; they can connect one later via settings or skills.
 // The design's Microsoft button is omitted — no Microsoft integration exists.
-export function StepSignIn({ onContinue }: { onContinue: () => void }) {
+export function StepSignIn({
+  onContinue,
+  onSkip,
+  skipPending
+}: {
+  onContinue: () => void;
+  onSkip?: () => void;
+  skipPending?: boolean;
+}) {
   const accounts = useGoogleAccounts({ refetchInterval: 5_000 });
   // Signin intent: the account this OAuth completes as becomes the persisted
   // primary, so "Use a different account" actually flips the step-0 card.
@@ -92,6 +104,16 @@ export function StepSignIn({ onContinue }: { onContinue: () => void }) {
             Continue with Google
           </GoogleButton>
         )}
+        {onSkip ? (
+          <button
+            type="button"
+            onClick={onSkip}
+            disabled={skipPending}
+            className="text-[13px] text-[#9A9A94] transition-colors hover:text-[#6B6B66] hover:underline disabled:opacity-50"
+          >
+            Skip for now
+          </button>
+        ) : null}
       </div>
     </div>
   );

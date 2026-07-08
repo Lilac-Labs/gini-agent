@@ -18,20 +18,25 @@ import { profileCardView, splitEmailSegments } from "./lib";
 // forever and this card spinning with it. The fallback keeps the friendly copy
 // but shows the scan error (when there is one) and a "Try again" wired to the
 // same kickoff mutation, which resubmits a failed scan server-side.
+// scanUnavailable (no provider configured — the user skipped the provider
+// step) renders the connect-a-model state instead: no spinner (nothing will
+// ever finish) and no "Try again" (a retry could only fail the same way).
 export function StepProfile({
   kickoffFailed,
+  scanUnavailable,
   onRetry,
   retryPending,
   onDone
 }: {
   kickoffFailed: boolean;
+  scanUnavailable: boolean;
   onRetry: () => void;
   retryPending: boolean;
   onDone: () => void;
 }) {
   const { data } = useOnboarding();
   const scan = data?.scan;
-  const view = profileCardView(scan, kickoffFailed);
+  const view = profileCardView(scan, kickoffFailed, scanUnavailable);
   const profile = view === "profile" ? scan?.profile : undefined;
 
   return (
@@ -55,6 +60,16 @@ export function StepProfile({
           </p>
           <p className="text-[13px] text-[#9A9A94]">
             Creating a profile for you. This usually takes a minute.
+          </p>
+        </div>
+      ) : view === "unavailable" ? (
+        <div className="flex flex-col gap-3 py-10 text-center">
+          <h1 className={`${serif} text-[24px]/[29px] font-medium`}>
+            Here&rsquo;s what we know about you
+          </h1>
+          <p className="mx-auto max-w-md text-[15px]/[22px] text-[#6B6B66]">
+            Connect a model first — Gini reads your inbox with it to build your profile.
+            You can add a provider anytime in Settings, and Gini will learn as you use it.
           </p>
         </div>
       ) : (

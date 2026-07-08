@@ -22,10 +22,13 @@ import { useOnboarding } from "@/lib/queries";
 //     param) — a user following a direct link to a specific conversation
 //     (e.g. from a notification) asked for that exact surface, and hijacking
 //     (or blanking) it mid-funnel would strand them;
-//   - /setup — provider setup must be reachable before onboarding, since the
-//     wizard has no provider step: on a fresh instance the proxy bounces
-//     / → /setup, and redirecting that into the funnel would leave no way to
-//     ever configure a provider.
+//   - /setup — the standing provider-setup surface for a completed instance
+//     whose provider is missing (the proxy still bounces that state to
+//     /setup); redirecting it into the funnel would break it. An incomplete
+//     funnel doesn't take that detour: the wizard carries its own
+//     capability-derived provider step, so the proxy lets those requests
+//     through and this gate routes them to /onboarding (ADR
+//     web-onboarding-flow.md).
 //
 // Mounted only inside the authenticated chrome (AppShell), so the pre-auth
 // /login page never fires the query.

@@ -2,7 +2,10 @@
 // by the matcher below. One responsibility:
 //
 //   Setup gate. If no provider is configured the operator is bounced to
-//   /setup so the rest of the app doesn't render in a broken state.
+//   /setup so the rest of the app doesn't render in a broken state — unless
+//   first-run onboarding is still incomplete, in which case the request
+//   passes through so the onboarding wizard (which carries its own provider
+//   step) can run instead. See ADR web-onboarding-flow.md.
 //
 // The Host classifier rejects requests whose Host is neither loopback nor a
 // configured GINI_TRUSTED_ORIGINS entry, so a DNS-rebinding page pointed at
@@ -31,6 +34,31 @@ async function fetchSetupStatus(): Promise<{ providerConfigured: boolean; manage
     return { providerConfigured: data.providerConfigured === true, managed: data.managed === true };
   } catch {
     return null;
+  }
+}
+
+// Whether first-run onboarding is still incomplete. Probed only when the
+// setup gate would otherwise bounce to /setup (self-hosted, no provider): the
+// onboarding wizard now carries its own capability-derived provider step (ADR
+// web-onboarding-flow.md), so an incomplete funnel must win over the /setup
+// bounce — the request passes through and the client-side OnboardingGate
+// routes it to /onboarding. Only an explicit `completed: false` counts:
+// completed, an unexpected payload, or a failed probe all keep the
+// pre-onboarding behavior (bounce a provider-less operator to /setup). The
+// GET's server-side grandfathering means a used instance answers
+// `completed: true` here, so existing installs never see the funnel.
+async function fetchOnboardingIncomplete(): Promise<boolean> {
+  const url = `${runtimeUrl()}/api/onboarding`;
+  try {
+    const response = await fetch(url, {
+      headers: { authorization: `Bearer ${runtimeToken()}` },
+      signal: AbortSignal.timeout(PROXY_STATUS_TIMEOUT_MS)
+    });
+    if (!response.ok) return false;
+    const data = (await response.json()) as { completed?: unknown };
+    return data.completed === false;
+  } catch {
+    return false;
   }
 }
 
@@ -139,7 +167,12 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
       && !pathname.startsWith("/api/")
     ) {
       const status = await fetchSetupStatus();
-      if (status !== null && !status.managed && !status.providerConfigured) {
+      if (
+        status !== null
+        && !status.managed
+        && !status.providerConfigured
+        && !(await fetchOnboardingIncomplete())
+      ) {
         // The gateway rewrites Host to loopback before proxying, so this absolute
         // redirect resolves to the loopback web port — which would point a remote
         // tunnel browser at its own 127.0.0.1. The gateway rewrites a loopback

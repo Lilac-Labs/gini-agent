@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/PageHeader";
 import { api } from "@/lib/api";
-import { useInvalidate, useStatus } from "@/lib/queries";
+import { useInvalidate, useManagedMode, useStatus } from "@/lib/queries";
 import { DefaultModelControl } from "./_components/DefaultModelControl";
 import { ProviderCard } from "./_components/ProviderCard";
 import type { ProviderCatalogItem } from "@/lib/providers";
@@ -19,6 +19,12 @@ import { BrowserSettingsCard } from "./_components/BrowserSettingsCard";
 export default function SettingsPage() {
   const invalidate = useInvalidate();
   const status = useStatus();
+  // Managed (platform-hosted) deployments provision the model provider, so
+  // the self-serve provider sections (default model + provider rows / add
+  // provider) are hidden; everything else on the page stays. An absent or
+  // failed answer shows them — self-hosted behavior is the default. See ADR
+  // managed-deployment-mode.md.
+  const managed = useManagedMode().data?.managed === true;
   const catalog = useQuery({
     queryKey: ["providers"],
     queryFn: () => api<ProviderCatalogItem[]>("/providers/catalog"),
@@ -101,16 +107,20 @@ export default function SettingsPage() {
         }
       />
       <div className="flex-1 space-y-4 overflow-auto p-6">
-        <DefaultModelControl />
+        {managed ? null : (
+          <>
+            <DefaultModelControl />
 
-        <ProviderCard
-          catalog={catalog.data ?? []}
-          activeProviderName={activeProviderName}
-          activeProviderModel={activeProviderModel}
-          activeProviderAwsRegion={activeProviderAwsRegion}
-          activeProvider={activeProvider}
-          defaultModelProviderName={defaultAgent?.providerName}
-        />
+            <ProviderCard
+              catalog={catalog.data ?? []}
+              activeProviderName={activeProviderName}
+              activeProviderModel={activeProviderModel}
+              activeProviderAwsRegion={activeProviderAwsRegion}
+              activeProvider={activeProvider}
+              defaultModelProviderName={defaultAgent?.providerName}
+            />
+          </>
+        )}
 
         <BrowserSettingsCard />
 

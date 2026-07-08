@@ -11,11 +11,13 @@ import { ProviderPicker } from "@/components/ProviderPicker";
 // they can use the app.
 //
 // On mount we call /api/setup/status. If providerConfigured is true the user
-// got here by mistake (or backed into the URL) and we redirect home. Otherwise
-// we render the shared ProviderPicker, which offers the full provider catalog
-// (OpenAI, Codex, Anthropic, Bedrock, OpenRouter, DeepSeek, Azure, Local) and
-// POSTs the choice to /api/setup/provider — the same surface Settings → Add
-// provider uses.
+// got here by mistake (or backed into the URL) and we redirect home — same
+// for `managed` (a platform-hosted deployment provisions the provider, so
+// this page has nothing to offer; see ADR managed-deployment-mode.md).
+// Otherwise we render the shared ProviderPicker, which offers the full
+// provider catalog (OpenAI, Codex, Anthropic, Bedrock, OpenRouter, DeepSeek,
+// Azure, Local) and POSTs the choice to /api/setup/provider — the same
+// surface Settings → Add provider uses.
 
 type SetupStatus = {
   ok: true;
@@ -26,6 +28,7 @@ type SetupStatus = {
   providers: string[];
   current: string | null;
   message: string;
+  managed: boolean;
 };
 
 export default function SetupPage() {
@@ -41,7 +44,7 @@ export default function SetupPage() {
         const next = await api<SetupStatus>("/setup/status");
         if (cancelled) return;
         setStatus(next);
-        if (next.providerConfigured) router.replace("/");
+        if (next.providerConfigured || next.managed) router.replace("/");
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       } finally {

@@ -25,6 +25,9 @@ coveragePathIgnorePatterns = [
   # this harness never fully covered.
   "src/components/chat/BlockSetupRequested.tsx",
   "src/components/StatusPill.tsx",
+  # Same shape: Sidebar.test.tsx pins the managed-mode footer gating only
+  # (ADR managed-deployment-mode.md), not the whole sidebar surface.
+  "src/components/Sidebar.tsx",
   "src/lib/**",
   "src/app/**",
   "src/proxy.ts",

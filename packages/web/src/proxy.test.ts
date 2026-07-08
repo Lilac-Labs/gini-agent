@@ -28,10 +28,13 @@ function makeRequest(opts: { url: string; host: string; method?: string; secFetc
   });
 }
 
-// Stub the provider-status probe the loopback setup gate calls.
-function stubSetupStatus(providerConfigured: boolean): void {
+// Stub the setup-status probe the loopback setup gate calls. `managed`
+// mirrors the runtime's managed-deployment flag (ADR
+// managed-deployment-mode.md); omitting it exercises the pre-managed payload
+// shape, which the gate must read as self-hosted.
+function stubSetupStatus(providerConfigured: boolean, managed?: boolean): void {
   globalThis.fetch = (async () =>
-    new Response(JSON.stringify({ providerConfigured }), {
+    new Response(JSON.stringify(managed === undefined ? { providerConfigured } : { providerConfigured, managed }), {
       status: 200,
       headers: { "content-type": "application/json" }
     })) as unknown as typeof fetch;
@@ -105,5 +108,23 @@ describe("proxy loopback setup gate", () => {
     stubSetupStatus(true);
     const res = await proxy(makeRequest({ url: "http://localhost/chat", host: "localhost", secFetchDest: "document" }));
     expect(res.status).toBe(200);
+  });
+
+  test("managed deployment: no /setup redirect even while unconfigured", async () => {
+    // A managed (platform-hosted) runtime provisions its own provider, so the
+    // gate must never bounce it to /setup — even if the status probe reports
+    // providerConfigured false. See ADR managed-deployment-mode.md.
+    stubSetupStatus(false, true);
+    const res = await proxy(makeRequest({ url: "http://localhost/chat", host: "localhost", secFetchDest: "document" }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  test("managed false in the payload keeps the unconfigured redirect", async () => {
+    stubSetupStatus(false, false);
+    const res = await proxy(makeRequest({ url: "http://localhost/chat", host: "localhost", secFetchDest: "document" }));
+    expect(res.status).toBeGreaterThanOrEqual(300);
+    expect(res.status).toBeLessThan(400);
+    expect(res.headers.get("location")).toContain("/setup");
   });
 });

@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
@@ -7,12 +8,20 @@ import { toast } from "sonner";
 import { ArrowLeftIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ProviderPicker, type ProviderSaveSummary } from "@/components/ProviderPicker";
+import { useManagedMode } from "@/lib/queries";
 
 export default function AddProviderPage() {
   const router = useRouter();
   const params = useSearchParams();
   const queryClient = useQueryClient();
   const preselect = params.get("provider") ?? "";
+  // Managed (platform-hosted) deployments provision the model provider, so
+  // adding one by hand is off the table — bounce home, the same treatment
+  // /setup gives a managed deployment. See ADR managed-deployment-mode.md.
+  const managed = useManagedMode().data?.managed === true;
+  useEffect(() => {
+    if (managed) router.replace("/");
+  }, [managed, router]);
 
   const onSaved = async ({ provider, model, isCodex }: ProviderSaveSummary) => {
     toast.success(isCodex ? "Codex OAuth verified." : `Provider set to ${provider} (${model}).`);

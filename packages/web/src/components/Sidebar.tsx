@@ -14,6 +14,7 @@ import {
   Menu,
   Moon,
   MoreHorizontal,
+  Plug,
   Plus,
   RefreshCw,
   Repeat,
@@ -490,7 +491,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
             </>
           ) : null}
 
-          {/* Nav: People, Routines, Skills, Logs, Settings */}
+          {/* Nav: People, Routines, Skills, Integrations, Logs, Settings */}
           <ul className="flex flex-col gap-0.5">
             <li>
               <Link href="/people" onClick={onNavigate} className={navItem(pathname === "/people")}>
@@ -508,6 +509,12 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
               <Link href="/skills" onClick={onNavigate} className={navItem(pathname === "/skills")}>
                 <WandSparkles className="size-3.5 text-sidebar-foreground/70" />
                 Skills
+              </Link>
+            </li>
+            <li>
+              <Link href="/integrations" onClick={onNavigate} className={navItem(pathname === "/integrations")}>
+                <Plug className="size-3.5 text-sidebar-foreground/70" />
+                Integrations
               </Link>
             </li>
             <li>

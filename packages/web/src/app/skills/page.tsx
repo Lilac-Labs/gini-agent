@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -12,10 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader, EmptyState } from "@/components/PageHeader";
 import { MarkdownContent } from "@/components/chat/MarkdownContent";
 import { api } from "@/lib/api";
-import { useConnectors, useGoogleAccounts, useInvalidate, useProviders, useSkills, type ProviderDescriptor } from "@/lib/queries";
-import { AddConnectorDialog, type CreateConnectorBody } from "@/components/AddConnectorDialog";
-import { ManualCredentialDialog } from "@/components/ManualCredentialDialog";
-import { GoogleAccountsCard } from "./_components/GoogleAccountsCard";
+import { useConnectors, useInvalidate, useProviders, useSkills, type ProviderDescriptor } from "@/lib/queries";
 import { deriveActivation, type Activation } from "./_activation";
 import type { ChatSession } from "@/lib/view-types";
 import type { ConnectorRecord, SkillRecord } from "@runtime/types";
@@ -26,25 +24,6 @@ type ReloadReport = {
   skipped: Array<{ path: string; reason: string }>;
 };
 
-type DetectionReport = {
-  considered: number;
-  created: Array<{ id: string; provider: string; name: string }>;
-  skipped: Array<{ provider: string; reason: string }>;
-};
-
-// Per-row state for the inline Add Connector dialog. The Skills page renders
-// one dialog at a time; pendingProvider holds the provider id so the modal
-// opens pre-scoped to the row the user clicked from. mode toggles between
-// creating a new connector ("create") and rotating the secret on an existing
-// one ("rotate"); rotate carries the connectorId so submit can PATCH it.
-interface InlineDialogState {
-  open: boolean;
-  provider: string;
-  suggestedName: string;
-  mode: "create" | "rotate";
-  connectorId?: string;
-}
-
 export default function SkillsPage() {
   const router = useRouter();
   const [search, setSearch] = useState("");
@@ -53,13 +32,7 @@ export default function SkillsPage() {
   const skills = useSkills(debounced);
   const connectors = useConnectors();
   const providers = useProviders();
-  // Machine-global registry — exists even with no google-oauth-desktop
-  // connector record, so the accounts card can render on a registry-only
-  // machine where the connectors enrichment has nothing to attach to.
-  const googleAccounts = useGoogleAccounts();
   const invalidate = useInvalidate();
-  const [dialog, setDialog] = useState<InlineDialogState>({ open: false, provider: "", suggestedName: "", mode: "create" });
-  const [manualProvider, setManualProvider] = useState<ProviderDescriptor | null>(null);
 
   useEffect(() => {
     const timer = setTimeout(() => setDebounced(search), 200);
@@ -94,57 +67,6 @@ export default function SkillsPage() {
       const skipped = result.skipped.length;
       toast.success(`Reload: +${added} new · ~${updated} updated${skipped ? ` · ${skipped} skipped` : ""}`);
       invalidate(["skills"]);
-    },
-    onError: (error: Error) => toast.error(error.message)
-  });
-
-  const detect = useMutation({
-    mutationFn: () => api<DetectionReport>("/connectors/detect", { method: "POST" }),
-    onSuccess: (result) => {
-      const created = result.created.length;
-      toast.success(created === 0 ? "Detection ran — no new connectors." : `Detected ${created} connector${created === 1 ? "" : "s"}.`);
-      invalidate(["connectors", "skills", "events"]);
-    },
-    onError: (error: Error) => toast.error(error.message)
-  });
-
-  const create = useMutation({
-    mutationFn: (body: CreateConnectorBody) =>
-      api<ConnectorRecord>("/connectors", { method: "POST", body: JSON.stringify(body) }),
-    onSuccess: async (created) => {
-      toast.success(`Added ${created.name}`);
-      invalidate(["connectors", "events", "skills"]);
-      // Best-effort initial probe — same pattern the old Connectors page
-      // used so the row flips to healthy without waiting on the periodic
-      // re-probe. Failures land on the connector record itself.
-      await api(`/connectors/${created.id}/health`, { method: "POST" }).catch(() => undefined);
-      invalidate(["connectors", "skills"]);
-      setDialog({ open: false, provider: "", suggestedName: "", mode: "create" });
-      setManualProvider(null);
-    },
-    onError: (error: Error) => toast.error(error.message)
-  });
-
-  const rotate = useMutation({
-    mutationFn: ({ id, body }: { id: string; body: CreateConnectorBody }) =>
-      api<ConnectorRecord>(`/connectors/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
-    onSuccess: async (updated) => {
-      toast.success(`Rotated ${updated.name}`);
-      invalidate(["connectors", "events", "skills"]);
-      // Re-probe immediately so the row flips back to healthy without
-      // waiting on the periodic re-probe — same pattern as the create path.
-      await api(`/connectors/${updated.id}/health`, { method: "POST" }).catch(() => undefined);
-      invalidate(["connectors", "skills"]);
-      setDialog({ open: false, provider: "", suggestedName: "", mode: "create" });
-    },
-    onError: (error: Error) => toast.error(error.message)
-  });
-
-  const disconnect = useMutation({
-    mutationFn: (id: string) => api<{ id: string; tombstoned?: boolean }>(`/connectors/${id}`, { method: "DELETE" }),
-    onSuccess: (result) => {
-      toast.success(result.tombstoned ? "Disconnected (kept as tombstone)" : "Connector removed");
-      invalidate(["connectors", "events", "skills"]);
     },
     onError: (error: Error) => toast.error(error.message)
   });
@@ -203,9 +125,6 @@ export default function SkillsPage() {
         description="Procedures the agent can use"
         actions={
           <>
-            <Button size="sm" variant="outline" disabled={detect.isPending} onClick={() => detect.mutate()}>
-              {detect.isPending ? "Detecting…" : "Refresh detection"}
-            </Button>
             <Button size="sm" variant="outline" disabled={reload.isPending} onClick={() => reload.mutate()}>
               {reload.isPending ? "Reloading…" : "Reload from disk"}
             </Button>
@@ -344,7 +263,6 @@ export default function SkillsPage() {
                         const satisfying = matches.find(
                           (c) => c.health === "healthy" || (!hasProbe && c.health === "unknown" && c.status === "configured")
                         );
-                        const dependentCount = countDependentSkills(filtered, credentialName);
                         return (
                           <li key={credentialName} className="space-y-2 text-xs">
                             <div className="flex items-center justify-between gap-2">
@@ -356,23 +274,12 @@ export default function SkillsPage() {
                                 <Badge variant="outline" className="text-[10px] text-emerald-600">
                                   {satisfying.health === "healthy" ? "healthy" : "configured"} ({satisfying.name})
                                 </Badge>
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  className="h-6 px-2 text-[10px]"
-                                  disabled={disconnect.isPending}
-                                  onClick={() => {
-                                    const message = `Disconnect ${satisfying.name}?\nThis will deactivate ${dependentCount} dependent skill${dependentCount === 1 ? "" : "s"}.`;
-                                    if (confirm(message)) disconnect.mutate(satisfying.id);
-                                  }}
-                                >
-                                  Disconnect
-                                </Button>
+                                <ManageInIntegrationsLink />
                               </div>
                             ) : !provider ? (
                               // No registered provider module for this
-                              // credential name, so there's no Add Connector
-                              // dialog to open at it. The canonical path is
+                              // credential name, so the Integrations page has
+                              // no tile for it. The canonical path is
                               // agent-driven request_connector, so hand off to
                               // chat with a seed that names this credential
                               // rather than dead-ending.
@@ -387,12 +294,9 @@ export default function SkillsPage() {
                               </Button>
                             ) : matches.length > 0 ? (
                               // Matching connector(s) exist but none satisfy
-                              // (typically: unhealthy creds). Render the
-                              // first one inline with Rotate + Disconnect so
-                              // the user can fix it without leaving the
-                              // page. We deliberately do NOT show "Set up"
-                              // here to avoid creating a second connector
-                              // for the same provider.
+                              // (typically: unhealthy creds). Surface the
+                              // first one's state; rotate/disconnect live on
+                              // the Integrations page now.
                               (() => {
                                 const broken = matches[0]!;
                                 const label = broken.health === "unhealthy" ? "unhealthy" : broken.health;
@@ -402,35 +306,7 @@ export default function SkillsPage() {
                                       <Badge variant="outline" className="text-[10px] text-amber-600">
                                         {label} ({broken.name})
                                       </Badge>
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        className="h-6 px-2 text-[10px]"
-                                        disabled={rotate.isPending}
-                                        onClick={() =>
-                                          setDialog({
-                                            open: true,
-                                            provider: broken.provider,
-                                            suggestedName: broken.name,
-                                            mode: "rotate",
-                                            connectorId: broken.id
-                                          })
-                                        }
-                                      >
-                                        Rotate
-                                      </Button>
-                                      <Button
-                                        size="sm"
-                                        variant="ghost"
-                                        className="h-6 px-2 text-[10px]"
-                                        disabled={disconnect.isPending}
-                                        onClick={() => {
-                                          const message = `Disconnect ${broken.name}?\nThis will deactivate ${dependentCount} dependent skill${dependentCount === 1 ? "" : "s"}.`;
-                                          if (confirm(message)) disconnect.mutate(broken.id);
-                                        }}
-                                      >
-                                        Disconnect
-                                      </Button>
+                                      <ManageInIntegrationsLink />
                                     </div>
                                     {broken.message ? (
                                       <p className="text-[10px] text-muted-foreground">{broken.message}</p>
@@ -444,44 +320,21 @@ export default function SkillsPage() {
                               // with its Google Workspace credential already in
                               // place (baked by the host, registered at boot),
                               // so there's nothing for the user to set up. Show
-                              // it as provisioned rather than offering a setup
-                              // affordance the hosted product doesn't need.
-                              <Badge variant="outline" className="text-[10px] text-emerald-600">
-                                provisioned
-                              </Badge>
+                              // it as provisioned; account management (retag /
+                              // add / remove) lives on the Integrations page.
+                              <div className="flex items-center gap-1.5">
+                                <Badge variant="outline" className="text-[10px] text-emerald-600">
+                                  provisioned
+                                </Badge>
+                                <ManageInIntegrationsLink />
+                              </div>
                             ) : (
-                              // Simple secret-only providers (e.g. linear
-                              // PAT). Original credential dialog works
-                              // fine — user pastes one token and submits.
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-6 px-2 text-[10px]"
-                                onClick={() =>
-                                  setDialog({
-                                    open: true,
-                                    provider: provider.id,
-                                    suggestedName: provider.label,
-                                    mode: "create"
-                                  })
-                                }
-                              >
-                                Set up {provider.label}
-                              </Button>
+                              // A registered provider exists for this
+                              // credential — its connect flow lives on the
+                              // Integrations page.
+                              <ManageInIntegrationsLink />
                             )}
                             </div>
-                            {/* Tagged Google accounts. With a configured
-                                connector they ride its `accounts`
-                                enrichment; on a registry-only machine (no
-                                record) they come from the machine-global
-                                registry query. Surface them so the user can
-                                retag / remove / add another. */}
-                            {provider?.id === "google-oauth-desktop" &&
-                            (satisfying || (googleAccounts.data ?? []).length > 0) ? (
-                              <GoogleAccountsCard
-                                accounts={satisfying?.accounts ?? googleAccounts.data ?? []}
-                              />
-                            ) : null}
                           </li>
                         );
                       })}
@@ -608,33 +461,18 @@ export default function SkillsPage() {
           )}
         </div>
       </div>
-
-      <AddConnectorDialog
-        open={dialog.open}
-        onOpenChange={(open) =>
-          setDialog((prev) => (open ? prev : { open: false, provider: "", suggestedName: "", mode: "create" }))
-        }
-        onSubmit={(body) =>
-          dialog.mode === "rotate" && dialog.connectorId
-            ? rotate.mutate({ id: dialog.connectorId, body })
-            : create.mutate(body)
-        }
-        pending={dialog.mode === "rotate" ? rotate.isPending : create.isPending}
-        providers={providers.data ?? []}
-        defaultProvider={dialog.provider || undefined}
-        defaultName={dialog.suggestedName}
-        lockProvider
-        mode={dialog.mode}
-      />
-
-      <ManualCredentialDialog
-        open={manualProvider !== null}
-        onOpenChange={(open) => { if (!open) setManualProvider(null); }}
-        provider={manualProvider}
-        onSubmit={(body) => create.mutate(body)}
-        pending={create.isPending}
-      />
     </>
+  );
+}
+
+// Connector management (connect, rotate, disconnect, Google accounts) lives on
+// the Integrations page; credential rows here link to it instead of embedding
+// the dialogs.
+function ManageInIntegrationsLink() {
+  return (
+    <Button asChild size="sm" variant="outline" className="h-6 px-2 text-[10px]">
+      <Link href="/integrations">Manage in Integrations</Link>
+    </Button>
   );
 }
 
@@ -715,13 +553,4 @@ function providerByCredentialNameMap(providers: ProviderDescriptor[]): Map<strin
     if (name && !map.has(name)) map.set(name, p);
   }
   return map;
-}
-
-function countDependentSkills(skills: SkillRecord[], credentialName: string): number {
-  let count = 0;
-  for (const skill of skills) {
-    const required = skill.requiredCredentials ?? [];
-    if (required.includes(credentialName)) count += 1;
-  }
-  return count;
 }

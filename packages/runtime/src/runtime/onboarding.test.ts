@@ -383,11 +383,13 @@ describe("web onboarding api", () => {
     expect(byName["Auto-inbox"].prompt).toContain("never sends email");
     expect(byName["Morning Briefing"].cronExpression).toBe("0 8 * * *");
     expect(byName["Morning Briefing"].skillNames).toEqual(["google-gmail", "google-calendar"]);
-    expect(byName["Morning Briefing"].forwardToChat).toBe(true);
+    // Delivery is the routine's own conversation, never a forward into the
+    // (hidden) main agent Chat.
+    expect(byName["Morning Briefing"].forwardToChat).toBeUndefined();
     expect(byName["Morning Briefing"].prompt).toContain("news");
     expect(byName["Meeting Briefing"].cronExpression).toBe("*/15 * * * *");
     expect(byName["Meeting Briefing"].skillNames).toEqual(["google-calendar", "google-gmail"]);
-    expect(byName["Meeting Briefing"].forwardToChat).toBe(true);
+    expect(byName["Meeting Briefing"].forwardToChat).toBeUndefined();
 
     // Re-apply with a smaller selection: the previous jobs are replaced, not
     // duplicated, and the omitted timezone falls back to the PATCHed record.

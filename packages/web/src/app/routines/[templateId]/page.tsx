@@ -5,7 +5,7 @@ import Link from "next/link";
 import { notFound, useRouter } from "next/navigation";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ChevronRightIcon, PlayIcon, Trash2Icon, ZapIcon } from "lucide-react";
+import { ChevronRightIcon, MessageSquareIcon, PlayIcon, Trash2Icon, ZapIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/PageHeader";
@@ -183,6 +183,19 @@ function RoutineDetail({ template }: { template: RoutineTemplateView }) {
                 <PlayIcon className="size-[17px] text-muted-foreground" aria-hidden />
                 Run Now
               </button>
+              {installed.chatSessionId ? (
+                // The routine's dedicated conversation — where each run's
+                // briefing lands (same idiom as the watcher detail's Open
+                // channel). Absent only on installs predating provisioning.
+                <button
+                  type="button"
+                  onClick={() => router.push(`/chat?session=${encodeURIComponent(installed.chatSessionId!)}`)}
+                  className="flex items-center gap-3 rounded-lg px-2 py-2.5 text-left text-sm font-medium transition-colors hover:bg-muted"
+                >
+                  <MessageSquareIcon className="size-[17px] text-muted-foreground" aria-hidden />
+                  Open messages
+                </button>
+              ) : null}
             </div>
           ) : null}
         </div>

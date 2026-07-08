@@ -11,6 +11,9 @@
 //     template → 404
 //   - install persists the resolved options (defaults merged with overrides)
 //     as templateOptions, and GET exposes them as installed.options
+//   - install provisions a channel session titled after the routine (the
+//     job's delivery surface); reinstall carries the same session forward;
+//     uninstall archives it with the job
 //   - uninstall: removes the installed job, 404 when nothing is installed
 //   - install/uninstall are agent-scoped: one agent's install never touches
 //     another agent's job for the same template
@@ -99,7 +102,9 @@ describe("routine templates", () => {
     expect(morning.templateId).toBe("morning-briefing");
     expect(morning.cronExpression).toBe("0 8 * * *");
     expect(morning.skillNames).toEqual(["google-gmail", "google-calendar"]);
-    expect(morning.forwardToChat).toBe(true);
+    // Delivery is the routine's own conversation, never a forward into the
+    // (hidden) main agent Chat.
+    expect(morning.forwardToChat).toBeUndefined();
     expect(morning.prompt).toBe(
       [
         "Prepare the user's morning briefing: a brief digest of important unread email plus today's calendar.",
@@ -115,7 +120,7 @@ describe("routine templates", () => {
     expect(meeting.templateId).toBe("meeting-briefing");
     expect(meeting.cronExpression).toBe("*/15 * * * *");
     expect(meeting.skillNames).toEqual(["google-calendar", "google-gmail"]);
-    expect(meeting.forwardToChat).toBe(true);
+    expect(meeting.forwardToChat).toBeUndefined();
     expect(meeting.prompt).toBe(
       "Check the user's calendar for meetings starting within the next hour that haven't been briefed yet. When one is found, prepare a prep note: attendees, recent email context with them, and the agenda. Otherwise do nothing and finish quietly."
     );
@@ -147,7 +152,7 @@ describe("routine templates", () => {
     });
     const listed = await call(handler, config, "/api/routines/templates");
     const meeting = listed.templates.find((t: { id: string }) => t.id === "meeting-briefing");
-    expect(meeting.installed).toEqual({ jobId: job.id, status: "active" });
+    expect(meeting.installed).toEqual({ jobId: job.id, status: "active", chatSessionId: job.chatSessionId });
 
     // Agent scoping mirrors GET /api/jobs: a filter naming another agent
     // hides the install; the owning agent's filter shows it.
@@ -191,6 +196,60 @@ describe("routine templates", () => {
     expect(jobs.map((j) => j.id)).toEqual([second.id]);
   });
 
+  test("install provisions a conversation titled after the routine and reinstall reuses it", async () => {
+    const config = testConfig(root, "templates-session");
+    const handler = createHandler(config);
+    await seedWorkspaceSkills(handler, config);
+
+    const first = await call(handler, config, "/api/routines/templates/morning-briefing/install", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    expect(typeof first.chatSessionId).toBe("string");
+    const session = readState(config.instance).chatSessions.find((s) => s.id === first.chatSessionId);
+    expect(session?.title).toBe("Morning Briefing");
+    expect(session?.kind).toBe("channel");
+    expect(session?.origin).toBe("job");
+    expect(session?.agentId).toBe(first.agentId);
+    expect(session?.archivedAt).toBeUndefined();
+
+    // A reinstall (the detail page's Settings save) replaces the job but
+    // carries the conversation forward: same session id, still live, and no
+    // second "Morning Briefing" thread minted.
+    const second = await call(handler, config, "/api/routines/templates/morning-briefing/install", {
+      method: "POST",
+      body: JSON.stringify({ options: { personalizedNews: false } })
+    });
+    expect(second.id).not.toBe(first.id);
+    expect(second.chatSessionId).toBe(first.chatSessionId);
+    const state = readState(config.instance);
+    expect(state.chatSessions.find((s) => s.id === first.chatSessionId)?.archivedAt).toBeUndefined();
+    expect(state.chatSessions.filter((s) => s.title === "Morning Briefing")).toHaveLength(1);
+  });
+
+  test("uninstall archives the routine's conversation; a later install starts fresh", async () => {
+    const config = testConfig(root, "templates-session-uninstall");
+    const handler = createHandler(config);
+    await seedWorkspaceSkills(handler, config);
+
+    const job = await call(handler, config, "/api/routines/templates/meeting-briefing/install", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    await call(handler, config, "/api/routines/templates/meeting-briefing", { method: "DELETE" });
+    // removeJob archives the conversation with the job: it leaves the
+    // Messages list but its history stays addressable by id.
+    const archived = readState(config.instance).chatSessions.find((s) => s.id === job.chatSessionId);
+    expect(archived?.archivedAt).toBeString();
+
+    const again = await call(handler, config, "/api/routines/templates/meeting-briefing/install", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    expect(again.chatSessionId).not.toBe(job.chatSessionId);
+    expect(readState(config.instance).chatSessions.find((s) => s.id === again.chatSessionId)?.archivedAt).toBeUndefined();
+  });
+
   test("install persists the resolved options and GET exposes them as installed.options", async () => {
     const config = testConfig(root, "templates-options");
     const handler = createHandler(config);
@@ -230,7 +289,8 @@ describe("routine templates", () => {
         archiveUnimportant: true,
         assistScheduling: true,
         draftReplies: false
-      }
+      },
+      chatSessionId: second.chatSessionId
     });
 
     // A template without options carries no templateOptions at all.
@@ -410,20 +470,30 @@ describe("routine templates", () => {
       morningBriefing: { enabled: true, personalizedNews: true },
       meetingBriefing: { enabled: true }
     };
-    await call(handler, config, "/api/onboarding/routines", { method: "POST", body: JSON.stringify(payload) });
+    const initial = await call(handler, config, "/api/onboarding/routines", { method: "POST", body: JSON.stringify(payload) });
+    const morningSessionId = (initial.jobs as Array<{ templateId?: string; chatSessionId?: string }>).find(
+      (j) => j.templateId === "morning-briefing"
+    )!.chatSessionId;
 
     // A gallery reinstall replaces the onboarding job for that template but
     // leaves the onboarding record tracking the stale id — the next apply's
     // replace pass must reconcile by templateId, not just tracked ids.
-    await call(handler, config, "/api/routines/templates/morning-briefing/install", {
+    const reinstalled = await call(handler, config, "/api/routines/templates/morning-briefing/install", {
       method: "POST",
       body: JSON.stringify({})
     });
+    expect(reinstalled.chatSessionId).toBe(morningSessionId);
 
     const applied = await call(handler, config, "/api/onboarding/routines", { method: "POST", body: JSON.stringify(payload) });
     const jobs = readState(config.instance).jobs;
     expect(jobs.map((j) => j.templateId).sort()).toEqual(["auto-inbox", "meeting-briefing", "morning-briefing"]);
     expect(jobs.map((j) => j.id).sort()).toEqual(applied.jobs.map((j: { id: string }) => j.id).sort());
+    // Every writer carried the routine's conversation forward — one live
+    // "Morning Briefing" thread across onboarding → gallery → onboarding.
+    expect(jobs.find((j) => j.templateId === "morning-briefing")?.chatSessionId).toBe(morningSessionId);
+    const sessions = readState(config.instance).chatSessions.filter((s) => s.title === "Morning Briefing");
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.archivedAt).toBeUndefined();
   });
 
   test("the onboarding routines path stamps the same templateIds", async () => {
@@ -458,6 +528,17 @@ describe("routine templates", () => {
       personalizedNews: true
     });
     expect((jobsByTemplate.get("meeting-briefing") as { templateOptions?: unknown }).templateOptions).toBeUndefined();
+
+    // The onboarding path provisions each routine's conversation too: a live
+    // channel session titled after the routine, bound as the job's delivery
+    // surface.
+    const sessions = readState(config.instance).chatSessions;
+    for (const job of applied.jobs as Array<{ name: string; chatSessionId?: string }>) {
+      const session = sessions.find((s) => s.id === job.chatSessionId);
+      expect(session?.title).toBe(job.name);
+      expect(session?.kind).toBe("channel");
+      expect(session?.archivedAt).toBeUndefined();
+    }
 
     // The gallery reflects onboarding-created installs.
     const listed = await call(handler, config, "/api/routines/templates");

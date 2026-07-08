@@ -27,13 +27,19 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { resolveEffectiveContext } from "../execution/effective-context";
-import { assertSkillNamesResolve, createScheduledJob, removeJob } from "../jobs";
+import { assertSkillNamesResolve, removeJob } from "../jobs";
 import { appendEvent, mutateState, readState } from "../state";
 import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../state/google-accounts";
 import { now } from "../state/ids";
 import { defaultOnboardingRecord, readOnboarding, writeOnboarding } from "../state/onboarding";
 import { runProfileScan } from "./onboarding-scan";
-import { ROUTINE_TEMPLATES, routineTemplate, validateTimezone } from "./routine-templates";
+import {
+  ROUTINE_TEMPLATES,
+  createRoutineJob,
+  reusableRoutineSessionId,
+  routineTemplate,
+  validateTimezone
+} from "./routine-templates";
 import type { ChatSessionRecord, JobRecord, OnboardingProfile, OnboardingRecord, OnboardingScan, RuntimeConfig, Task } from "../types";
 
 // A running scan older than this is treated as orphaned by a runtime restart
@@ -225,8 +231,8 @@ function resolveScanConfigDir(): string | undefined {
 // Idempotent replace: delete the jobs a previous pass created — plus the
 // owning agent's live jobs carrying a catalog templateId, which the
 // /routines gallery may have installed — then create one job per enabled
-// routine via the jobs module (the same createScheduledJob call POST
-// /api/jobs makes).
+// routine via createRoutineJob, which also provisions (or carries forward)
+// the routine's dedicated conversation.
 export async function applyOnboardingRoutines(
   config: RuntimeConfig,
   payload: Record<string, unknown>
@@ -252,6 +258,17 @@ export async function applyOnboardingRoutines(
   // replacements below.
   const owningAgentId = resolveEffectiveContext(state, config).agentId;
   const catalogIds = new Set(ROUTINE_TEMPLATES.map((template) => template.id));
+  // Capture each replaced template's conversation BEFORE the replace pass:
+  // removeJob archives a job's dedicated channel with the job, and
+  // createRoutineJob un-archives + rebinds it so a re-apply keeps every
+  // routine's Messages history (same reuse rule as the gallery install).
+  const reusableSessions = new Map<string, string>();
+  for (const job of state.jobs) {
+    if (job.agentId !== owningAgentId || job.templateId === undefined || !catalogIds.has(job.templateId)) continue;
+    if (reusableSessions.has(job.templateId)) continue;
+    const sessionId = reusableRoutineSessionId(state, job);
+    if (sessionId !== undefined) reusableSessions.set(job.templateId, sessionId);
+  }
   const staleJobIds = new Set([
     ...record.routineJobIds,
     ...state.jobs
@@ -272,7 +289,7 @@ export async function applyOnboardingRoutines(
   writeOnboarding(config.instance, record);
   const jobs: JobRecord[] = [];
   for (const spec of specs) {
-    const job = await createScheduledJob(config, spec);
+    const job = await createRoutineJob(config, spec, reusableSessions.get(spec.templateId as string));
     jobs.push(job);
     record.routineJobIds.push(job.id);
     writeOnboarding(config.instance, record);

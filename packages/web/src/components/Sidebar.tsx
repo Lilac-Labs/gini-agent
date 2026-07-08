@@ -115,26 +115,31 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
       .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
   }, [allSessions.data, activeAgentId]);
 
-  // Messages: the user's own active conversations — unpinned (pinning
-  // promotes a conversation into Topics), non-archived, non-headless
-  // topic/channel containers the user started by hand (no spawnedByTaskId
-  // and origin !== "job", so router/agent/schedule-minted containers stay
-  // off the chrome) in the composer's Message mode (startedAs === "message";
-  // Task-mode mints stay home work items only, and containers predating the
-  // field drop out of the section). Newest activity first, capped to keep
-  // the section scannable; agent-scoped like Topics.
+  // Messages: the user's active conversations — unpinned (pinning promotes a
+  // conversation into Topics), non-archived, non-headless, agent-scoped like
+  // Topics. Two kinds of rows qualify:
+  //   - conversations the user started by hand in the composer's Message
+  //     mode (startedAs === "message", no spawnedByTaskId, origin !== "job"
+  //     — router/agent-minted containers stay off the chrome, Task-mode
+  //     mints stay home work items only, and containers predating the field
+  //     drop out of the section)
+  //   - job delivery channels (kind:"channel" + origin:"job") — a routine's
+  //     dedicated conversation (ADR routine-templates-gallery.md) or a
+  //     create_job dedicated session, where scheduled fires deliver.
+  //     Email-watch channels stay out: that subsystem owns its channels and
+  //     the routines page deep-links them via Open channel.
+  // Newest activity first, capped to keep the section scannable.
   const messages = useMemo<ChatSession[]>(() => {
     return (allSessions.data ?? [])
       .filter(
         (s) =>
           (s.kind === "topic" || s.kind === "channel") &&
-          s.startedAs === "message" &&
           s.pinned !== true &&
           !s.archivedAt &&
           s.headless !== true &&
-          !s.spawnedByTaskId &&
-          s.origin !== "job" &&
-          (activeAgentId == null || s.agentId === activeAgentId)
+          (activeAgentId == null || s.agentId === activeAgentId) &&
+          ((s.startedAs === "message" && !s.spawnedByTaskId && s.origin !== "job") ||
+            (s.kind === "channel" && s.origin === "job" && s.feature === undefined))
       )
       .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))
       .slice(0, 15);

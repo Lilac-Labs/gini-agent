@@ -488,7 +488,14 @@ export interface RoutineTemplateView {
   options: RoutineTemplateOption[];
   // `options` is the resolved option state the job was installed with —
   // absent on templates without options and on jobs predating it.
-  installed: { jobId: string; status: JobRecord["status"]; options?: Record<string, boolean> } | null;
+  // `chatSessionId` is the routine's dedicated conversation (absent only on
+  // jobs predating session provisioning) — the Open messages deep link.
+  installed: {
+    jobId: string;
+    status: JobRecord["status"];
+    options?: Record<string, boolean>;
+    chatSessionId?: string;
+  } | null;
 }
 
 // GET /api/routines/templates — the catalog joined with installed state,

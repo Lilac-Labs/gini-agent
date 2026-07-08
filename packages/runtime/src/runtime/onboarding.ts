@@ -32,6 +32,7 @@ import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../state/google-
 import { now } from "../state/ids";
 import { defaultOnboardingRecord, readOnboarding, writeOnboarding } from "../state/onboarding";
 import { runProfileScan } from "./onboarding-scan";
+import { routineTemplate, validateTimezone } from "./routine-templates";
 import type { ChatSessionRecord, JobRecord, OnboardingProfile, OnboardingRecord, OnboardingScan, RuntimeConfig, Task } from "../types";
 
 // A running scan older than this is treated as orphaned by a runtime restart
@@ -260,67 +261,28 @@ export async function applyOnboardingRoutines(
   return { record, jobs };
 }
 
-// Build the createScheduledJob payloads for the enabled routines. Prompts are
-// product-owned here (never composed in the browser) and the Auto-inbox
-// prompt is composed ONLY of the behaviors the user toggled on.
+// Build the createScheduledJob payloads for the enabled routines by mapping
+// the POST body's toggle state onto the shared routine-template catalog
+// (src/runtime/routine-templates.ts) — the prompts/crons/skills are
+// product-owned there (never composed in the browser), and the Auto-inbox
+// spec is composed ONLY of the behaviors the user toggled on (zero behaviors
+// ⇒ buildSpec returns undefined ⇒ no job).
 function routineJobSpecs(payload: Record<string, unknown>, timezone: string): Record<string, unknown>[] {
+  const selections: Array<{ templateId: string; section: unknown; options: string[] }> = [
+    { templateId: "auto-inbox", section: payload.autoInbox, options: ["labelNewMail", "archiveUnimportant", "assistScheduling", "draftReplies"] },
+    { templateId: "morning-briefing", section: payload.morningBriefing, options: ["personalizedNews"] },
+    { templateId: "meeting-briefing", section: payload.meetingBriefing, options: [] }
+  ];
   const specs: Record<string, unknown>[] = [];
-  const autoInbox = payload.autoInbox;
-  if (flag(autoInbox, "enabled")) {
-    const behaviors: string[] = [];
-    if (flag(autoInbox, "labelNewMail")) {
-      behaviors.push("- Label new mail into sensible Gmail labels.");
-    }
-    if (flag(autoInbox, "archiveUnimportant")) {
-      behaviors.push("- Archive clearly-unimportant mail (promotions, notifications) — never anything personal or important.");
-    }
-    const assistScheduling = flag(autoInbox, "assistScheduling");
-    if (assistScheduling) {
-      behaviors.push("- Detect scheduling requests and propose times based on the user's calendar.");
-    }
-    if (flag(autoInbox, "draftReplies")) {
-      behaviors.push("- Draft (never send) replies to important emails awaiting a response.");
-    }
-    if (behaviors.length > 0) {
-      specs.push({
-        name: "Auto-inbox",
-        cronExpression: "*/30 * * * *",
-        cronTimezone: timezone,
-        skillNames: assistScheduling ? ["google-gmail", "google-calendar"] : ["google-gmail"],
-        prompt: [
-          "Tidy the user's Gmail inbox: work through mail that arrived since the last run.",
-          ...behaviors,
-          "Gini never sends email or messages without the user's review — save drafts only, never send."
-        ].join("\n")
-      });
-    }
-  }
-  if (flag(payload.morningBriefing, "enabled")) {
-    const personalizedNews = flag(payload.morningBriefing, "personalizedNews");
-    specs.push({
-      name: "Morning Briefing",
-      cronExpression: "0 8 * * *",
-      cronTimezone: timezone,
-      skillNames: ["google-gmail", "google-calendar"],
-      forwardToChat: true,
-      prompt: [
-        "Prepare the user's morning briefing: a brief digest of important unread email plus today's calendar.",
-        ...(personalizedNews
-          ? ["Add a short section of news relevant to the user's work, using what you know about them from memory and their profile."]
-          : [])
-      ].join("\n")
-    });
-  }
-  if (flag(payload.meetingBriefing, "enabled")) {
-    specs.push({
-      name: "Meeting Briefing",
-      cronExpression: "*/15 * * * *",
-      cronTimezone: timezone,
-      skillNames: ["google-calendar", "google-gmail"],
-      forwardToChat: true,
-      prompt:
-        "Check the user's calendar for meetings starting within the next hour that haven't been briefed yet. When one is found, prepare a prep note: attendees, recent email context with them, and the agenda. Otherwise do nothing and finish quietly."
-    });
+  for (const { templateId, section, options } of selections) {
+    if (!flag(section, "enabled")) continue;
+    const template = routineTemplate(templateId);
+    if (!template) continue;
+    const spec = template.buildSpec(
+      Object.fromEntries(options.map((key) => [key, flag(section, key)])),
+      timezone
+    );
+    if (spec) specs.push(spec);
   }
   return specs;
 }
@@ -328,26 +290,6 @@ function routineJobSpecs(payload: Record<string, unknown>, timezone: string): Re
 // Strict boolean read off an untyped sub-object: only `true` counts.
 function flag(section: unknown, key: string): boolean {
   return !!section && typeof section === "object" && (section as Record<string, unknown>)[key] === true;
-}
-
-// Probe-validate an IANA timezone by constructing a formatter with it — Intl
-// throws a RangeError on unknown zones. A membership check against
-// Intl.supportedValuesOf("timeZone") would be wrong here: that list is
-// NARROWER than what Intl (and croner, which also resolves zones through
-// Intl) accepts — this runtime's ICU lists legacy aliases like Asia/Calcutta
-// while browsers report the modern canonical Asia/Kolkata, so real user
-// timezones would be rejected. A zone that passes the probe never fails job
-// creation. Used by both the PATCH and routines paths.
-function validateTimezone(value: unknown): string {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error("Invalid input: timezone must be a non-empty string");
-  }
-  try {
-    new Intl.DateTimeFormat(undefined, { timeZone: value });
-  } catch {
-    throw new Error(`Invalid input: timezone "${value}" is not a valid IANA timezone`);
-  }
-  return value;
 }
 
 // Upper bounds folded over the scan deliverable. The deliverable is model

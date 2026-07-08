@@ -2047,6 +2047,12 @@ export interface JobRecord {
   // fire time is skipped with a trace event — never fails the fire. See ADR
   // job-skill-attachments.md.
   skillNames?: string[];
+  // Routine-template provenance: the catalog id this job was installed from
+  // (the /routines gallery or the onboarding starter routines, both via
+  // src/runtime/routine-templates.ts). The gallery keys installed state and
+  // per-template replace/remove on it. Optional — ordinary jobs carry no
+  // templateId, so no state migration. See ADR routine-templates-gallery.md.
+  templateId?: string;
   retryLimit: number;
   timeoutSeconds: number;
   costBudget?: number;

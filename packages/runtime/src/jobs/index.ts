@@ -398,6 +398,16 @@ export async function createScheduledJob(
     const parsed = parseSkillNamesInput(input.skillNames);
     if (parsed.length > 0) skillNames = parsed;
   }
+  // Routine-template provenance (see ADR routine-templates-gallery.md). The
+  // gallery install and onboarding routine paths stamp the catalog id so
+  // installed state and per-template replace/remove can key on it.
+  let templateId: string | undefined;
+  if (input.templateId !== undefined && input.templateId !== null) {
+    if (typeof input.templateId !== "string" || input.templateId.length === 0) {
+      throw new Error(`Invalid input: templateId must be a non-empty string (got ${String(input.templateId)})`);
+    }
+    templateId = input.templateId;
+  }
   // A parent task that has already transitioned terminal must not
   // create a durable scheduled job. Without this, a `cancelTask`
   // queued between the dispatcher's lock-free pre-check and our
@@ -500,6 +510,7 @@ export async function createScheduledJob(
       deliveryTargets: Array.isArray(input.deliveryTargets) ? input.deliveryTargets.map(String) : [],
       context: Array.isArray(input.context) ? input.context.map(String) : [],
       skillNames,
+      templateId,
       retryLimit,
       timeoutSeconds,
       costBudget: typeof input.costBudget === "number" ? input.costBudget : undefined,

@@ -117,6 +117,7 @@ import { RateLimiter } from "./lib/rate-limit";
 import { signUploadParams, verifyUploadSignature } from "./lib/upload-signing";
 import { getSetupStatus, removeSetupProvider, setSetupProvider } from "./runtime/setup-api";
 import { applyOnboardingRoutines, getOnboarding, patchOnboarding, startOnboardingScan } from "./runtime/onboarding";
+import { installRoutineTemplate, listRoutineTemplates, uninstallRoutineTemplate } from "./runtime/routine-templates";
 import { createSkillFromInput, getSkill, grantConnectorToSkill, installSkillFromBody, listSkills, reloadSkills, rollbackSkill, searchSkills, setSkillStatus, testSkill, updateSkill, validateSkills } from "./capabilities/skills";
 import { createChat, deleteChat, getChatSession, getOrCreateAgentChat, listChatSessions, removePendingChatMessageById, renameChat, retryFailedContainerRun, startTaskContainer, submitChatMessage, submitThreadReply, syncChatTaskResult } from "./execution/chat";
 import { sttStatus } from "./stt";
@@ -2554,6 +2555,13 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     ["PATCH", /^\/api\/onboarding$/, async (request) => json(patchOnboarding(config, await body(request)))],
     ["POST", /^\/api\/onboarding\/scan$/, async () => json(await startOnboardingScan(config))],
     ["POST", /^\/api\/onboarding\/routines$/, async (request) => json(await applyOnboardingRoutines(config, await body(request)))],
+    // Routine-template gallery (ADR routine-templates-gallery.md). Thin
+    // handlers over the shared catalog in src/runtime/routine-templates.ts;
+    // installed state is agent-scoped like GET /api/jobs. Validation errors
+    // throw "Invalid input: …" → 400; an unknown template id → 404.
+    ["GET", /^\/api\/routines\/templates$/, (request) => json(listRoutineTemplates(config, agentIdFilter(request)))],
+    ["POST", /^\/api\/routines\/templates\/([^/]+)\/install$/, async (request, params) => json(await installRoutineTemplate(config, params[0], await body(request)), 201)],
+    ["DELETE", /^\/api\/routines\/templates\/([^/]+)$/, async (_request, params) => json(await uninstallRoutineTemplate(config, params[0]))],
     ["GET", /^\/api\/agents$/, () => json(listAgents(config))],
     ["POST", /^\/api\/agents$/, async (request) => json(await createAgent(config, await body(request)), 201)],
     ["POST", /^\/api\/agents\/([^/]+)\/use$/, async (_request, params) => json(await useAgent(config, params[0]))],
@@ -3570,6 +3578,7 @@ function agentIdFilter(request: Request): string | undefined {
 function statusFromErrorMessage(message: string): number {
   if (message.startsWith("Job not found") || message.startsWith("Job run not found")) return 404;
   if (message.startsWith("Agent not found")) return 404;
+  if (message.startsWith("Routine template not found")) return 404;
   // Chat-session and thread submit paths (submitChatMessage,
   // submitThreadReply) throw these when the target was deleted or never
   // existed. Map to 404 so a stale link surfaces a clean not-found rather

@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-02
-- **See also:** [Multiple Tagged Google Accounts](./google-multi-account.md), [Chat Topics, Tasks, Subagents](./chat-topics-tasks-subagents.md), [Job Skill Attachments](./job-skill-attachments.md), [Managed Deployment Mode](./managed-deployment-mode.md)
+- **See also:** [Multiple Tagged Google Accounts](./google-multi-account.md), [Chat Topics, Tasks, Subagents](./chat-topics-tasks-subagents.md), [Job Skill Attachments](./job-skill-attachments.md), [Routine-Template Catalog And Gallery](./routine-templates-gallery.md)
 
 ## Decision
 
@@ -273,6 +273,12 @@ exact call `POST /api/jobs` makes, so validation, scheduling, and channel
 provisioning are inherited, and the jobs are ordinary `active` records the
 user can edit or remove in /jobs afterwards. The new ids land back in
 `routineJobIds`.
+
+The specs themselves live in the shared routine-template catalog
+(`src/runtime/routine-templates.ts`) — `routineJobSpecs` maps the POST body's
+toggle state onto the catalog's `buildSpec` calls, and each created job is
+stamped with its `templateId`, so the /routines gallery reflects
+onboarding-created installs. See ADR routine-templates-gallery.md.
 
 | Routine | Cron (record tz) | Skills | Delivery |
 | --- | --- | --- | --- |

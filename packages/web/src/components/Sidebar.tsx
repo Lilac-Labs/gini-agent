@@ -16,6 +16,7 @@ import {
   MoreHorizontal,
   Plus,
   RefreshCw,
+  Repeat,
   ScrollText,
   Settings,
   Sun,
@@ -483,8 +484,14 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
             </>
           ) : null}
 
-          {/* Nav: Skills, Logs, Settings */}
+          {/* Nav: Routines, Skills, Logs, Settings */}
           <ul className="flex flex-col gap-0.5">
+            <li>
+              <Link href="/routines" onClick={onNavigate} className={navItem(pathname === "/routines")}>
+                <Repeat className="size-3.5 text-sidebar-foreground/70" />
+                Routines
+              </Link>
+            </li>
             <li>
               <Link href="/skills" onClick={onNavigate} className={navItem(pathname === "/skills")}>
                 <WandSparkles className="size-3.5 text-sidebar-foreground/70" />

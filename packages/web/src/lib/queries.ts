@@ -469,6 +469,67 @@ export function useApplyOnboardingRoutines() {
   });
 }
 
+// Routine-template gallery wire shapes — mirror RoutineTemplateView in
+// packages/runtime/src/runtime/routine-templates.ts (prompts/crons are
+// composed server-side; the browser only sends toggle state).
+export interface RoutineTemplateOption {
+  key: string;
+  label: string;
+  defaultEnabled: boolean;
+  description?: string;
+}
+
+export interface RoutineTemplateView {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  scheduleHint: string;
+  options: RoutineTemplateOption[];
+  installed: { jobId: string; status: JobRecord["status"] } | null;
+}
+
+// GET /api/routines/templates — the catalog joined with installed state,
+// scoped to the active agent like useJobs.
+export function useRoutineTemplates() {
+  const agentId = useActiveAgentId();
+  return useQuery<{ templates: RoutineTemplateView[] }>({
+    queryKey: ["routine-templates", agentId ?? null],
+    queryFn: () => api<{ templates: RoutineTemplateView[] }>(scopedPath("/routines/templates", agentId)),
+    refetchInterval: 60_000,
+    enabled: Boolean(agentId)
+  });
+}
+
+// POST /api/routines/templates/<id>/install — idempotent per-template
+// replace server-side; returns the created JobRecord.
+export function useInstallRoutineTemplate() {
+  const qc = useQueryClient();
+  return useMutation<JobRecord, Error, { id: string; timezone?: string; options?: Record<string, boolean> }>({
+    mutationFn: ({ id, ...body }) =>
+      api<JobRecord>(`/routines/templates/${encodeURIComponent(id)}/install`, {
+        method: "POST",
+        body: JSON.stringify(body)
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["routine-templates"] });
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+    }
+  });
+}
+
+export function useUninstallRoutineTemplate() {
+  const qc = useQueryClient();
+  return useMutation<{ removed: string[] }, Error, string>({
+    mutationFn: (id: string) =>
+      api<{ removed: string[] }>(`/routines/templates/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["routine-templates"] });
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+    }
+  });
+}
+
 export function useImprovements() {
   return useQuery<ImprovementProposal[]>({
     queryKey: ["improvements"],

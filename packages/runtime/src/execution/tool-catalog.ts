@@ -992,7 +992,7 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
     type: "function",
     function: {
       name: "list_messaging_bridges",
-      description: "List the messaging bridges configured on this Gini instance. Returns each bridge's id, name, kind (telegram | discord | demo), status (configured | error | disabled), and bot username when present. Useful before suggesting bridge changes ('do you already have telegram?'), before calling request_remove_messaging_bridge or request_messaging_pairing (so you can target the right bridge id), or whenever the user asks 'what bots are connected?'. Read-only and cheap — call it whenever you need fresh state.",
+      description: "List the messaging bridges configured on this Gini instance. Returns each bridge's id, name, kind (telegram | discord | slack | demo), status (configured | error | disabled), and bot username when present. Useful before suggesting bridge changes ('do you already have telegram?'), before calling request_remove_messaging_bridge or request_messaging_pairing (so you can target the right bridge id), or whenever the user asks 'what bots are connected?'. Read-only and cheap — call it whenever you need fresh state.",
       parameters: {
         type: "object",
         properties: {}

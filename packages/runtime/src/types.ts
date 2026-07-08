@@ -1212,15 +1212,23 @@ export interface RecentItem {
 // `lastInboundMessageId` is the most recent originating-message id the
 // chat session received from the bridge — Telegram's numeric
 // `message_id` (the per-chat id used by `reply_to_message_id`, NOT
-// the update id) or Discord's message snowflake string (used by
-// `message_reference.message_id`). It's what scheduled-job replies
-// use to thread their delayed dispatch onto the original user
-// message. The field is updated by the poller every time a new
-// inbound lands so a long-running session always threads onto the
-// most recent prompt.
+// the update id), Discord's message snowflake string (used by
+// `message_reference.message_id`), or Slack's message `ts`. It's what
+// scheduled-job replies use to thread their delayed dispatch onto the
+// original user message (Slack excepted: outbound there anchors on
+// `threadTs`, see below). The field is updated by the poller every
+// time a new inbound lands so a long-running session always threads
+// onto the most recent prompt.
+//
+// Slack sessions are per-THREAD, not per-channel: each top-level DM
+// message starts its own thread (and session), keyed by `threadTs` —
+// the thread root's ts. Outbound dispatch MUST pass `threadTs` as
+// chat.postMessage's thread_ts, never `lastInboundMessageId`: a
+// reply's own ts would fork a broken second thread.
 export type ChatSessionSource =
   | { kind: "telegram"; bridgeId: string; chatId: number; target: string; lastInboundMessageId?: number }
   | { kind: "discord"; bridgeId: string; channelId: string; target: string; lastInboundMessageId?: string }
+  | { kind: "slack"; bridgeId: string; channelId: string; threadTs: string; target: string; lastInboundMessageId?: string }
   // Openclaw migration provenance. The poller-side
   // findOrCreate*ChatSession helpers only match on the telegram and
   // discord kinds, so an "openclaw"-sourced session never receives
@@ -1238,7 +1246,7 @@ export type ChatSessionSource =
 // `source.kind`. An absent/unrecognized value resolves to undefined
 // (unknown), never an error, so older clients keep working. See ADR
 // client-surface-context.md.
-export type ChatClientSurface = "web" | "mobile" | "cli" | "telegram" | "discord" | "openclaw";
+export type ChatClientSurface = "web" | "mobile" | "cli" | "telegram" | "discord" | "slack" | "openclaw";
 
 export interface ChatMessageRecord {
   id: string;
@@ -1435,8 +1443,9 @@ export interface MessagingBridgeRecord {
   message?: string;
   createdAt: string;
   updatedAt: string;
-  // Per-bridge encrypted secret refs (Telegram + Discord both store
-  // their bot token here). Stored via the same AES-GCM box as
+  // Per-bridge encrypted secret refs (Telegram + Discord store their
+  // bot token here; Slack stores both its bot token and its app-level
+  // Socket Mode token). Stored via the same AES-GCM box as
   // connectorSecrets — the connectorId namespace we use is
   // `messaging.<bridgeId>` so a bridge delete cleans up its files.
   secretRefs?: ConnectorSecretRef[];
@@ -1456,6 +1465,11 @@ export interface MessagingBridgeRecord {
   //   discord: {
   //     botUsername, botId, globalName?,
   //     lastInboundExternalIds: Record<channelId, snowflake>  // per-channel watermark
+  //   }
+  //   slack: {
+  //     botUserId, botUsername, teamId, teamName   // from auth.test; botUserId
+  //                                                // is what the socket loop uses
+  //                                                // to drop self-authored events
   //   }
   metadata?: Record<string, unknown>;
 }

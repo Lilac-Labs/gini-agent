@@ -27,7 +27,7 @@ import type { MessagingBridgeRecord } from "@runtime/types";
 
 export interface MessagingRow { id: string; name: string; status: string; kind: string }
 
-type AddBridgeKind = "telegram" | "discord";
+type AddBridgeKind = "telegram" | "discord" | "slack";
 
 export function MessagingCard({
   bridges,
@@ -55,7 +55,7 @@ export function MessagingCard({
       </CardHeader>
       <CardContent>
         {bridges.length === 0 ? (
-          <EmptyState title="No bridges — add a Telegram or Discord bot above to get started." />
+          <EmptyState title="No bridges — add a Telegram, Discord, or Slack bot above to get started." />
         ) : (
           <ul className="divide-y divide-border">
             {bridges.map((item) => (
@@ -234,6 +234,10 @@ function AddMessagingBridgeButtons() {
   const [kind, setKind] = useState<AddBridgeKind>("telegram");
   const [name, setName] = useState("");
   const [botToken, setBotToken] = useState("");
+  // Slack-only second credential: the app-level xapp- token that
+  // authenticates the Socket Mode connection. Telegram / Discord
+  // dialogs never render the field and the submit payload omits it.
+  const [appToken, setAppToken] = useState("");
   const [deliveryTargets, setDeliveryTargets] = useState("");
   const [result, setResult] = useState<MessagingBridgeRecord | null>(null);
   // The deferred close-reset runs 150ms after close() so the dialog's
@@ -256,7 +260,7 @@ function AddMessagingBridgeButtons() {
   // that flips synchronously to gate the second call.
   const submittingRef = useRef(false);
 
-  const add = useMutation<MessagingBridgeRecord, Error, { name: string; kind: AddBridgeKind; botToken: string; deliveryTargets: string[] }>({
+  const add = useMutation<MessagingBridgeRecord, Error, { name: string; kind: AddBridgeKind; botToken: string; appToken?: string; deliveryTargets: string[] }>({
     mutationFn: (input) =>
       api<MessagingBridgeRecord>("/messaging", {
         method: "POST",
@@ -288,6 +292,7 @@ function AddMessagingBridgeButtons() {
     setKind(next);
     setName("");
     setBotToken("");
+    setAppToken("");
     setDeliveryTargets("");
     setResult(null);
     add.reset();
@@ -302,6 +307,7 @@ function AddMessagingBridgeButtons() {
       resetTimerRef.current = null;
       setName("");
       setBotToken("");
+      setAppToken("");
       setDeliveryTargets("");
       setResult(null);
       add.reset();
@@ -312,6 +318,7 @@ function AddMessagingBridgeButtons() {
     if (submittingRef.current) return;
     const trimmedName = name.trim();
     const trimmedToken = botToken.trim();
+    const trimmedAppToken = appToken.trim();
     const parsedTargets = parseDeliveryTargets(deliveryTargets);
     if (!trimmedName) {
       toast.error("Name is required.");
@@ -321,6 +328,10 @@ function AddMessagingBridgeButtons() {
       toast.error("Bot token is required.");
       return;
     }
+    if (kind === "slack" && !trimmedAppToken) {
+      toast.error("App-level token is required.");
+      return;
+    }
     if (kind === "discord" && parsedTargets.length === 0) {
       toast.error("At least one Discord channel ID is required.");
       return;
@@ -328,7 +339,13 @@ function AddMessagingBridgeButtons() {
     submittingRef.current = true;
     const submittingSession = sessionRef.current;
     add.mutate(
-      { name: trimmedName, kind, botToken: trimmedToken, deliveryTargets: parsedTargets },
+      {
+        name: trimmedName,
+        kind,
+        botToken: trimmedToken,
+        ...(kind === "slack" ? { appToken: trimmedAppToken } : {}),
+        deliveryTargets: parsedTargets
+      },
       {
         onSuccess: (record) => {
           if (sessionRef.current !== submittingSession) return;
@@ -342,6 +359,7 @@ function AddMessagingBridgeButtons() {
           // duration of the summary view — bad hygiene for a credential.
           setName("");
           setBotToken("");
+          setAppToken("");
           setDeliveryTargets("");
           setResult(record);
         },
@@ -355,7 +373,9 @@ function AddMessagingBridgeButtons() {
   const label = labelFor(kind);
   const tokenHint = kind === "telegram"
     ? "Open Telegram, chat with @BotFather, run /newbot, and paste the token below."
-    : "Open the Discord Developer Portal, create an application, add a bot, and copy its token.";
+    : kind === "discord"
+      ? "Open the Discord Developer Portal, create an application, add a bot, and copy its token."
+      : "Create a Slack app at api.slack.com/apps, enable Socket Mode, install it to your workspace, and paste both tokens below.";
 
   return (
     <>
@@ -365,6 +385,9 @@ function AddMessagingBridgeButtons() {
         </Button>
         <Button size="sm" variant="outline" onClick={() => openFor("discord")}>
           Add Discord
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => openFor("slack")}>
+          Add Slack
         </Button>
       </div>
       <Dialog
@@ -414,7 +437,7 @@ function AddMessagingBridgeButtons() {
                     id="bridge-name"
                     value={name}
                     onChange={(event) => setName(event.target.value)}
-                    placeholder={kind === "telegram" ? "my-telegram-bot" : "my-discord-bot"}
+                    placeholder={`my-${kind}-bot`}
                     autoComplete="off"
                     autoFocus
                   />
@@ -431,13 +454,33 @@ function AddMessagingBridgeButtons() {
                     type="password"
                     value={botToken}
                     onChange={(event) => setBotToken(event.target.value)}
-                    placeholder={kind === "telegram" ? "123456789:ABCdef..." : "MzA1...Ovy4MCQQ"}
+                    placeholder={kind === "telegram" ? "123456789:ABCdef..." : kind === "discord" ? "MzA1...Ovy4MCQQ" : "xoxb-..."}
                     autoComplete="off"
                   />
                   <p className="text-[11px] text-muted-foreground">
                     Stored encrypted in the per-instance secret store. Never leaves your machine.
                   </p>
                 </div>
+                {kind === "slack" ? (
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="bridge-app-token" className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      App-level token
+                    </Label>
+                    <Input
+                      id="bridge-app-token"
+                      type="password"
+                      value={appToken}
+                      onChange={(event) => setAppToken(event.target.value)}
+                      placeholder="xapp-..."
+                      autoComplete="off"
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      Generated under your app&apos;s Basic Information → App-Level Tokens with the
+                      connections:write scope. It authenticates the Socket Mode connection the
+                      bridge listens on; the bot token above handles replies.
+                    </p>
+                  </div>
+                ) : null}
                 {kind === "discord" ? (
                   <div className="grid gap-1.5">
                     <Label htmlFor="bridge-targets" className="text-[11px] uppercase tracking-wide text-muted-foreground">
@@ -474,6 +517,7 @@ function AddMessagingBridgeButtons() {
                     add.isPending
                     || name.trim().length === 0
                     || botToken.trim().length === 0
+                    || (kind === "slack" && appToken.trim().length === 0)
                     || (kind === "discord" && parseDeliveryTargets(deliveryTargets).length === 0)
                   }
                 >
@@ -536,6 +580,20 @@ function BridgeAddedSummary({
             </p>
           </div>
         ) : null}
+        {record.kind === "slack" ? (
+          <div className="space-y-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3">
+            <p className="text-sm font-medium">Next: DM the bot in Slack</p>
+            <p>
+              Open your workspace, find the app under Apps, and send it a direct message. Each
+              top-level message starts its own thread — the reply lands inside it. Click Health
+              on the new bridge to verify the bot token.
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              Anyone in the workspace can DM the bot; installing the app into the workspace is
+              the access decision.
+            </p>
+          </div>
+        ) : null}
       </div>
       <DialogFooter>
         <Button onClick={onClose}>Done</Button>
@@ -547,6 +605,7 @@ function BridgeAddedSummary({
 function labelFor(kind: string): string {
   if (kind === "telegram") return "Telegram";
   if (kind === "discord") return "Discord";
+  if (kind === "slack") return "Slack";
   return kind;
 }
 

@@ -4,8 +4,32 @@
 // place — both pollers grew identical copies of these patterns and
 // drift between them is now load-bearing for correctness.
 
-import type { MessagingBridgeStatus, RuntimeConfig, TaskStatus } from "../types";
+import type { ChatSessionSource, MessagingBridgeStatus, RuntimeConfig, TaskStatus } from "../types";
 import { appendLog, isTerminalTaskStatus, mutateState, now, readState } from "../state";
+
+// The bridge kinds with a live inbound + outbound dispatch path. This
+// single predicate is what "any messaging-bridge surface" means across
+// the runtime: tool-dispatch's web-only-card refusals, finalize's
+// job-reply dispatch filters, and the messaging module's per-kind
+// token requirements all branch on it, so adding a bridge kind means
+// extending exactly this union instead of auditing a dozen
+// disjunctions.
+export type BridgeSurfaceKind = "telegram" | "discord" | "slack";
+export function isBridgeSurfaceKind(kind: string | undefined): kind is BridgeSurfaceKind {
+  return kind === "telegram" || kind === "discord" || kind === "slack";
+}
+
+// Companion object-level guard. TypeScript does not narrow a
+// discriminated union through a user-defined type guard applied to its
+// discriminant property, so callers holding a ChatSessionSource use
+// this form to peel off the non-bridge (openclaw provenance) variant —
+// finalize relies on the narrowing to read slack's `threadTs` and the
+// per-kind lastInboundMessageId.
+export function isBridgeSessionSource(
+  source: ChatSessionSource
+): source is Extract<ChatSessionSource, { kind: BridgeSurfaceKind }> {
+  return isBridgeSurfaceKind(source.kind);
+}
 
 // Flip a bridge to "error" so the supervisor's reconcile drops it
 // from the desired set (shouldRun checks status === "configured").
@@ -50,9 +74,11 @@ export async function markBridgeError(
   }
 }
 
-// Scrub Telegram URL-path tokens (`/bot<token>/`) and Discord
-// auth-header tokens (`Bot <token>`) plus absolute filesystem paths
-// from a string before it lands in user-visible state. Used by
+// Scrub Telegram URL-path tokens (`/bot<token>/`), Discord
+// auth-header tokens (`Bot <token>`), and Slack tokens (`xoxb-…` bot
+// / `xapp-…` app-level, both of which travel in Bearer headers a
+// fetch error can echo) plus absolute filesystem paths from a string
+// before it lands in user-visible state. Used by
 // markBridgeError (state writes) and by sendMessagingOutput's error
 // persistence (sanitizeBridgeError import). Pure function, easy to
 // unit-test in isolation.
@@ -71,6 +97,12 @@ export function sanitizeBridgeStatusMessage(message: string): string {
       .replace(/Bot\s+\S+/g, "Bot <redacted>")
       // Telegram URL-path token: "/bot123:abc/getMe"
       .replace(/\/bot[A-Za-z0-9:_-]+/g, "/bot<redacted>")
+      // Slack tokens come in two prefix families: "xox?-…" (xoxb bot,
+      // xoxp user, xoxa/xoxr OAuth variants) and "xapp-…" (app-level
+      // Socket Mode). Both travel in Bearer headers a fetch error can
+      // echo.
+      .replace(/xox[a-z]-[A-Za-z0-9-]+/g, "xox<redacted>")
+      .replace(/xapp-[A-Za-z0-9-]+/g, "xapp<redacted>")
   );
 }
 

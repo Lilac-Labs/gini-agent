@@ -7,6 +7,7 @@ import {
   createMessagingBridgeRecord,
   createMessagingMessageRecord,
   findOrCreateDiscordChatSession,
+  findOrCreateSlackChatSession,
   findOrCreateTelegramChatSession,
   id,
   mutateState,
@@ -27,7 +28,13 @@ import {
   type DiscordClient,
   type DiscordClientOptions
 } from "./discord";
+import {
+  createSlackClient,
+  type SlackClient,
+  type SlackClientOptions
+} from "./slack";
 import { formatTelegramMarkdownV2 } from "./telegram-format";
+import { formatSlackMrkdwn } from "./slack-format";
 import type { MessagingMessageMedia } from "../types";
 
 // Namespace used when storing per-bridge secrets through the connector
@@ -46,19 +53,26 @@ function bridgeSecretNamespace(bridgeId: string): string {
 // `GET /api/messaging`. Rejecting at create time stops the leak at
 // the source.
 const HEADER_SAFE_TOKEN = /^[\x21-\x7E]+$/;
-export function assertHeaderSafeToken(kind: string, raw: string): void {
+export function assertHeaderSafeToken(kind: string, raw: string, tokenLabel = "bot token"): void {
   if (!HEADER_SAFE_TOKEN.test(raw)) {
     throw new Error(
-      `${kind === "telegram" ? "Telegram" : "Discord"} bot token contains invalid characters — header-safe printable ASCII only.`
+      `${bridgeKindLabel(kind)} ${tokenLabel} contains invalid characters — header-safe printable ASCII only.`
     );
   }
+}
+
+function bridgeKindLabel(kind: string): string {
+  if (kind === "telegram") return "Telegram";
+  if (kind === "discord") return "Discord";
+  if (kind === "slack") return "Slack";
+  return kind;
 }
 
 // Re-export the shared sanitizer so existing call sites in this file
 // stay readable. The helper covers Discord auth-header tokens,
 // Telegram URL-path tokens, and filesystem paths under <root>/secrets/
 // — see messaging-poller-helpers.ts for the full pattern list.
-import { sanitizeBridgeStatusMessage as sanitizeBridgeError, sleepUnlessAbortedThrow } from "./messaging-poller-helpers";
+import { isBridgeSurfaceKind, sanitizeBridgeStatusMessage as sanitizeBridgeError, sleepUnlessAbortedThrow } from "./messaging-poller-helpers";
 
 // Test seam: production code calls Telegram / Discord for real, but tests
 // inject stubbed clients so we can exercise send/health/poll without
@@ -67,6 +81,7 @@ import { sanitizeBridgeStatusMessage as sanitizeBridgeError, sleepUnlessAbortedT
 export interface MessagingDeps {
   telegramClientFactory?: (token: string) => TelegramClient;
   discordClientFactory?: (token: string) => DiscordClient;
+  slackClientFactory?: (token: string) => SlackClient;
 }
 
 let injectedDeps: MessagingDeps = {};
@@ -85,6 +100,11 @@ function telegramClientFor(token: string, options?: TelegramClientOptions): Tele
 function discordClientFor(token: string, options?: DiscordClientOptions): DiscordClient {
   if (injectedDeps.discordClientFactory) return injectedDeps.discordClientFactory(token);
   return createDiscordClient(token, options);
+}
+
+function slackClientFor(token: string, options?: SlackClientOptions): SlackClient {
+  if (injectedDeps.slackClientFactory) return injectedDeps.slackClientFactory(token);
+  return createSlackClient(token, options);
 }
 
 // Translate the caller's photo input into a TelegramPhotoSource. Returns
@@ -132,6 +152,21 @@ export function readBridgeBotToken(config: RuntimeConfig, bridge: MessagingBridg
   return readSecret(config.instance, ref);
 }
 
+// Slack bridges carry a second secret: the app-level xapp- token that
+// authenticates the Socket Mode connection (`connections:write`). Web
+// API calls keep using the bot token; the two are separate credentials
+// in Slack's model and are stored as separate purposes under the same
+// bridge namespace.
+export function isAppTokenRef(ref: { purpose: string }): boolean {
+  return ref.purpose === "app-token";
+}
+
+export function readBridgeAppToken(config: RuntimeConfig, bridge: MessagingBridgeRecord): string | undefined {
+  const ref = bridge.secretRefs?.find(isAppTokenRef);
+  if (!ref) return undefined;
+  return readSecret(config.instance, ref);
+}
+
 // Read the bot token without 500ing the API on a secret-read
 // failure. Both ENOENT and other read failures (corrupt JSON, AES
 // auth tag mismatch, permission denied) collapse to undefined so
@@ -164,14 +199,14 @@ export async function addMessagingBridge(config: RuntimeConfig, input: Record<st
   const kind = String(input.kind ?? "demo");
   if (!name) throw new Error("Messaging bridge name is required.");
 
-  // Telegram and Discord both need a bot token. The credential travels
-  // in on the create payload exactly once and is immediately handed to
-  // the encrypted secret store; the plaintext never lands on the bridge
-  // record or in audit evidence.
-  const requiresToken = kind === "telegram" || kind === "discord";
+  // Telegram, Discord, and Slack all need a bot token. The credential
+  // travels in on the create payload exactly once and is immediately
+  // handed to the encrypted secret store; the plaintext never lands on
+  // the bridge record or in audit evidence.
+  const requiresToken = isBridgeSurfaceKind(kind);
   const botToken = requiresToken && typeof input.botToken === "string" ? input.botToken.trim() : "";
   if (requiresToken && !botToken) {
-    throw new Error(`${kind === "telegram" ? "Telegram" : "Discord"} bridges require a botToken in the create payload.`);
+    throw new Error(`${bridgeKindLabel(kind)} bridges require a botToken in the create payload.`);
   }
   if (requiresToken) {
     // Reject malformed tokens at create time. Without this, a token
@@ -180,6 +215,17 @@ export async function addMessagingBridge(config: RuntimeConfig, input: Record<st
     // fetch error (Bun's HTTP layer echoes the auth header value in
     // its rejection message, which we persist to bridge.message).
     assertHeaderSafeToken(kind, botToken);
+  }
+  // Slack additionally needs the app-level Socket Mode token — the
+  // inbound WebSocket authenticates with xapp-, not the bot token.
+  // Same one-shot handling: validated here, encrypted at rest, never
+  // on the record.
+  const appToken = kind === "slack" && typeof input.appToken === "string" ? input.appToken.trim() : "";
+  if (kind === "slack" && !appToken) {
+    throw new Error("Slack bridges require an appToken (xapp- app-level token with connections:write) in the create payload.");
+  }
+  if (appToken) {
+    assertHeaderSafeToken(kind, appToken, "app-level token");
   }
 
   // Pre-generate the bridge id outside mutateState so the secret can be
@@ -194,6 +240,9 @@ export async function addMessagingBridge(config: RuntimeConfig, input: Record<st
   const secretRef = requiresToken
     ? writeSecret(config.instance, bridgeSecretNamespace(bridgeId), "bot-token", botToken)
     : undefined;
+  const appSecretRef = appToken
+    ? writeSecret(config.instance, bridgeSecretNamespace(bridgeId), "app-token", appToken)
+    : undefined;
 
   const bridge = await mutateState(config.instance, (state) => {
     const item = createMessagingBridgeRecord(state, {
@@ -203,15 +252,18 @@ export async function addMessagingBridge(config: RuntimeConfig, input: Record<st
       deliveryTargets: Array.isArray(input.deliveryTargets) ? input.deliveryTargets.map(String) : []
     });
     if (secretRef) attachSecretRef(state.messagingBridges, item.id, secretRef);
+    if (appSecretRef) attachSecretRef(state.messagingBridges, item.id, appSecretRef);
     return item;
   });
 
-  // Telegram + Discord both store the token here; enrollment is per-chat
+  // Every bridge kind stores its token(s) here; enrollment is per-chat
   // from this point on. For telegram, the poller mints a verification
   // code when any unrecognized chat DMs the bot and surfaces a matching
   // entry to the operator UI. Discord uses channel-as-auth (see ADR
   // discord-bridge.md) so the operator configured the target channel
-  // IDs at create time.
+  // IDs at create time. Slack uses workspace-as-auth (see ADR
+  // slack-bridge.md): installing the app into a workspace is the
+  // operator action, and any member's DM to the bot routes.
   return bridge;
 }
 
@@ -299,6 +351,33 @@ export async function checkMessagingBridge(config: RuntimeConfig, idOrName: stri
         nextMessage = sanitizeBridgeError(error instanceof Error ? error.message : String(error));
       }
     }
+  } else if (bridge.kind === "slack") {
+    const token = readBridgeBotTokenQuiet(config, bridge);
+    if (!token) {
+      nextStatus = "error";
+      nextMessage = "Slack bot token is missing — recreate the bridge with a botToken.";
+    } else {
+      try {
+        const me = await slackClientFor(token).authTest();
+        // botUserId is load-bearing beyond display: the socket loop
+        // uses it to drop the bot's own messages from inbound routing.
+        metadataPatch.botUserId = me.userId;
+        metadataPatch.botUsername = me.user;
+        metadataPatch.teamId = me.teamId;
+        metadataPatch.teamName = me.team;
+        nextMessage = me.user
+          ? `Connected as @${me.user}${me.team ? ` in ${me.team}` : ""}.`
+          : `Connected as bot ${me.userId}.`;
+      } catch (error) {
+        nextStatus = "error";
+        nextMessage = sanitizeBridgeError(error instanceof Error ? error.message : String(error));
+      }
+    }
+    // The app-level token is deliberately NOT probed here — Socket
+    // Mode auth failures surface via the supervisor loop's
+    // markBridgeError, and a probe would burn one of the app's
+    // limited concurrent socket slots for no signal the loop doesn't
+    // already produce.
   } else if (bridge.kind === "demo") {
     nextMessage = "Demo messaging bridge is available for local inbound/outbound task messages.";
   } else {
@@ -429,6 +508,38 @@ export async function receiveMessagingInput(config: RuntimeConfig, idOrName: str
     });
     const result = await submitChatMessage(config, session.id, { content: text }, { bypassQueue: true });
     taskId = result.taskId;
+  } else if (bridge.kind === "slack") {
+    const channelId = rawTarget.trim();
+    if (!channelId) {
+      throw new Error("Slack inbound target (channel id) is required.");
+    }
+    target = channelId;
+    const inboundMessageId = typeof input.messageId === "string" && input.messageId.length > 0
+      ? input.messageId
+      : undefined;
+    // Slack sessions key per-thread: threadTs is the thread ROOT ts.
+    // The socket loop supplies it explicitly (event thread_ts for a
+    // thread reply, the message's own ts for a top-level message). A
+    // caller that only has the message ts (HTTP /receive, CLI) gets
+    // the top-level semantics — the message anchors its own thread.
+    const threadTs = typeof input.threadTs === "string" && input.threadTs.length > 0
+      ? input.threadTs
+      : inboundMessageId;
+    if (!threadTs) {
+      throw new Error("Slack inbound requires a threadTs (thread root ts) or a messageId to key the per-thread session.");
+    }
+    const session = await mutateState(config.instance, (state) => {
+      const sess = findOrCreateSlackChatSession(state, bridge.id, channelId, threadTs);
+      // See Telegram branch — same rationale for the source-level
+      // message id stamp. Note this is NOT the outbound thread anchor
+      // (that's source.threadTs); it exists for parity/diagnostics.
+      if (sess.source?.kind === "slack" && inboundMessageId !== undefined) {
+        sess.source.lastInboundMessageId = inboundMessageId;
+      }
+      return sess;
+    });
+    const result = await submitChatMessage(config, session.id, { content: text }, { bypassQueue: true });
+    taskId = result.taskId;
   } else {
     target = rawTarget || "local";
     const task = await submitTask(config, text);
@@ -481,6 +592,25 @@ export function findDiscordChatSession(
       session.source?.kind === "discord" &&
       session.source.bridgeId === bridgeId &&
       session.source.channelId === channelId
+  );
+}
+
+// Slack side: resolve the chat session bound to a (bridge, channel,
+// thread) triple so the reply mirror in the slack bridge loop can look
+// up the dispatch target + thread anchor without re-querying Slack.
+// threadTs is the thread ROOT ts (the session key), never a reply's ts.
+export function findSlackChatSession(
+  config: RuntimeConfig,
+  bridgeId: string,
+  channelId: string,
+  threadTs: string
+): ChatSessionRecord | undefined {
+  return readState(config.instance).chatSessions.find(
+    (session) =>
+      session.source?.kind === "slack" &&
+      session.source.bridgeId === bridgeId &&
+      session.source.channelId === channelId &&
+      session.source.threadTs === threadTs
   );
 }
 
@@ -1180,6 +1310,44 @@ export async function sendMessagingOutput(
         await discordClientFor(token).sendMessage(target, text, {
           signal: options.signal,
           ...(replyToMessageId ? { replyToMessageId } : {})
+        });
+      } catch (error) {
+        status = "failed";
+        errorMessage = sanitizeBridgeError(error instanceof Error ? error.message : String(error));
+      }
+    }
+  } else if (status === "sent" && bridge.kind === "slack") {
+    const token = readBridgeBotTokenQuiet(config, bridge);
+    if (!token) {
+      status = "failed";
+      errorMessage = "Slack bot token is missing.";
+    } else if (photoSource) {
+      // Photo uploads are a follow-up — Slack requires the multi-step
+      // files.getUploadURLExternal flow. Fail loudly so the outbound
+      // record records the reason instead of silently dropping.
+      status = "failed";
+      errorMessage = "Slack bridge does not support photo sends yet.";
+    } else if (!text) {
+      status = "failed";
+      errorMessage = "Slack messages require non-empty text.";
+    } else {
+      // Thread anchor: MUST be the thread ROOT ts (the session's
+      // source.threadTs). Passing a reply's own ts here would make
+      // Slack fork a broken second thread off that reply, so callers
+      // never forward lastInboundMessageId as threadTs.
+      const threadTs = typeof input.threadTs === "string" && input.threadTs.length > 0
+        ? input.threadTs
+        : undefined;
+      // Default: convert the common agent Markdown (double-asterisk
+      // bold, [text](url) links, # headings) to Slack mrkdwn. Callers
+      // that want a literal payload pass `parseMode: "none"` — same
+      // contract as the Telegram branch.
+      const useMrkdwn = (typeof input.parseMode === "string" ? input.parseMode : undefined) !== "none";
+      const formatted = useMrkdwn ? formatSlackMrkdwn(text) : text;
+      try {
+        await slackClientFor(token).postMessage(target, formatted, {
+          ...(threadTs ? { threadTs } : {}),
+          ...(options.signal ? { signal: options.signal } : {})
         });
       } catch (error) {
         status = "failed";

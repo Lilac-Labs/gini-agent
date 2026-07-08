@@ -293,6 +293,8 @@ export function buildClientSurfaceBlock(surface: ChatClientSurface | undefined):
       return "The user is messaging from Telegram — the in-chat browser screencast used for a sign-in / handoff isn't available there, so a browser handoff can't reach them.";
     case "discord":
       return "The user is messaging from Discord — the in-chat browser screencast used for a sign-in / handoff isn't available there, so a browser handoff can't reach them.";
+    case "slack":
+      return "The user is messaging from Slack — the in-chat browser screencast used for a sign-in / handoff isn't available there, so a browser handoff can't reach them.";
     case "openclaw":
       return "The user is messaging through an OpenClaw bridge — the in-chat browser screencast used for a sign-in / handoff isn't available there, so a browser handoff can't reach them.";
     default:

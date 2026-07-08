@@ -158,7 +158,7 @@ Multiple agents can run smoke tests concurrently without colliding.
 
 ## Messaging channels
 
-Gini can bridge to messaging channels such as Telegram and Discord. These bridges were added to exercise the gateway's messaging contract and are **not** being actively worked on. We highly recommend interacting with Gini through the native web app and iOS app. Those are the primary, actively developed surfaces. See [telegram-bridge.md](docs/adr/telegram-bridge.md) and [discord-bridge.md](docs/adr/discord-bridge.md) for the bridge contracts.
+Gini can bridge to messaging channels such as Telegram, Discord, and Slack. These bridges were added to exercise the gateway's messaging contract and are **not** being actively worked on. We highly recommend interacting with Gini through the native web app and iOS app. Those are the primary, actively developed surfaces. See [telegram-bridge.md](docs/adr/telegram-bridge.md), [discord-bridge.md](docs/adr/discord-bridge.md), and [slack-bridge.md](docs/adr/slack-bridge.md) for the bridge contracts.
 
 ## Migrating from openclaw
 

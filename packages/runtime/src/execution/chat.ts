@@ -367,7 +367,7 @@ const CLIENT_SURFACE_VALUES: ReadonlySet<string> = new Set(["web", "mobile", "cl
 // CLI) tag each POST with `client`; an unrecognized or absent value is
 // treated as unknown — never a 400, so older clients keep working. Messaging
 // bridges don't send the field: their surface derives from the session's
-// `source.kind` ("telegram" | "discord" | "openclaw"). Per-MESSAGE, not
+// `source.kind` ("telegram" | "discord" | "slack" | "openclaw"). Per-MESSAGE, not
 // per-session, because the same session can be used from phone and desktop
 // alternately. See ADR client-surface-context.md.
 function resolveClientSurface(

@@ -79,6 +79,15 @@ describe("sanitizeBridgeStatusMessage", () => {
     expect(out).toContain("ENOENT");
   });
 
+  test("scrubs Slack xoxb-/xapp- tokens from Bearer-header echoes", () => {
+    const raw = "Header 'authorization' has invalid value: 'Bearer xoxb-1234-ABCdef' then 'Bearer xapp-1-A2B3-99'";
+    const out = sanitizeBridgeStatusMessage(raw);
+    expect(out).not.toContain("xoxb-1234-ABCdef");
+    expect(out).not.toContain("xapp-1-A2B3-99");
+    expect(out).toContain("xox<redacted>");
+    expect(out).toContain("xapp<redacted>");
+  });
+
   test("leaves messages without redactable patterns alone", () => {
     const raw = "401 Unauthorized: token revoked";
     expect(sanitizeBridgeStatusMessage(raw)).toBe(raw);

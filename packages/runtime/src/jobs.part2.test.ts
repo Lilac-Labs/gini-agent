@@ -1822,6 +1822,103 @@ describe("cron lifecycle", () => {
     }
   });
 
+  test("dispatchJobReplyToBridge threads a Slack mirror on the session's thread ROOT ts, never lastInboundMessageId", async () => {
+    // The Slack session source carries two message coordinates:
+    // threadTs (the thread root the session is keyed on) and
+    // lastInboundMessageId (the most recent inbound ts, updated on
+    // every message). chat.postMessage's thread_ts MUST be the root —
+    // anchoring on a reply's own ts makes Slack fork a broken second
+    // thread — so the finalizer's slack branch reads threadTs and
+    // ignores lastInboundMessageId entirely.
+    const config = testConfig("jobs-slack-thread-root");
+    const { addMessagingBridge, setMessagingDeps, resetMessagingDeps } = await import("./integrations/messaging");
+    const { findOrCreateSlackChatSession } = await import("./state");
+    const { finalizeJobRunFromTask } = await import("./jobs/finalize");
+    const postCalls: Array<{ channel: string; text: string; threadTs?: string }> = [];
+    setMessagingDeps({
+      slackClientFactory: () => ({
+        async authTest() {
+          return { userId: "UBOT", user: "gini", teamId: "T1", team: "Acme" };
+        },
+        async postMessage(channel, text, options) {
+          postCalls.push({ channel, text, ...(options?.threadTs ? { threadTs: options.threadTs } : {}) });
+          return { channel, ts: "1700000010.000900" };
+        },
+        async addReaction() {
+          return true as const;
+        }
+      })
+    });
+
+    try {
+      const bridge = await addMessagingBridge(config, {
+        name: "slk",
+        kind: "slack",
+        deliveryTargets: [],
+        botToken: "xoxb-TOK",
+        appToken: "xapp-TOK"
+      });
+      const sessionId = await mutateState(config.instance, (state) => {
+        const session = findOrCreateSlackChatSession(state, bridge.id, "D1", "1700000001.000100");
+        // A follow-up inside the thread advanced the inbound stamp —
+        // the dispatch must NOT anchor on it.
+        if (session.source?.kind === "slack") {
+          session.source.lastInboundMessageId = "1700000005.000500";
+        }
+        return session.id;
+      });
+
+      const taskId = await mutateState(config.instance, (state) => {
+        const t = createTask(state.instance, "scheduled", undefined, undefined, undefined, undefined);
+        t.status = "completed";
+        t.summary = "reminder fired";
+        t.jobId = "job_slk";
+        upsertTask(state, t);
+        const session = state.chatSessions.find((s) => s.id === sessionId)!;
+        session.taskIds.push(t.id);
+        state.jobs.push({
+          id: "job_slk",
+          instance: state.instance,
+          name: "slk",
+          status: "active",
+          prompt: "p",
+          deliveryTargets: [],
+          context: [],
+          retryLimit: 0,
+          timeoutSeconds: 600,
+          chatSessionId: sessionId,
+          runIds: [],
+          taskIds: [],
+          runCount: 0,
+          missedRuns: 0,
+          nextRunAt: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+        state.jobRuns.push({
+          id: "run_slk",
+          instance: state.instance,
+          jobId: "job_slk",
+          status: "running",
+          taskId: t.id,
+          attempt: 1,
+          trigger: "schedule",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+        return t.id;
+      });
+      const taskObj = readState(config.instance).tasks.find((t) => t.id === taskId)!;
+      await finalizeJobRunFromTask(config, taskObj);
+      expect(postCalls.length).toBe(1);
+      expect(postCalls[0]?.channel).toBe("D1");
+      expect(postCalls[0]?.threadTs).toBe("1700000001.000100");
+      expect(postCalls[0]?.text).toContain("reminder fired");
+    } finally {
+      resetMessagingDeps();
+    }
+  });
+
   test("dispatchJobReplyToBridge ignores tool_transcript rows so a [SILENT] tool-using job stays suppressed", async () => {
     // A tool-using turn persists assistant rows tagged kind:"tool_transcript"
     // (model-facing replay narration) before the terminal summary. The bridge

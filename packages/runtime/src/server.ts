@@ -27,6 +27,7 @@ import { closeAll as closeBrowserSessions, setBrowserInstance, setBrowserRecordi
 import { ensureHostedPrimaryAccount } from "./integrations/connectors/google-accounts";
 import { createTelegramPollerSupervisor } from "./integrations/telegram-poller";
 import { createDiscordPollerSupervisor } from "./integrations/discord-poller";
+import { createSlackBridgeSupervisor } from "./integrations/slack-bridge";
 import { createApnsDispatcher } from "./integrations/apns/dispatcher";
 import { reconcileTunnelOnStartup, refreshProviderDetection, stopAllTunnels } from "./integrations/tunnel";
 import { shutdownPosthog } from "./integrations/posthog";
@@ -552,6 +553,26 @@ const discordDone: Promise<void> = (async function discordReconcileLoop(): Promi
   }
 })();
 
+// Slack inbound bridge. Same supervisor shape as Telegram / Discord,
+// different transport: each loop holds a Socket Mode WebSocket open
+// (no polling — Slack's rate limits make REST history unusable) and
+// routes pushed message.im events into per-thread chat sessions.
+const slackSupervisor = createSlackBridgeSupervisor(config);
+let slackStopped = false;
+const slackDone: Promise<void> = (async function slackReconcileLoop(): Promise<void> {
+  while (!slackStopped) {
+    try {
+      slackSupervisor.reconcile();
+    } catch (error) {
+      appendLog(config.instance, "messaging.slack.supervisor_error", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+    if (slackStopped) break;
+    await sleepUnlessStopping(MESSAGING_RECONCILE_INTERVAL_MS);
+  }
+})();
+
 // Skill-learning daily review loop (ADR skill-learning-from-outcomes.md).
 // Modeled on the connector-reprobe loop: a slow, abortable loop that runs the
 // offline review pass (reflect over recent outcomes, propose bounded skill
@@ -609,6 +630,7 @@ async function shutdown(signal: "SIGTERM" | "SIGINT"): Promise<void> {
   setupSweepStopped = true;
   telegramStopped = true;
   discordStopped = true;
+  slackStopped = true;
   skillReviewStopped = true;
   // Wake every loop out of its inter-tick sleep so it checks the flag and
   // unwinds now instead of sleeping out its full interval.
@@ -623,6 +645,9 @@ async function shutdown(signal: "SIGTERM" | "SIGINT"): Promise<void> {
   // .catch below swallows the abort rejection — it's expected.
   void telegramSupervisor.stopAll().catch(() => {});
   void discordSupervisor.stopAll().catch(() => {});
+  // Abort the Slack loops too so their Socket Mode connections close
+  // instead of holding the process open.
+  void slackSupervisor.stopAll().catch(() => {});
   // Drain in-flight HTTP responses BEFORE we start tearing the process
   // down. `server.stop(false)` only resolves once every connection has
   // closed, but idle keep-alive connections linger up to idleTimeout
@@ -666,6 +691,8 @@ async function shutdown(signal: "SIGTERM" | "SIGINT"): Promise<void> {
       telegramSupervisor.stopAll().catch(() => {}),
       discordDone.catch(() => {}),
       discordSupervisor.stopAll().catch(() => {}),
+      slackDone.catch(() => {}),
+      slackSupervisor.stopAll().catch(() => {}),
       // Close any live headless browser contexts so Chromium child
       // processes exit cleanly with the runtime instead of being reaped
       // by the OS at the very end. Errors are swallowed — a stuck

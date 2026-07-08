@@ -75,6 +75,7 @@ import { braveWebSearch, exaWebSearch, formatWebSearchResults } from "../tools/w
 import { findSkillScript, invokeSkillScript } from "../capabilities/skill-scripts";
 import { invokeVisionQuery } from "../capabilities/vision-query";
 import { checkMessagingBridge, listAllowedChats } from "../integrations/messaging";
+import { isBridgeSurfaceKind } from "../integrations/messaging-poller-helpers";
 import { riskForAction } from "./tool-risk";
 import {
   browserBack,
@@ -504,7 +505,7 @@ async function dispatchToolCallInner(
           })
         };
       }
-      if (connectSurfaceKind === "telegram" || connectSurfaceKind === "discord") {
+      if (isBridgeSurfaceKind(connectSurfaceKind)) {
         return {
           kind: "sync",
           result: JSON.stringify({
@@ -1798,8 +1799,9 @@ async function spawnTaskTool(
 }
 
 // Validate a create_job / update_job `deliveryTargets` payload against
-// the dispatchable messaging bridges — telegram / discord, the only
-// kinds the job finalizer (src/jobs/finalize.ts) can send to. A demo
+// the dispatchable messaging bridges — the isBridgeSurfaceKind set
+// (telegram / discord / slack), the only kinds the job finalizer
+// (src/jobs/finalize.ts) can send to. A demo
 // (or other non-dispatchable) bridge would validate and then fail on
 // every fire, so it is rejected here. Entries resolve by bridge id,
 // then case-insensitive name, then kind; an entry whose winning tier
@@ -1818,7 +1820,7 @@ function parseDeliveryTargets(config: RuntimeConfig, raw: unknown): string[] | u
     throw new Error("Invalid input: deliveryTargets must be an array of strings.");
   }
   const dispatchable = readState(config.instance).messagingBridges.filter(
-    (bridge) => bridge.kind === "telegram" || bridge.kind === "discord"
+    (bridge) => isBridgeSurfaceKind(bridge.kind)
   );
   const resolved: string[] = [];
   for (const entry of raw) {
@@ -3619,7 +3621,7 @@ async function requestSkillConnectorGrant(
       })
     };
   }
-  if (surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({
@@ -4358,7 +4360,7 @@ async function requestConnectorTool(
       })
     };
   }
-  if (surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({
@@ -4629,7 +4631,7 @@ async function askUserTool(
     ? surfaceState.chatSessions.find((s) => s.id === surfaceTask.chatSessionId)
     : undefined;
   const surfaceKind = surfaceSession?.source?.kind ?? surfaceSession?.outboundMirror?.kind;
-  if (!surfaceSession || surfaceSession.headless === true || surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (!surfaceSession || surfaceSession.headless === true || isBridgeSurfaceKind(surfaceKind)) {
     // A subagent child has no chat surface of its own (it runs with no
     // chatSessionId), so the question can't be answered here. Bubble it up:
     // return a STRUCTURED marker the subagent loop carries to its terminal
@@ -4730,7 +4732,7 @@ async function requestConfirmationTool(
     ? surfaceState.chatSessions.find((s) => s.id === surfaceTask.chatSessionId)
     : undefined;
   const surfaceKind = surfaceSession?.source?.kind ?? surfaceSession?.outboundMirror?.kind;
-  if (!surfaceSession || surfaceSession.origin === "job" || surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (!surfaceSession || surfaceSession.origin === "job" || isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({
@@ -4791,7 +4793,8 @@ async function browserFillSecretsTool(
   args: Record<string, unknown>
 ): Promise<DispatchResult> {
   // Surface guard: the amber approval card is React UI on the BFF, and
-  // the messaging bridge mirrors (telegram-poller, discord-poller) only
+  // the messaging bridge mirrors (telegram-poller, discord-poller,
+  // slack-bridge) only
   // relay assistant_text after the task reaches a terminal status.
   // Minting a fill_secret approval would park the task in
   // awaiting_approval, the mirror would skip with
@@ -4839,7 +4842,7 @@ async function browserFillSecretsTool(
       })
     };
   }
-  if (surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({
@@ -5022,7 +5025,7 @@ async function requestMessagingBridgeTool(
       })
     };
   }
-  if (surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({
@@ -5048,6 +5051,18 @@ async function requestMessagingBridgeTool(
       result: JSON.stringify({
         ok: false,
         error: "request_messaging_bridge cannot add a Discord bridge from chat: the card does not collect the required channel-IDs list. Tell the user to open the settings page and click \"Add Discord\" there."
+      })
+    };
+  }
+  // Same shape for Slack: the card collects a single bot token, and
+  // Slack bridges need TWO credentials (bot token + app-level Socket
+  // Mode token), so a chat-created Slack bridge would be unactionable.
+  if (rawKind === "slack") {
+    return {
+      kind: "sync",
+      result: JSON.stringify({
+        ok: false,
+        error: "request_messaging_bridge cannot add a Slack bridge from chat: the card collects a single bot token, and Slack also needs an app-level (xapp-) Socket Mode token. Tell the user to open the settings page and click \"Add Slack\" there."
       })
     };
   }
@@ -5312,7 +5327,7 @@ async function requestMessagingPairingTool(
       })
     };
   }
-  if (surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({
@@ -5468,7 +5483,7 @@ async function waitForMessagingPairTool(
       })
     };
   }
-  if (surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({
@@ -5765,7 +5780,7 @@ async function requestRemoveMessagingBridgeTool(
       })
     };
   }
-  if (surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({

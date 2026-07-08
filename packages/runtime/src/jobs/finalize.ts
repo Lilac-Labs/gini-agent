@@ -15,6 +15,7 @@ import type { RuntimeConfig, RuntimeState, Task } from "../types";
 import { addAudit, appendEvent, appendLog, insertChatBlock, isTerminalTaskStatus, mutateState, now, readState } from "../state";
 import { getOrCreateAgentChat, syncChatTaskResult } from "../execution/chat";
 import { providerAuthFailureText, providerDisplayLabel, providerReauth } from "../provider";
+import { isBridgeSessionSource, isBridgeSurfaceKind } from "../integrations/messaging-poller-helpers";
 import { isSilentReply } from "./silent";
 // `sendMessagingOutput` is imported lazily inside the bridge-dispatch
 // helpers to avoid closing a static import cycle. The runtime graph would be:
@@ -366,11 +367,12 @@ async function dispatchJobReplyToBridge(
   // same).
   const dispatchTo = session.outboundMirror ?? session.source;
   if (!dispatchTo) return undefined;
-  // Bridge-dispatch only applies to telegram / discord sources. The
-  // openclaw provenance source carries no live channel routing
-  // (it's just a migration breadcrumb), so a job that landed on a
-  // migrated chat has nowhere to mirror its assistant reply.
-  if (dispatchTo.kind !== "telegram" && dispatchTo.kind !== "discord") return undefined;
+  // Bridge-dispatch only applies to live bridge sources (telegram /
+  // discord / slack). The openclaw provenance source carries no live
+  // channel routing (it's just a migration breadcrumb), so a job that
+  // landed on a migrated chat has nowhere to mirror its assistant
+  // reply.
+  if (!isBridgeSessionSource(dispatchTo)) return undefined;
   const replyText = resolveJobReplyText(state, chatSessionId, task);
   if (replyText === undefined) return undefined;
   // Append the one-line degradation note for bridge/CLI users when the run
@@ -381,12 +383,22 @@ async function dispatchJobReplyToBridge(
     ? `${replyText}\n\n${skillSkipNote(skillSkips)}`
     : replyText;
   try {
-    const replyToMessageId = dispatchTo.lastInboundMessageId;
     const { sendMessagingOutput } = await import("../integrations/messaging");
+    // Thread anchoring is per-kind. Telegram / Discord reply-reference
+    // the most recent inbound message (lastInboundMessageId). Slack
+    // instead threads onto the session's thread ROOT ts (threadTs) —
+    // NEVER lastInboundMessageId: passing a reply's own ts as
+    // thread_ts would make Slack fork a broken second thread off that
+    // reply.
+    const threading = dispatchTo.kind === "slack"
+      ? { threadTs: dispatchTo.threadTs }
+      : dispatchTo.lastInboundMessageId !== undefined
+        ? { replyToMessageId: dispatchTo.lastInboundMessageId }
+        : {};
     const record = await sendMessagingOutput(config, dispatchTo.bridgeId, {
       text: bridgeText,
       target: dispatchTo.target,
-      ...(replyToMessageId !== undefined ? { replyToMessageId } : {})
+      ...threading
     });
     // sendMessagingOutput swallows Telegram/Discord API errors into the
     // outbound record (status "failed") instead of throwing — surface
@@ -462,8 +474,9 @@ async function recordDeliveryFailure(
 // POST /api/jobs, which persists the strings unvalidated by design
 // (src/jobs/index.ts keeps that path permissive). A fire-time miss
 // therefore means the bridge was removed after the job was saved, or
-// the entry never matched a bridge in the first place. Only telegram /
-// discord bridges are dispatchable today; sendMessagingOutput picks the
+// the entry never matched a bridge in the first place. Only bridge
+// kinds passing isBridgeSurfaceKind (telegram / discord / slack) are
+// dispatchable today; sendMessagingOutput picks the
 // target itself (first agent-filter-permitted entry of
 // bridge.deliveryTargets, else bridge.deliveryTargets[0], else the
 // literal "local"). The bridge
@@ -503,7 +516,7 @@ async function dispatchJobReplyToDeliveryTargets(
   // legacy name entry can't first-match a non-dispatchable (e.g. demo)
   // bridge while a dispatchable bridge of the same name exists.
   const dispatchable = state.messagingBridges.filter(
-    (candidate) => candidate.kind === "telegram" || candidate.kind === "discord"
+    (candidate) => isBridgeSurfaceKind(candidate.kind)
   );
   for (const entry of job.deliveryTargets) {
     const lower = entry.toLowerCase();

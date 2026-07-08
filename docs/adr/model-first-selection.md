@@ -37,8 +37,8 @@ Three pieces implement this:
    default route; picking a route in the flyout takes that exact pair. The
    brand icons come from the shared `PROVIDER_ICONS` map
    (`packages/web/src/components/provider-logos.tsx`), which the Settings provider
-   rows reuse. The same component serves the Settings page and the
-   per-agent chat Settings tab.
+   rows reuse. The same component serves the Settings page's "Default
+   model" and per-agent "Agent model" controls.
 3. **A default-model write path that updates both layers and detaches
    followers.** `setDefaultModel` (`packages/runtime/src/runtime/default-model.ts`), exposed
    at `POST /api/settings/default-model` with body `{ provider, model }`,
@@ -53,10 +53,10 @@ Three pieces implement this:
    `config.provider` live (the runtime fallback contract of ADR
    per-agent-provider-settings.md, unchanged) — is pinned by
    `setDefaultModel` to the pair it was resolving to before the change.
-   Adopting a newer default is an explicit act: the chat tab's "Use default
-   model" copies the current default pair onto the agent as a new pin (it
-   never clears the override), so the agent stays unsynced from future
-   default changes.
+   Adopting a newer default is an explicit act: the Agent model card's "Use
+   default model" copies the current default pair onto the agent as a new
+   pin (it never clears the override), so the agent stays unsynced from
+   future default changes.
 
 The Settings page's per-provider "active" radio is replaced by a "Default
 model" control at the top of the providers area; the provider rows remain
@@ -105,16 +105,17 @@ catalog.
   `config.provider` — keeps the display honest: it is what new chats start
   with even when another surface (CLI `gini provider set`, the Edit dialog,
   add-provider) has moved `config.provider` underneath it.
-- **Chat Settings tab** reads `/api/status.activeAgent.resolvedProvider`.
-  For a non-default agent it writes the existing
-  `POST /api/agents/:id/provider` contract (ADR
-  per-agent-provider-settings.md) with the route pair; "Use default model"
-  writes the CURRENT default pair as a new pin (the endpoint's blank-pair
-  clear remains an API affordance the UI no longer uses). For the DEFAULT
-  agent — whose pair is the default model itself — picks route through
-  `POST /api/settings/default-model` instead, so the mirror with
-  `config.provider` holds no matter which surface the default was changed
-  from. Selection applies immediately on pick — no staged save bar.
+- The Settings **"Agent model" card** (the active agent's picker, ADR
+  per-agent-provider-settings.md) reads
+  `/api/status.activeAgent.resolvedProvider`. For a non-default agent it
+  writes the existing `POST /api/agents/:id/provider` contract with the
+  route pair; "Use default model" writes the CURRENT default pair as a new
+  pin (the endpoint's blank-pair clear remains an API affordance the UI no
+  longer uses). For the DEFAULT agent — whose pair is the default model
+  itself — picks route through `POST /api/settings/default-model` instead,
+  so the mirror with `config.provider` holds no matter which surface the
+  default was changed from. Selection applies immediately on pick — no
+  staged save bar.
 - Routes are derived only from **configured** providers, so the picker never
   offers a route the next turn can't authenticate. Azure's configured-gate
   (active instance provider only) means a cross-provider Azure override
@@ -133,8 +134,9 @@ catalog.
   removal of the provider backing it stays blocked in the UI.
 - Changing the default model never rewrites an existing agent: pinned
   agents keep their pair, and previously override-less agents are pinned to
-  the prior default by the write itself. Their chat Settings tab shows their
-  own selection with an explicit "Use default model" pin action.
+  the prior default by the write itself. The Agent model card shows the
+  active agent's own selection with an explicit "Use default model" pin
+  action.
 - Two routes can share a provider (Bedrock geo profiles); a route label is
   therefore provider label + qualifier, and the picker treats the pair
   `(provider, providerModelId)` — not the provider name — as the selection
@@ -154,7 +156,7 @@ catalog.
 - The Default model trigger always names the serving route ("gpt-5.5 ·
   Codex") with its brand icon; picking a model via a flyout route shows
   that exact route's label.
-- In the chat Settings tab, picking a model + non-default route persists the
+- In the Agent model card, picking a model + non-default route persists the
   exact pair on the agent and the next chat turn dispatches through it.
 - The picker is operable by keyboard (arrows + ArrowRight into the flyout +
   Enter) and by tap (chevron button opens the flyout).
@@ -174,4 +176,5 @@ catalog.
   "Default model" control.
 - `packages/web/src/app/settings/_components/ProviderCard.tsx` — provider rows,
   credential management only.
-- `packages/web/src/components/chat/SettingsTab.tsx` — per-agent picker surface.
+- `packages/web/src/app/settings/_components/AgentModelControl.tsx` —
+  per-agent picker surface.

@@ -1,8 +1,9 @@
 /// <reference lib="dom" />
 
 // Settings page managed-mode gating (ADR managed-deployment-mode.md): the
-// provider sections — DefaultModelControl and the ProviderCard list (which
-// carries the Add-provider affordance) — render for a self-hosted deployment
+// provider sections — DefaultModelControl, AgentModelControl, and the
+// ProviderCard list (which carries the Add-provider affordance) — render for
+// a self-hosted deployment
 // and disappear when /api/setup/status reports `managed: true`; every other
 // card on the page stays. The real useManagedMode hook runs against a stubbed
 // fetch, so the wire contract is what these tests pin.
@@ -26,6 +27,9 @@ beforeAll(async () => {
   }));
   mock.module("./_components/DefaultModelControl", () => ({
     DefaultModelControl: () => <div data-testid="default-model-control" />
+  }));
+  mock.module("./_components/AgentModelControl", () => ({
+    AgentModelControl: () => <div data-testid="agent-model-control" />
   }));
   mock.module("./_components/ProviderCard", () => ({
     ProviderCard: () => <div data-testid="provider-card" />
@@ -86,6 +90,7 @@ describe("SettingsPage managed-mode gating", () => {
     stubFetch(false);
     await renderPage();
     expect(screen.queryByTestId("default-model-control")).not.toBeNull();
+    expect(screen.queryByTestId("agent-model-control")).not.toBeNull();
     expect(screen.queryByTestId("provider-card")).not.toBeNull();
     expect(screen.queryByTestId("browser-settings-card")).not.toBeNull();
     expect(screen.queryByTestId("toolsets-card")).not.toBeNull();
@@ -97,6 +102,7 @@ describe("SettingsPage managed-mode gating", () => {
     // The sections default to visible (self-hosted posture) and withdraw when
     // the setup-status answer lands — wait for that flip.
     await waitFor(() => expect(screen.queryByTestId("default-model-control")).toBeNull());
+    expect(screen.queryByTestId("agent-model-control")).toBeNull();
     expect(screen.queryByTestId("provider-card")).toBeNull();
     // Everything below the provider sections stays.
     expect(screen.queryByTestId("browser-settings-card")).not.toBeNull();

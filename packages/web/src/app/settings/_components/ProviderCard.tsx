@@ -55,7 +55,7 @@ interface SetProviderResult {
 
 // Connected-provider rows: credential management only (edit transport
 // config, disconnect, add). Model selection is model-first — the Default
-// model picker above the list and the per-chat Settings tab own it (ADR
+// model and Agent model pickers above the list own it (ADR
 // model-first-selection.md), so the rows carry no selection affordance.
 export function ProviderCard({
   catalog,

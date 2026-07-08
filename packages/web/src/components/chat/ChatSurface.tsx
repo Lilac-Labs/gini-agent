@@ -16,7 +16,6 @@ import { ChannelViewJob } from "@/components/chat/ChannelViewJob";
 import { ChatSearchBox } from "@/components/chat/ChatSearchBox";
 import { ChatTabBar, type ChatTab } from "@/components/chat/ChatTabBar";
 import { JobsTab } from "@/components/chat/JobsTab";
-import { SettingsTab } from "@/components/chat/SettingsTab";
 import { SentDraftsProvider } from "@/components/chat/SentDraftsContext";
 import { api, type UploadRef } from "@/lib/api";
 import { useChatReadState } from "@/lib/use-chat-read-state";
@@ -54,7 +53,6 @@ export function ChatSurface({
   headerSeed,
   isChannel,
   isTopic,
-  isPinned,
   messageAgent,
   activeAgentId,
   panel = false,
@@ -66,7 +64,6 @@ export function ChatSurface({
   headerSeed: string;
   isChannel: boolean;
   isTopic: boolean;
-  isPinned: boolean;
   messageAgent?: { id: string; name: string };
   activeAgentId?: string;
   // Panel mode (the right-side Topic drawer): swap the full AgentChatHeader,
@@ -77,14 +74,6 @@ export function ChatSurface({
   onClosePanel?: () => void;
 }) {
   const [tab, setTab] = useState<ChatTab>("messages");
-  // Fall back to Messages if the active tab becomes hidden without a remount.
-  // ChatSurface is keyed by sessionId, so pinning the *same* session you're
-  // viewing (e.g. opening its own ?session= link) flips isPinned true in place —
-  // which hides Settings while `tab` could still be "settings". Reset so a
-  // hidden tab's body can't linger.
-  useEffect(() => {
-    if (isPinned && tab === "settings") setTab("messages");
-  }, [isPinned, tab]);
   const [text, setText] = useState("");
   // In-chat search: client-side find over the loaded transcript. `query` is the
   // raw input; `activeMatch` indexes into the matched-block list below.
@@ -451,17 +440,12 @@ export function ChatSurface({
             }
           />
         )}
-        {/* A topic's only tab is Messages (Jobs hidden via isTopic, Settings via
-            the always-true isPinned), so the bar is a redundant single tab —
-            drop it entirely, matching panel mode. The transcript still renders
-            since `tab` defaults to "messages". */}
+        {/* A topic's only tab is Messages (Jobs hidden via isTopic), so the
+            bar is a redundant single tab — drop it entirely, matching panel
+            mode. The transcript still renders since `tab` defaults to
+            "messages". */}
         {panel || isTopic ? null : (
-          <ChatTabBar
-            active={tab}
-            onChange={setTab}
-            hideJobsTab={isChannel}
-            hideSettingsTab={isPinned}
-          />
+          <ChatTabBar active={tab} onChange={setTab} hideJobsTab={isChannel} />
         )}
 
         {tab === "messages" ? (
@@ -555,12 +539,6 @@ export function ChatSurface({
           </>
         ) : tab === "jobs" ? (
           <JobsTab />
-        ) : tab === "settings" && !isPinned ? (
-          // Settings only renders on the active agent's canonical chat. The
-          // !isPinned guard (plus the reset effect above) keeps its body from
-          // showing on a pinned surface even for a frame, and the exhaustive
-          // switch keeps a stray tab value from falling through to it.
-          <SettingsTab agentId={activeAgentId} />
         ) : null}
       </section>
     </>

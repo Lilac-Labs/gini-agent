@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/PageHeader";
 import { api } from "@/lib/api";
 import { useInvalidate, useManagedMode, useStatus } from "@/lib/queries";
+import { AgentModelControl } from "./_components/AgentModelControl";
 import { DefaultModelControl } from "./_components/DefaultModelControl";
 import { ProviderCard } from "./_components/ProviderCard";
 import type { ProviderCatalogItem } from "@/lib/providers";
@@ -110,6 +111,8 @@ export default function SettingsPage() {
         {managed ? null : (
           <>
             <DefaultModelControl />
+
+            <AgentModelControl />
 
             <ProviderCard
               catalog={catalog.data ?? []}

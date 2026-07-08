@@ -2517,8 +2517,8 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       readState(config.instance).providerAuthFailures
     ))],
     // Model-first view of the same catalog: canonical models with the routes
-    // (configured providers) that serve them. Drives the model picker in the
-    // web Settings page and chat Settings tab (ADR model-first-selection.md).
+    // (configured providers) that serve them. Drives the model pickers on the
+    // web Settings page (ADR model-first-selection.md).
     ["GET", /^\/api\/providers\/models$/, () => json(buildModelCatalog(providerCatalogWithStatus(config.provider?.name, config.provider?.apiKeyEnv, config.provider?.baseUrl)))],
     // Set the default model (what new chats start with): writes the instance
     // provider AND the default agent's override — the latter is what the

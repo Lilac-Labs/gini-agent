@@ -11,8 +11,8 @@
 // ArrowRight / tapping the chevron — hover is unreachable on keyboard and
 // touch) opens a side flyout of its routes with the default tagged.
 //
-// Used by the Settings "Default model" control and the per-agent chat
-// Settings tab. Data comes from GET /providers/models (canonical models ×
+// Used by the Settings page's "Default model" and "Agent model" controls.
+// Data comes from GET /providers/models (canonical models ×
 // configured routes); selection is reported as the exact
 // { provider, model } pair the selection endpoints persist.
 

@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 
 // ChatTabBar tests. Pins the tab strip's contract:
-//   - tab visibility flags (Jobs on channels, Settings on pinned sessions)
+//   - the Jobs visibility flag (hidden on channels)
 //   - count pills hide at zero and carry an accessible label
 //   - clicking a tab reports its id
 
@@ -14,17 +14,16 @@ describe("ChatTabBar", () => {
   test("renders all tabs and reports clicks", () => {
     const changes: ChatTab[] = [];
     render(<ChatTabBar active="messages" onChange={(t) => changes.push(t)} />);
-    for (const label of ["Messages", "Jobs", "Settings"]) {
+    for (const label of ["Messages", "Jobs"]) {
       expect(screen.getByText(label)).not.toBeNull();
     }
     fireEvent.click(screen.getByText("Jobs"));
     expect(changes).toEqual(["jobs"]);
   });
 
-  test("hides Jobs on channels and Settings on pinned sessions", () => {
-    render(<ChatTabBar active="messages" onChange={() => {}} hideJobsTab hideSettingsTab />);
+  test("hides Jobs on channels", () => {
+    render(<ChatTabBar active="messages" onChange={() => {}} hideJobsTab />);
     expect(screen.queryByText("Jobs")).toBeNull();
-    expect(screen.queryByText("Settings")).toBeNull();
     expect(screen.getByText("Messages")).not.toBeNull();
   });
 

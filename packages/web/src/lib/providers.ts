@@ -1,9 +1,9 @@
 // Shared provider-catalog types and display helpers.
 //
 // Both the settings route (ProviderCard / EditProviderDialog / Add Provider)
-// and the per-agent chat Settings tab consume the `/providers/catalog` payload,
-// so the row shape and the brand-label helper live here rather than inside any
-// one route's private component.
+// and the shared ModelPicker consume the `/providers/catalog` payload, so the
+// row shape and the brand-label helper live here rather than inside any one
+// route's private component.
 
 import type {
   ModelCatalogEntry as RuntimeModelCatalogEntry,

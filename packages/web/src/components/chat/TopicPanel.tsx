@@ -29,7 +29,6 @@ export function TopicPanel({ topicId }: { topicId: string }) {
           headerSeed={topicId}
           isChannel={false}
           isTopic
-          isPinned
           messageAgent={session.agentId ? { id: session.agentId, name: "Gini" } : undefined}
           panel
           onClosePanel={closeTopic}

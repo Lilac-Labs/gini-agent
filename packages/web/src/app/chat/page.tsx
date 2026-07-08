@@ -94,7 +94,7 @@ function ChatPageBody() {
       {!sessionId ? (
         <section className="flex min-h-0 min-w-0 flex-1 flex-col">
           <AgentChatHeader name={headerName} seed={headerSeed} showAvatar={!isChannel && !isTopic} />
-          <ChatTabBar active="messages" onChange={() => {}} hideJobsTab={isChannel || isTopic} hideSettingsTab={Boolean(pinnedSessionId)} />
+          <ChatTabBar active="messages" onChange={() => {}} hideJobsTab={isChannel || isTopic} />
           <div className="flex flex-1 items-center justify-center p-6 text-sm text-muted-foreground">
             {resolving ? "Loading…" : "No chat yet — say hello below."}
           </div>
@@ -111,7 +111,6 @@ function ChatPageBody() {
           headerSeed={headerSeed}
           isChannel={isChannel}
           isTopic={isTopic}
-          isPinned={Boolean(pinnedSessionId)}
           messageAgent={messageAgent}
           activeAgentId={activeAgentId}
         />

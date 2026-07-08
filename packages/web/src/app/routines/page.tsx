@@ -15,12 +15,16 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { PageHeader } from "@/components/PageHeader";
 import {
+  useEmailWatchers,
   useInstallRoutineTemplate,
+  useRemoveEmailWatcher,
   useRoutineTemplates,
   useUninstallRoutineTemplate,
   type RoutineTemplateView
 } from "@/lib/queries";
-import { chipFor } from "./chips";
+import type { EmailWatcherRecord } from "@runtime/types";
+import { chipFor, WATCHER_CHIP } from "./chips";
+import { watcherChannelId, watcherDescription, watcherTitle } from "./watchers";
 
 export default function RoutinesPage() {
   const router = useRouter();
@@ -28,6 +32,11 @@ export default function RoutinesPage() {
   const install = useInstallRoutineTemplate();
   const uninstall = useUninstallRoutineTemplate();
   const [view, setView] = useState<"mine" | "explore">("mine");
+
+  // Email watchers (created conversationally, e.g. "watch this refund thread")
+  // are first-class routines in "My routines", alongside installed templates.
+  const watchers = useEmailWatchers();
+  const watcherList = watchers.data ?? [];
 
   const all = templates.data?.templates ?? [];
   const mine = all.filter((template) => template.installed);
@@ -73,7 +82,7 @@ export default function RoutinesPage() {
         ) : view === "mine" ? (
           <>
             <h2 className="mt-8 text-[17px] font-semibold">My routines</h2>
-            {mine.length === 0 ? (
+            {mine.length === 0 && watcherList.length === 0 ? (
               <div className="mt-[18px] flex flex-col items-center justify-center rounded-xl border border-dashed border-border bg-card/50 px-6 py-16 text-center">
                 <p className="text-sm font-medium">No routines yet</p>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -132,6 +141,9 @@ export default function RoutinesPage() {
                     </div>
                   );
                 })}
+                {watcherList.map((watcher) => (
+                  <WatcherCard key={watcher.id} watcher={watcher} />
+                ))}
               </div>
             )}
           </>
@@ -189,6 +201,88 @@ export default function RoutinesPage() {
         )}
       </div>
     </>
+  );
+}
+
+// An email-watcher routine card. Same shape as the template card, but the
+// chip is the shared watcher cyan, the ⋯ menu deep-links to the watcher's
+// channel, and a paused watcher renders dimmed with a Paused pill.
+function WatcherCard({ watcher }: { watcher: EmailWatcherRecord }) {
+  const router = useRouter();
+  const remove = useRemoveEmailWatcher();
+  const { icon: Icon, color } = WATCHER_CHIP;
+  const channelId = watcherChannelId(watcher);
+  const title = watcherTitle(watcher);
+
+  const submitRemove = () => {
+    remove.mutate(watcher.id, {
+      onSuccess: () => toast.success(`Removed ${title}`),
+      onError: (error) => toast.error(error.message)
+    });
+  };
+
+  return (
+    <div
+      onClick={() => router.push(`/routines/watch/${encodeURIComponent(watcher.id)}`)}
+      className={cn(
+        "flex min-h-[150px] cursor-pointer flex-col gap-3.5 rounded-xl border border-border bg-card p-5 transition-colors hover:border-foreground/20",
+        !watcher.enabled && "opacity-60"
+      )}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <span
+          className="flex size-10 shrink-0 items-center justify-center rounded-[11px]"
+          style={{ backgroundColor: color }}
+        >
+          <Icon className="size-5 text-white" aria-hidden />
+        </span>
+        <div className="flex items-center gap-2">
+          {!watcher.enabled ? (
+            <span className="rounded-full bg-muted px-2.5 py-1 text-[11px] font-semibold text-muted-foreground">
+              Paused
+            </span>
+          ) : null}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                aria-label={`${title} options`}
+                // Keep the menu from also triggering the card's
+                // navigate-to-detail click.
+                onClick={(event) => event.stopPropagation()}
+                className="flex size-[26px] shrink-0 items-center justify-center rounded-[7px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <MoreHorizontalIcon className="size-[18px]" aria-hidden />
+              </button>
+            </DropdownMenuTrigger>
+            {/* The menu renders in a portal, but React portals bubble events
+                through the REACT tree — a click on a menu item would reach the
+                card's navigate-to-detail onClick and clobber the item's own
+                navigation. Stop it at the content boundary. */}
+            <DropdownMenuContent
+              align="end"
+              className="w-40"
+              onClick={(event) => event.stopPropagation()}
+            >
+              {channelId ? (
+                <DropdownMenuItem asChild>
+                  <Link href={`/chat?session=${encodeURIComponent(channelId)}`}>Open channel</Link>
+                </DropdownMenuItem>
+              ) : null}
+              <DropdownMenuItem disabled={remove.isPending} onSelect={submitRemove}>
+                Remove
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+      <div className="flex flex-col gap-[7px]">
+        <div className="line-clamp-2 text-sm font-semibold">{title}</div>
+        <div className="line-clamp-2 text-[14px] leading-normal text-muted-foreground">
+          {watcherDescription(watcher)}
+        </div>
+      </div>
+    </div>
   );
 }
 

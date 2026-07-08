@@ -21,6 +21,7 @@ import { useConnectors, useGoogleAccounts, useInvalidate, useProviders, type Pro
 import { AddConnectorDialog, type CreateConnectorBody } from "@/components/AddConnectorDialog";
 import { ManualCredentialDialog } from "@/components/ManualCredentialDialog";
 import { GoogleAccountsCard, GoogleLogo } from "./_components/GoogleAccountsCard";
+import { BRAND_LOGOS } from "./_components/brand-logos";
 import {
   GOOGLE_PROVIDER_ID,
   buildTiles,
@@ -246,34 +247,47 @@ export default function IntegrationsPage() {
                 </div>
               ) : (
                 <div className="mt-[22px] grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
-                  {visible.map((tile) => (
-                    <button
-                      key={tile.provider.id}
-                      type="button"
-                      onClick={() => openTile(tile)}
-                      className="flex w-full items-center gap-[13px] rounded-xl border border-border bg-card px-[15px] py-3.5 text-left transition-colors hover:border-foreground/20 hover:bg-muted"
-                    >
-                      <span
-                        className="flex size-10 shrink-0 items-center justify-center rounded-[11px] text-[17px] font-bold text-white"
-                        style={{ backgroundColor: tile.color }}
+                  {visible.map((tile) => {
+                    // Official brand mark on the white tile (white in dark
+                    // mode too, matching the drilldown's Google mark); the
+                    // colored monogram is the fallback for providers with no
+                    // sourceable mark.
+                    const Logo = BRAND_LOGOS[tile.provider.id];
+                    return (
+                      <button
+                        key={tile.provider.id}
+                        type="button"
+                        onClick={() => openTile(tile)}
+                        className="flex w-full items-center gap-[13px] rounded-xl border border-border bg-card px-[15px] py-3.5 text-left transition-colors hover:border-foreground/20 hover:bg-muted"
                       >
-                        {tile.initial}
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[14.5px] font-semibold">{tile.label}</span>
-                        {tile.connected ? (
-                          <span className="mt-0.5 flex items-center gap-1.5">
-                            <span className="size-[7px] shrink-0 rounded-full bg-emerald-500" />
-                            <span className="text-[12.5px] font-medium text-emerald-600">{tile.status}</span>
+                        {Logo ? (
+                          <span className="flex size-10 shrink-0 items-center justify-center rounded-[11px] border border-border bg-white">
+                            <Logo className="size-6" />
                           </span>
                         ) : (
-                          <span className="mt-0.5 block truncate text-[12.5px] text-muted-foreground">
-                            {tile.provider.description}
+                          <span
+                            className="flex size-10 shrink-0 items-center justify-center rounded-[11px] text-[17px] font-bold text-white"
+                            style={{ backgroundColor: tile.color }}
+                          >
+                            {tile.initial}
                           </span>
                         )}
-                      </span>
-                    </button>
-                  ))}
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[14.5px] font-semibold">{tile.label}</span>
+                          {tile.connected ? (
+                            <span className="mt-0.5 flex items-center gap-1.5">
+                              <span className="size-[7px] shrink-0 rounded-full bg-emerald-500" />
+                              <span className="text-[12.5px] font-medium text-emerald-600">{tile.status}</span>
+                            </span>
+                          ) : (
+                            <span className="mt-0.5 block truncate text-[12.5px] text-muted-foreground">
+                              {tile.provider.description}
+                            </span>
+                          )}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </>

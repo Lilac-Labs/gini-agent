@@ -112,6 +112,14 @@ three card kinds:
   `EditJobDialog`: interval/cron/timezone plus retry, timeout, budget, and
   delivery targets), Delete; no Settings tab (prompt editing stays in chat).
 
+The routines page — its `PageHeader` action and the "No routines yet" empty
+state — offers a **Create routine** entry point that seeds the Home composer
+in Message mode with `Create a routine that …` (`/?compose=message&prompt=`,
+consumed by `HomeComposer`). A custom routine therefore starts as an ordinary
+chat turn the agent fulfills with `create_job`; there is deliberately no
+dedicated create form — authoring stays conversational, the same path email
+watchers and other chat-created jobs already take.
+
 The one exclusion from the custom partition besides `templateId` is the
 shared email-watch detection job, identified **structurally** — a
 `skill-script` pre-run hook routed at the `gmail-watch` skill, the same

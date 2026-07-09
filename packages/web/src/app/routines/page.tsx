@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { CheckIcon, MoreHorizontalIcon } from "lucide-react";
+import { CheckIcon, MoreHorizontalIcon, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -31,8 +31,14 @@ import { chipFor, CUSTOM_JOB_CHIP, WATCHER_CHIP } from "./chips";
 import { customRoutineJobs, jobDescription, jobDisplayName } from "./custom-jobs";
 import { watcherChannelId, watcherDescription, watcherTitle } from "./watchers";
 
+// The composer seed for conversational routine creation. Trailing space so
+// the caret lands after it and the user continues the sentence naturally.
+const CREATE_ROUTINE_PROMPT = "Create a routine that ";
+
 export default function RoutinesPage() {
   const router = useRouter();
+  const goCreateRoutine = () =>
+    router.push("/?compose=message&prompt=" + encodeURIComponent(CREATE_ROUTINE_PROMPT));
   const templates = useRoutineTemplates();
   const install = useInstallRoutineTemplate();
   const uninstall = useUninstallRoutineTemplate();
@@ -78,6 +84,12 @@ export default function RoutinesPage() {
       <PageHeader
         title="Routines"
         description="Routines let your assistant handle recurring work with the right triggers, context, and actions."
+        actions={
+          <Button size="sm" onClick={goCreateRoutine}>
+            <Plus className="size-4" />
+            Create routine
+          </Button>
+        }
       />
       <div className="flex-1 overflow-auto p-6">
         <div className="inline-flex items-center gap-0.5 rounded-full bg-muted p-1">
@@ -100,9 +112,15 @@ export default function RoutinesPage() {
                 <p className="mt-1 text-xs text-muted-foreground">
                   Add a pre-built routine and it runs on a schedule.
                 </p>
-                <Button size="sm" className="mt-4" onClick={() => setView("explore")}>
-                  Explore routines
-                </Button>
+                <div className="mt-4 flex items-center gap-2">
+                  <Button size="sm" onClick={goCreateRoutine}>
+                    <Plus className="size-4" />
+                    Create routine
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => setView("explore")}>
+                    Explore routines
+                  </Button>
+                </div>
               </div>
             ) : (
               <div className="mt-[18px] grid gap-[18px] md:grid-cols-2 xl:grid-cols-3">

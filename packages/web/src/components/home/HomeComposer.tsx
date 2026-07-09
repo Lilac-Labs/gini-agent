@@ -71,15 +71,27 @@ export function HomeComposer() {
 
   // /?compose=message (the sidebar Messages "+") deep-links straight into
   // Message mode with the textarea focused, then strips the param so
-  // reload/back-nav doesn't re-trigger it. Keyed on the params (not mount):
-  // clicking "+" while already on home only changes the query string, and
-  // the composer never remounts. Declared after the storage read above so
-  // the deep link wins the mount race; deliberately transient — it never
-  // writes the persisted mode chip.
+  // reload/back-nav doesn't re-trigger it. /?prompt=<text> additionally seeds
+  // the composer (e.g. the routines "Create routine" entry point) — pre-fill
+  // only, never auto-submit. Keyed on the params (not mount): clicking "+"
+  // while already on home only changes the query string, and the composer
+  // never remounts. Declared after the storage read above so the deep link
+  // wins the mount race; deliberately transient — it never writes the
+  // persisted mode chip.
   useEffect(() => {
-    if (params?.get("compose") !== "message") return;
+    const seed = params?.get("prompt");
+    if (params?.get("compose") !== "message" && !seed) return;
     setMode("message");
-    textareaRef.current?.focus();
+    if (seed) setText(seed);
+    const el = textareaRef.current;
+    el?.focus();
+    // The controlled value only picks up `seed` on the next render, so move
+    // the caret to the end after that commit (rAF fires before the next
+    // paint); a synchronous setSelectionRange would clamp against the
+    // still-empty textarea.
+    if (seed && el) {
+      requestAnimationFrame(() => el.setSelectionRange(seed.length, seed.length));
+    }
     // Shallow URL cleanup (syncs useSearchParams without a router
     // navigation) — router.replace would run Next's navigation focus
     // management and steal the focus just placed on the textarea.

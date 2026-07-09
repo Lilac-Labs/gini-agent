@@ -40,6 +40,7 @@ import {
   isAbortError,
   isAuthExpiredError,
   isContextOverflowError,
+  isRetryableProviderError,
   isStreamIdleTimeoutError,
   providerAuthNote,
   redactSecrets,
@@ -587,11 +588,15 @@ function addCost(accumulator: CostRecord | undefined, increment: CostRecord | un
 // Matched signals: the streaming idle/stall timeout (classified by provider's
 // own isStreamIdleTimeoutError — the single source of truth for that error
 // shape, matching both its StreamIdleTimeoutError name and its "stream idle
-// timeout" message marker), and the connection/socket faults Bun's fetch
-// surfaces ("operation timed out", "fetch failed", "connection reset"/ECONNRESET,
-// ETIMEDOUT). The idle-timeout error is NOT an AbortError-named DOMException
-// (provider re-wraps it into a named Error), so the user-cancel gate above does
-// not claim it — by the time we reach here an AbortError is already excluded.
+// timeout" message marker); provider-side transient HTTP faults (throttling,
+// 5xx, overloaded — delegated to the provider's own isRetryableProviderError,
+// which keys off the HTTP status carried by a ProviderHttpError and, for
+// no-status streaming error events, the stable exception-vocabulary markers);
+// and the connection/socket faults Bun's fetch surfaces ("operation timed out",
+// "fetch failed", "connection reset"/ECONNRESET, ETIMEDOUT). The idle-timeout
+// error is NOT an AbortError-named DOMException (provider re-wraps it into a
+// named Error), so the user-cancel gate above does not claim it — by the time
+// we reach here an AbortError is already excluded.
 const TRANSIENT_MODEL_ERROR_MARKERS = [
   "operation timed out",
   "fetch failed",
@@ -606,6 +611,9 @@ function isTransientModelError(error: unknown, message: string | undefined): boo
   // The streaming idle/stall timeout: match provider's canonical predicate so
   // this stays pinned to the exact shape provider.ts throws (name + message).
   if (isStreamIdleTimeoutError(error)) return true;
+  // Provider-side transient HTTP faults (throttling/5xx/overloaded): delegated
+  // to the provider's classifier so status/marker knowledge lives in one place.
+  if (isRetryableProviderError(error)) return true;
   if (!message) return false;
   const lower = message.toLowerCase();
   return TRANSIENT_MODEL_ERROR_MARKERS.some((marker) => lower.includes(marker));

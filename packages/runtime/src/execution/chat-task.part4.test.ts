@@ -1355,6 +1355,38 @@ describe("chat-task loop", () => {
     rmSync(workspaceRoot, { recursive: true, force: true });
   });
 
+  // A provider-side transient fault (here the exact non-streamed Bedrock
+  // InternalServerException prose) must retry the same way an OS timeout does —
+  // it is classified by the provider's isRetryableProviderError, not the
+  // client-fault markers, so this pins that the whole loop survives it.
+  test("transient provider fault (Bedrock InternalServerException) retries with backoff then completes", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "gini-chat-ws-"));
+    const config = buildConfig(workspaceRoot, "chat-task-transient-provider-retry");
+    const provider = normalizeProvider(config.provider);
+
+    // First attempt: a transient Bedrock 500. Second attempt: success.
+    setEchoToolCallingFailure("The system encountered an unexpected error during processing. Try your request again.");
+    setEchoToolCallingResponse({ provider, text: "Recovered after a Bedrock hiccup.", toolCalls: [], finishReason: "stop" });
+
+    const task = await submitTask(config, "say hi", { mode: "chat" });
+    const finished = await waitForTerminal(config, task.id, 10000);
+
+    expect(finished.status).toBe("completed");
+    expect(finished.summary).toBe("Recovered after a Bedrock hiccup.");
+    expect(finished.error).toBeUndefined();
+    // Exactly two provider calls: the failed attempt + the successful retry.
+    expect(getEchoToolCallingCalls().length).toBe(2);
+
+    const { readTrace } = await import("../state");
+    const traces = readTrace(config.instance, task.id);
+    const retries = traces.filter(
+      (t) => t.type === "warning" && /Transient model-call fault; retrying/.test(t.message)
+    );
+    expect(retries.length).toBe(1);
+
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  });
+
   // The streaming idle/stall timeout (provider.ts StreamIdleTimeoutError, whose
   // message carries the "stream idle timeout" marker) is also transient and must
   // be retried — this pins the reconciliation between the reader's thrown shape

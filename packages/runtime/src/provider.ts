@@ -618,6 +618,56 @@ export function isStreamIdleTimeoutError(error: unknown): boolean {
   return error.name === "StreamIdleTimeoutError" || error.message.includes("stream idle timeout");
 }
 
+// A provider HTTP fault that carries the response status. Thrown at every
+// non-streaming/stream-header `!response.ok` site so the retry layer can
+// classify a transient server-side failure (throttling, 5xx, overloaded) by
+// status uniformly across providers, instead of losing the status the moment
+// the error collapses into a bare message. Extends Error and forwards
+// `.message`, so the message-based classifiers (isAuthExpiredError,
+// isContextOverflowError) and existing message assertions are unaffected.
+export class ProviderHttpError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "ProviderHttpError";
+  }
+}
+
+// HTTP statuses worth re-attempting: request timeout (408), throttling (429),
+// the transient 5xx family (500/502/503/504), and the provider "overloaded"
+// code (529). Deliberately excludes 400 (a ValidationException like Bedrock's
+// "input is too long" — that falls through to the context-overflow path) and
+// 401/403 (the auth branch runs first).
+const RETRYABLE_PROVIDER_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504, 529]);
+
+// Stable exception vocabulary for the streaming no-status path: a streamed
+// transient fault arrives as an in-band error EVENT (HTTP 200, then e.g.
+// Bedrock `internalServerException`/`throttlingException`, Anthropic
+// `overloaded_error`), so there is no response status to key off. Matched by
+// lowercased substring. Includes AWS's literal InternalServerException prose,
+// which a non-streamed Bedrock 500 can surface as its only distinguishing text.
+const TRANSIENT_PROVIDER_ERROR_MARKERS = [
+  "internalserverexception",
+  "serviceunavailableexception",
+  "throttlingexception",
+  "modelstreamerrorexception",
+  "modelnotreadyexception",
+  "the system encountered an unexpected error during processing",
+  "overloaded"
+];
+
+// True when a provider error is a transient server-side fault the retry layer
+// should re-attempt. Two complementary signals: the response status (primary —
+// a typed ProviderHttpError from a `!response.ok` site) and, for streaming
+// error events that carry no status, the exception-vocabulary markers above.
+// Exposed so the chat-task retry classifier can delegate provider-fault
+// recognition here rather than duplicate the status/message knowledge.
+export function isRetryableProviderError(error: unknown): boolean {
+  if (error instanceof ProviderHttpError) return RETRYABLE_PROVIDER_HTTP_STATUSES.has(error.status);
+  if (!(error instanceof Error)) return false;
+  const lower = error.message.toLowerCase();
+  return TRANSIENT_PROVIDER_ERROR_MARKERS.some((marker) => lower.includes(marker));
+}
+
 // Race a single reader.read() against the idle window. On a normal read the
 // timer is cleared and the chunk returned unchanged, so the happy path is
 // untouched. If the window elapses first, cancel the reader (tearing down the
@@ -1408,7 +1458,7 @@ async function callToolCallingChatCompletions(
   const payload = parseJsonObject(rawPayload);
   if (!response.ok) {
     const fallback = rawPayload.slice(0, 500) || `Tool-calling request failed with HTTP ${response.status}`;
-    throw new Error(readOpenAIError(payload) ?? fallback);
+    throw new ProviderHttpError(response.status, readOpenAIError(payload) ?? fallback);
   }
   return extractToolCallingResult(payload, provider);
 }
@@ -1515,7 +1565,7 @@ async function readToolCallingStream(
     const raw = await response.text();
     const payload = parseJsonObject(raw);
     const fallback = raw.slice(0, 500) || `Tool-calling stream failed with HTTP ${response.status}`;
-    throw new Error(readOpenAIError(payload) ?? fallback);
+    throw new ProviderHttpError(response.status, readOpenAIError(payload) ?? fallback);
   }
   const body = response.body;
   if (!body) throw new Error("Tool-calling stream returned no response body.");
@@ -2241,7 +2291,7 @@ async function callAnthropicMessages(
   const payload = parseJsonObject(rawPayload);
   if (!response.ok) {
     const fallback = rawPayload.slice(0, 500) || `Anthropic request failed with HTTP ${response.status}`;
-    throw new Error(readOpenAIError(payload) ?? fallback);
+    throw new ProviderHttpError(response.status, readOpenAIError(payload) ?? fallback);
   }
   return parseAnthropicMessage(payload, provider);
 }
@@ -2483,7 +2533,7 @@ async function readAnthropicMessagesStream(
     const raw = await response.text();
     const payload = parseJsonObject(raw);
     const fallback = raw.slice(0, 500) || `Anthropic stream failed with HTTP ${response.status}`;
-    throw new Error(readOpenAIError(payload) ?? fallback);
+    throw new ProviderHttpError(response.status, readOpenAIError(payload) ?? fallback);
   }
   const body = response.body;
   if (!body) throw new Error("Anthropic stream returned no response body.");
@@ -2979,7 +3029,7 @@ async function callBedrockConverse(
   const payload = parseJsonObject(rawPayload);
   if (!response.ok) {
     const fallback = rawPayload.slice(0, 500) || `Bedrock Converse request failed with HTTP ${response.status}`;
-    throw new Error(readBedrockError(payload) ?? fallback);
+    throw new ProviderHttpError(response.status, readBedrockError(payload) ?? fallback);
   }
   return parseConverseResponse(payload, provider);
 }
@@ -3084,7 +3134,7 @@ async function readConverseStream(
     const raw = await response.text();
     const payload = parseJsonObject(raw);
     const fallback = raw.slice(0, 500) || `Bedrock Converse stream failed with HTTP ${response.status}`;
-    throw new Error(readBedrockError(payload) ?? fallback);
+    throw new ProviderHttpError(response.status, readBedrockError(payload) ?? fallback);
   }
   const bodyStream = response.body;
   if (!bodyStream) throw new Error("Bedrock Converse stream returned no response body.");

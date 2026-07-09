@@ -20,8 +20,10 @@ import {
   isAuthExpiredError,
   isContextOverflowError,
   isProviderConfigured,
+  isRetryableProviderError,
   isStreamIdleTimeoutError,
   IDLE_STREAM_TIMEOUT_MS,
+  ProviderHttpError,
   StreamIdleTimeoutError,
   isValidAwsRegion,
   normalizeProvider,
@@ -6046,6 +6048,42 @@ describe("streaming idle/stall timeout", () => {
       restoreIdle();
       restoreEnv();
     }
+  });
+});
+
+describe("retryable provider error classification", () => {
+  test("ProviderHttpError carries the status and forwards the message", () => {
+    const err = new ProviderHttpError(500, "boom");
+    expect(err.name).toBe("ProviderHttpError");
+    expect(err.status).toBe(500);
+    expect(err.message).toBe("boom");
+    expect(err).toBeInstanceOf(Error);
+  });
+
+  test("isRetryableProviderError matches the transient HTTP status set", () => {
+    for (const status of [408, 429, 500, 502, 503, 504, 529]) {
+      expect(isRetryableProviderError(new ProviderHttpError(status, "transient"))).toBe(true);
+    }
+    // A ValidationException (e.g. Bedrock "input is too long") is NOT transient —
+    // it must fall through to the context-overflow path, not the retry path.
+    expect(isRetryableProviderError(new ProviderHttpError(400, "input is too long for requested model"))).toBe(false);
+    // 401/403 belong to the auth branch, which runs first — not retryable here.
+    expect(isRetryableProviderError(new ProviderHttpError(401, "unauthorized"))).toBe(false);
+  });
+
+  test("isRetryableProviderError matches the no-status streaming exception vocabulary", () => {
+    // The exact non-streamed Bedrock InternalServerException prose.
+    expect(
+      isRetryableProviderError(
+        new Error("The system encountered an unexpected error during processing. Try your request again.")
+      )
+    ).toBe(true);
+    expect(isRetryableProviderError(new Error("Overloaded"))).toBe(true);
+    expect(isRetryableProviderError(new Error("throttlingException: rate exceeded"))).toBe(true);
+    // An unrelated failure is not transient.
+    expect(isRetryableProviderError(new Error("tool blew up"))).toBe(false);
+    expect(isRetryableProviderError("not an error")).toBe(false);
+    expect(isRetryableProviderError(undefined)).toBe(false);
   });
 });
 

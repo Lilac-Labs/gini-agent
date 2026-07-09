@@ -50,17 +50,30 @@ describe("listJobTools", () => {
     expect(names).toContain("web_fetch");
   });
 
-  test("labels use the catalog displayLabel and output sorts by toolset then label", async () => {
+  test("labels use the catalog displayLabel and output follows the curated toolset order", async () => {
     const config = testConfig("job-tools-labels");
     const job = await createScheduledJob(config, { name: "digest", prompt: "p", intervalSeconds: 60 });
     const { tools } = listJobTools(config, job.id);
     expect(tools.find((tool) => tool.name === "file_read")?.label).toBe("Read file");
-    // Each adjacent pair honors the (toolset, label) ordering the endpoint
-    // promises — same comparator as the implementation.
-    for (let i = 1; i < tools.length; i++) {
-      const prev = tools[i - 1]!;
-      const curr = tools[i]!;
-      expect(prev.toolset.localeCompare(curr.toolset) || prev.label.localeCompare(curr.label)).toBeLessThanOrEqual(0);
+    // Curated display order: high-signal clusters (email, file) lead so the
+    // collapsed first slice isn't a wall of the large browser cluster.
+    const firstOf = (toolset: string) => tools.findIndex((tool) => tool.toolset === toolset);
+    expect(firstOf("email")).toBeGreaterThanOrEqual(0);
+    expect(firstOf("browser")).toBeGreaterThanOrEqual(0);
+    expect(firstOf("email")).toBeLessThan(firstOf("browser"));
+    expect(firstOf("file")).toBeLessThan(firstOf("browser"));
+    // Rows stay clustered by toolset (no toolset appears in two runs), and
+    // labels sort within each cluster.
+    const seen = new Set<string>();
+    for (let i = 0; i < tools.length; i++) {
+      const tool = tools[i]!;
+      const prev = i > 0 ? tools[i - 1] : undefined;
+      if (!prev || prev.toolset !== tool.toolset) {
+        expect(seen.has(tool.toolset)).toBe(false);
+        seen.add(tool.toolset);
+      } else {
+        expect(prev.label.localeCompare(tool.label)).toBeLessThanOrEqual(0);
+      }
     }
   });
 });

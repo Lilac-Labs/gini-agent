@@ -7,6 +7,32 @@ export function listToolsets(config: RuntimeConfig) {
   return { toolsets: state.toolsets, tools: state.tools };
 }
 
+// Display order for the toolset clusters on the routine detail pages. Leads
+// with the high-signal capabilities a routine is usually about (email, files,
+// memory, scheduling) and pushes the large browser cluster toward the end, so
+// a collapsed first slice isn't a monotonous wall of one toolset's rows.
+// Toolsets missing from this list (including future additions) sort
+// alphabetically after the listed ones.
+const JOB_TOOLS_TOOLSET_ORDER = [
+  "email",
+  "file",
+  "memory",
+  "jobs",
+  "messaging",
+  "session_search",
+  "skills",
+  "web_search",
+  "database",
+  "terminal",
+  "mcp",
+  "connectors",
+  "subagents",
+  "browser",
+  "self",
+  "identity"
+];
+const JOB_TOOLS_TOOLSET_RANK = new Map(JOB_TOOLS_TOOLSET_ORDER.map((name, index) => [name, index] as const));
+
 // The effective tool catalog a job's runs dispatch with, for display on the
 // routine detail pages. Resolves the job's owning agent and applies the same
 // enabled-toolset ∩ agent-whitelist gate the dispatch path uses
@@ -28,8 +54,13 @@ export function listJobTools(config: RuntimeConfig, jobId: string) {
     summary: tool.indexSummary ?? firstSentence(tool.function.description)
   }));
   // Toolset-first ordering clusters related tools (all file tools together,
-  // all browser tools together) the way the routine mockup groups them.
-  tools.sort((a, b) => a.toolset.localeCompare(b.toolset) || a.label.localeCompare(b.label));
+  // all browser tools together) the way the routine mockup groups them, with
+  // clusters in the curated display order above and labels sorted within.
+  const rank = (toolset: string) => JOB_TOOLS_TOOLSET_RANK.get(toolset) ?? JOB_TOOLS_TOOLSET_ORDER.length;
+  tools.sort(
+    (a, b) =>
+      rank(a.toolset) - rank(b.toolset) || a.toolset.localeCompare(b.toolset) || a.label.localeCompare(b.label)
+  );
   return { tools };
 }
 

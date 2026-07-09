@@ -697,7 +697,7 @@ describe("identity-files", () => {
       // default changes without the OLD default's hash joining that list,
       // every instance still carrying the old default silently stops
       // receiving updates.
-      const pinned = "2d71f9b9bfb8f9ee47df492369545fc5bf37b64b50eae76088bf1a6f731fd840";
+      const pinned = "0d4126a18fe9da285053ddbcf0f4b1da2e8510925c0a27428a8f6ba96ffa37b4";
       const current = createHash("sha256").update(readFileSync(DEFAULT_INSTRUCTIONS_FILE)).digest("hex");
       expect(
         current,

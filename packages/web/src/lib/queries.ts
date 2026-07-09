@@ -240,6 +240,26 @@ export function useJobRuns(jobId?: string) {
   });
 }
 
+// One row of GET /api/jobs/<id>/tools — the effective tool catalog the job's
+// runs dispatch with (listJobTools in packages/runtime/src/capabilities/
+// toolsets.ts). Labels and toolset-then-label ordering are server-owned; the
+// browser renders rows verbatim.
+export interface JobToolView {
+  name: string;
+  label: string;
+  toolset: string;
+  summary: string;
+}
+
+export function useJobTools(jobId?: string) {
+  return useQuery<{ tools: JobToolView[] }>({
+    queryKey: ["jobTools", jobId ?? null],
+    queryFn: () => api<{ tools: JobToolView[] }>(`/jobs/${jobId}/tools`),
+    refetchInterval: 60_000,
+    enabled: Boolean(jobId)
+  });
+}
+
 // Email watchers backing the fan-out concern UI. The list is read-only here;
 // edits go through the mutations below, never job.routes (the routes are
 // recomputed server-side from the watchers, so jobs is invalidated too).

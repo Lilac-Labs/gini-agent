@@ -14,6 +14,7 @@ import { useInvalidate, useJobRuns, useJobs } from "@/lib/queries";
 import type { JobRecord } from "@runtime/types";
 import { scheduleLabel } from "@/components/jobs/schedule-label";
 import { EditJobDialog } from "@/components/jobs/EditJobDialog";
+import { RoutineTools } from "@/components/jobs/RoutineTools";
 import { CUSTOM_JOB_CHIP } from "../../chips";
 import { jobDescription, jobDisplayName } from "../../custom-jobs";
 
@@ -307,6 +308,7 @@ function InfoTab({
       {job.lastError ? (
         <p className="mt-3 text-[13px] leading-normal text-destructive">{job.lastError}</p>
       ) : null}
+      <RoutineTools jobId={job.id} />
       <button
         type="button"
         disabled={deletePending}

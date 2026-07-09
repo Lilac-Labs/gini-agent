@@ -21,6 +21,7 @@ import {
   type RoutineTemplateView
 } from "@/lib/queries";
 import type { JobRecord } from "@runtime/types";
+import { RoutineTools } from "@/components/jobs/RoutineTools";
 import { chipFor } from "../chips";
 
 // Routine detail page (GiniRoutineDetail design handoff): breadcrumb, a
@@ -436,6 +437,7 @@ function InfoTab({
           </div>
         ))}
       </div>
+      <RoutineTools jobId={job?.id} />
       <button
         type="button"
         disabled={deletePending}

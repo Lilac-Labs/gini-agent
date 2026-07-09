@@ -23,7 +23,7 @@
 // audit write is inlined below against ../state so the registry pulls in no
 // helper that transitively re-enters agent.ts and forms a cycle.
 
-import type { ApprovalMode, RuntimeConfig, RuntimeState } from "../types";
+import type { ApprovalMode, GoogleAccountStatus, RuntimeConfig, RuntimeState } from "../types";
 import { addAudit, appendTrace, mutateState, now, readState } from "../state";
 import { status as runtimeStatus, updateAutoApproveSettings } from "../runtime";
 import { providerCatalogWithStatus, withProviderAuthStatus } from "../provider";
@@ -35,6 +35,7 @@ import { listToolsets, setToolsetStatus } from "../capabilities/toolsets";
 import { addMcpServer, removeMcpServer } from "../integrations/mcp";
 import { deleteConnector, updateConnector } from "../integrations/connectors";
 import { gwsSessionStatus } from "../integrations/connectors/gws-session";
+import { listAccountsWithStatus } from "../integrations/connectors/google-accounts";
 import { assertCurrentRuntimeUpdateSupported, scheduleRuntimeRestart, updateRuntime } from "../runtime/update";
 import { projectRoot } from "../paths";
 
@@ -251,6 +252,23 @@ async function listMcpServers(config: RuntimeConfig, taskId: string): Promise<st
   return JSON.stringify({ ok: true, servers });
 }
 
+// Live per-account Google sign-in provider for list_connectors. Defaults to
+// the status-augmented machine-global registry (one `gws auth status` spawn
+// per account config dir, in parallel, ~15s cached); a test swaps it via
+// setGoogleAccountsStatusProvider so the op never spawns `gws`.
+type GoogleAccountsStatusProvider = () => Promise<GoogleAccountStatus[]>;
+
+let activeGoogleAccountsProvider: GoogleAccountsStatusProvider = listAccountsWithStatus;
+
+// Test seam for the Google accounts status provider. Production never calls this.
+export function setGoogleAccountsStatusProvider(provider: GoogleAccountsStatusProvider): () => void {
+  const previous = activeGoogleAccountsProvider;
+  activeGoogleAccountsProvider = provider;
+  return () => {
+    activeGoogleAccountsProvider = previous;
+  };
+}
+
 async function listConnectors(config: RuntimeConfig, taskId: string): Promise<string> {
   const state = readState(config.instance);
   // Google Workspace sign-in liveness is SEPARATE from connector health:
@@ -262,6 +280,24 @@ async function listConnectors(config: RuntimeConfig, taskId: string): Promise<st
   const session = state.connectors.some((c) => c.provider === "google-oauth-desktop")
     ? await gwsSessionStatus()
     : undefined;
+  // Per-account sign-in for the machine-global Google account registry.
+  // Google can be live on an instance with NO google-oauth-desktop connector
+  // record (the registry / credentialExternallySatisfied path), so this is
+  // surfaced TOP-LEVEL whenever the registry is non-empty — record or no
+  // record. It makes this tool the model's on-demand truth source for
+  // per-account sign-in: the system-prompt accounts block is registration-only
+  // and directs the model here before asserting any account's status.
+  const accountStatuses = await activeGoogleAccountsProvider();
+  const googleAccounts = accountStatuses.map((account) => ({
+    tag: account.tag,
+    email: account.email || null,
+    signedIn: account.signedIn,
+    // Distinguishes an expired/revoked grant (the user must reconnect on the
+    // Integrations page) from an account that never finished sign-in.
+    tokenRevoked: account.tokenRevoked === true,
+    primary: account.primary === true,
+    message: account.message
+  }));
   const connectors = state.connectors.map((connector) => ({
     id: connector.id,
     name: connector.name,
@@ -282,7 +318,11 @@ async function listConnectors(config: RuntimeConfig, taskId: string): Promise<st
     data: { count: connectors.length }
   });
   await recordLowRiskAudit(config, taskId, "connector.listed", "connectors", { count: connectors.length });
-  return JSON.stringify({ ok: true, connectors });
+  return JSON.stringify({
+    ok: true,
+    connectors,
+    ...(googleAccounts.length > 0 ? { googleAccounts } : {})
+  });
 }
 
 async function setProvider(
@@ -924,7 +964,7 @@ export const SELF_OPERATIONS: SelfOperation[] = [
   },
   {
     name: "list_connectors",
-    summary: "Registered connectors (claude-code, codex, linear, …) with provider, status, and health.",
+    summary: "Registered connectors with provider, status, and health, plus live per-account Google sign-in (googleAccounts).",
     tag: "query",
     schema: { type: "object", properties: {} },
     handler: (config, taskId) => listConnectors(config, taskId)

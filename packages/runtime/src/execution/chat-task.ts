@@ -905,7 +905,7 @@ export async function runChatTask(config: RuntimeConfig, taskId: string): Promis
     (skill) => skill.status === "enabled" && !isSkillActive(state, skill)
   );
   const inactiveSkillsBlock = buildInactiveSkillsBlock(inactiveSkills, state);
-  // Connected Google accounts (multi-account): surface tag/email/config-dir so
+  // Registered Google accounts (multi-account): surface tag/email/config-dir so
   // the model can target the right account per `gws` command and ask when the
   // request is ambiguous. Registry is machine-global; read it directly.
   const connectedAccountsBlock = buildConnectedAccountsBlock(readGoogleAccounts());
@@ -1829,7 +1829,7 @@ export function buildInactiveSkillsBlock(skills: SkillRecord[], state?: RuntimeS
   return sections.join("\n");
 }
 
-// Connected Google accounts block. Multiple Google accounts can be tagged and
+// Registered Google accounts block. Multiple Google accounts can be tagged and
 // authorized against the single google-workspace-oauth client; each one is a
 // `gws` config dir. We surface every account's tag, email, and config dir so
 // the model can target the right one per `gws` command (by inline-prefixing
@@ -1837,6 +1837,14 @@ export function buildInactiveSkillsBlock(skills: SkillRecord[], state?: RuntimeS
 // every account and aggregates; for a write with no account named it asks.
 // Byte-stable for a given registry: preserves registry order and carries no
 // timestamps, so it doesn't churn the prefix cache.
+//
+// Registration is presence-only: the registry says nothing about whether an
+// account's sign-in is currently live, and probing that live (`gws auth
+// status` is a subprocess per config dir) is too costly for per-turn prompt
+// assembly. So the block says "registered" — never "connected"/"signed in" —
+// and instructs the model to verify via `list_connectors` (which carries live
+// per-account signedIn) before asserting any account's status, instead of
+// fabricating one from this list.
 //
 // Exported for unit testing; production callers use it via runChatTask.
 export function buildConnectedAccountsBlock(accounts: GoogleAccount[]): string {
@@ -1847,18 +1855,19 @@ export function buildConnectedAccountsBlock(accounts: GoogleAccount[]): string {
   });
   const selectionRule =
     accounts.length === 1
-      ? "Only one account is connected — use it (still pass its config dir)."
+      ? "Only one account is registered — use it (still pass its config dir)."
       : [
-          "Two or more accounts are connected. Choose the target account by the operation:",
+          "Two or more accounts are registered. Choose the target account by the operation:",
           "- The user named or clearly implied one account (an explicit tag, an email address, or unambiguous context) → use only that account.",
-          "- A read / lookup / search the user did NOT tie to a specific account (e.g. \"what's on my calendar\", \"find the budget doc\", \"search my email\") → run it against EVERY connected account (one `gws` call per config dir) and aggregate the results, labeling each by the account's tag and email. Don't pick just one, and don't ask — the user wants the whole picture across accounts.",
+          "- A read / lookup / search the user did NOT tie to a specific account (e.g. \"what's on my calendar\", \"find the budget doc\", \"search my email\") → run it against EVERY registered account (one `gws` call per config dir) and aggregate the results, labeling each by the account's tag and email. Don't pick just one, and don't ask — the user wants the whole picture across accounts.",
           "- A write (send, create, edit, delete) with no account named → ASK which account first; never guess."
         ].join("\n");
   return [
-    "Connected Google accounts:",
-    "These Google accounts are connected. Any `gws` command can target a specific one by prefixing it with `GOOGLE_WORKSPACE_CLI_CONFIG_DIR=\"<configDir>\" gws ...`.",
+    "Registered Google accounts:",
+    "These Google accounts are registered on this machine. Any `gws` command can target a specific one by prefixing it with `GOOGLE_WORKSPACE_CLI_CONFIG_DIR=\"<configDir>\" gws ...`.",
     ...rows,
-    selectionRule
+    selectionRule,
+    "This list is registration only — it does NOT include sign-in status, and any account's sign-in may be expired or revoked. Never assert an account's sign-in status from this list: before telling the user whether an account is signed in or working, check `list_connectors` (its `googleAccounts` field carries each account's live signedIn status). If a `gws` call fails with an auth error, treat that account's sign-in as expired and direct the user to reconnect it on the Integrations page."
   ].join("\n");
 }
 

@@ -1969,7 +1969,7 @@ describe("buildConnectedAccountsBlock", () => {
     };
   }
 
-  test("returns empty string when no accounts are connected", () => {
+  test("returns empty string when no accounts are registered", () => {
     expect(buildConnectedAccountsBlock([])).toBe("");
   });
 
@@ -1977,7 +1977,7 @@ describe("buildConnectedAccountsBlock", () => {
     const block = buildConnectedAccountsBlock([
       account({ tag: "personal", email: "me@gmail.com", configDir: "/home/u/.config/gws" })
     ]);
-    expect(block).toContain("Connected Google accounts");
+    expect(block).toContain("Registered Google accounts");
     expect(block).toContain("personal");
     expect(block).toContain("me@gmail.com");
     expect(block).toContain("/home/u/.config/gws");
@@ -1985,7 +1985,7 @@ describe("buildConnectedAccountsBlock", () => {
     expect(block).toContain("use it");
   });
 
-  test("surfaces both accounts, aggregate-on-read, and ask-on-write guidance when 2+ are connected", () => {
+  test("surfaces both accounts, aggregate-on-read, and ask-on-write guidance when 2+ are registered", () => {
     const block = buildConnectedAccountsBlock([
       account({ tag: "personal" }),
       account({ tag: "work" })
@@ -1993,7 +1993,7 @@ describe("buildConnectedAccountsBlock", () => {
     expect(block).toContain("personal");
     expect(block).toContain("work");
     // Unscoped reads fan out across every account instead of picking one.
-    expect(block).toContain("EVERY connected account");
+    expect(block).toContain("EVERY registered account");
     // Writes still ask when no account is named.
     expect(block).toContain("ASK which account first");
   });
@@ -2002,6 +2002,27 @@ describe("buildConnectedAccountsBlock", () => {
     const block = buildConnectedAccountsBlock([account({ tag: "school", email: "" })]);
     expect(block).toContain("school");
     expect(block).toContain("(sign-in pending)");
+  });
+
+  test("never asserts sign-in state and directs the model to verify before claiming it", () => {
+    // The registry is presence-only — the block must not frame registration as
+    // "connected" (the model would repeat that framing as per-account status
+    // it never checked).
+    for (const block of [
+      buildConnectedAccountsBlock([account({ tag: "personal" })]),
+      buildConnectedAccountsBlock([account({ tag: "personal" }), account({ tag: "work" })])
+    ]) {
+      expect(block).not.toContain("Connected Google accounts");
+      expect(block).not.toContain("are connected");
+      expect(block).not.toContain("is connected");
+      // The verify-before-asserting instruction: sign-in status is NOT in this
+      // list, check list_connectors, and route auth failures to reconnect.
+      expect(block).toContain("does NOT include sign-in status");
+      expect(block).toContain("list_connectors");
+      expect(block).toContain("googleAccounts");
+      expect(block).toContain("auth error");
+      expect(block).toContain("Integrations page");
+    }
   });
 });
 

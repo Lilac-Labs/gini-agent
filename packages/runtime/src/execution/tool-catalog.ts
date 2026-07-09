@@ -1800,11 +1800,11 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
     toolset: "self",
     displayLabel: "List connectors",
     deferred: true,
-    indexSummary: "Registered connectors (claude-code, codex, linear, …) with provider, status, and health.",
+    indexSummary: "Registered connectors with provider, status, and health, plus live per-account Google sign-in (googleAccounts).",
     type: "function",
     function: {
       name: "list_connectors",
-      description: "List the registered connectors (claude-code, codex, linear, …) with provider, status, and health. Read-only.",
+      description: "List the registered connectors (claude-code, codex, linear, …) with provider, status, and health, plus `googleAccounts`: live per-account Google sign-in status. Read-only.",
       parameters: { type: "object", properties: {} }
     }
   },

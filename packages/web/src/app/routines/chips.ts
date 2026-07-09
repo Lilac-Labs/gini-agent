@@ -1,4 +1,11 @@
-import { CalendarCheckIcon, InboxIcon, MailSearchIcon, SunriseIcon, type LucideIcon } from "lucide-react";
+import {
+  CalendarCheckIcon,
+  CalendarClockIcon,
+  InboxIcon,
+  MailSearchIcon,
+  SunriseIcon,
+  type LucideIcon
+} from "lucide-react";
 
 // Icon-key → presentation mapping for the catalog's `icon` hints, shared by
 // the gallery and the routine detail page. Chip colors come from the
@@ -22,3 +29,8 @@ export function chipFor(icon: string): RoutineChip {
 // Chip for email-watcher routines (created conversationally, not from the
 // catalog) — the design handoff's chip-cyan.
 export const WATCHER_CHIP: RoutineChip = { icon: MailSearchIcon, color: "#12B5C4" };
+
+// Chip for custom scheduled-job routines (created conversationally via
+// create_job, no catalog template) — violet, distinct from the template
+// colors above and the watcher cyan.
+export const CUSTOM_JOB_CHIP: RoutineChip = { icon: CalendarClockIcon, color: "#8B5CF6" };

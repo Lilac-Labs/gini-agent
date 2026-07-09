@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { CheckIcon, MoreHorizontalIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -14,16 +15,20 @@ import {
   DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu";
 import { PageHeader } from "@/components/PageHeader";
+import { api } from "@/lib/api";
 import {
   useEmailWatchers,
   useInstallRoutineTemplate,
+  useInvalidate,
+  useJobs,
   useRemoveEmailWatcher,
   useRoutineTemplates,
   useUninstallRoutineTemplate,
   type RoutineTemplateView
 } from "@/lib/queries";
-import type { EmailWatcherRecord } from "@runtime/types";
-import { chipFor, WATCHER_CHIP } from "./chips";
+import type { EmailWatcherRecord, JobRecord } from "@runtime/types";
+import { chipFor, CUSTOM_JOB_CHIP, WATCHER_CHIP } from "./chips";
+import { customRoutineJobs, jobDescription, jobDisplayName } from "./custom-jobs";
 import { watcherChannelId, watcherDescription, watcherTitle } from "./watchers";
 
 export default function RoutinesPage() {
@@ -37,6 +42,13 @@ export default function RoutinesPage() {
   // are first-class routines in "My routines", alongside installed templates.
   const watchers = useEmailWatchers();
   const watcherList = watchers.data ?? [];
+
+  // So are the agent's other scheduled jobs (created conversationally via
+  // create_job): everything the agent-scoped jobs list holds minus catalog
+  // installs (template cards) and the shared email-watch detector (watcher
+  // cards / infrastructure).
+  const jobs = useJobs();
+  const customJobs = customRoutineJobs(jobs.data ?? []);
 
   const all = templates.data?.templates ?? [];
   const mine = all.filter((template) => template.installed);
@@ -82,7 +94,7 @@ export default function RoutinesPage() {
         ) : view === "mine" ? (
           <>
             <h2 className="mt-8 text-[17px] font-semibold">My routines</h2>
-            {mine.length === 0 && watcherList.length === 0 ? (
+            {mine.length === 0 && watcherList.length === 0 && customJobs.length === 0 ? (
               <div className="mt-[18px] flex flex-col items-center justify-center rounded-xl border border-dashed border-border bg-card/50 px-6 py-16 text-center">
                 <p className="text-sm font-medium">No routines yet</p>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -152,6 +164,9 @@ export default function RoutinesPage() {
                 })}
                 {watcherList.map((watcher) => (
                   <WatcherCard key={watcher.id} watcher={watcher} />
+                ))}
+                {customJobs.map((job) => (
+                  <CustomJobCard key={job.id} job={job} />
                 ))}
               </div>
             )}
@@ -290,6 +305,95 @@ function WatcherCard({ watcher }: { watcher: EmailWatcherRecord }) {
         <div className="line-clamp-2 text-[14px] leading-normal text-muted-foreground">
           {watcherDescription(watcher)}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// A custom scheduled-job routine card (chat-created via create_job, no
+// catalog template). Same shape as the watcher card: violet chip, humanized
+// job name, first prompt line as description, a paused job renders dimmed
+// with a Paused pill, and the ⋯ menu deep-links the job's conversation and
+// /jobs entry.
+function CustomJobCard({ job }: { job: JobRecord }) {
+  const router = useRouter();
+  const invalidate = useInvalidate();
+  const { icon: Icon, color } = CUSTOM_JOB_CHIP;
+  const title = jobDisplayName(job);
+  const paused = job.status === "paused";
+
+  // Same DELETE the jobs page uses; removing the job also drops its run
+  // history (its conversation is archived, not deleted).
+  const remove = useMutation({
+    mutationFn: () => api<JobRecord>(`/jobs/${job.id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      toast.success(`Removed ${title}`);
+      invalidate(["jobs", "jobRuns", "events"]);
+    },
+    onError: (error: Error) => toast.error(error.message)
+  });
+
+  return (
+    <div
+      onClick={() => router.push(`/routines/job/${encodeURIComponent(job.id)}`)}
+      className={cn(
+        "flex min-h-[150px] cursor-pointer flex-col gap-3.5 rounded-xl border border-border bg-card p-5 transition-colors hover:border-foreground/20",
+        paused && "opacity-60"
+      )}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <span
+          className="flex size-10 shrink-0 items-center justify-center rounded-[11px]"
+          style={{ backgroundColor: color }}
+        >
+          <Icon className="size-5 text-white" aria-hidden />
+        </span>
+        <div className="flex items-center gap-2">
+          {paused ? (
+            <span className="rounded-full bg-muted px-2.5 py-1 text-[11px] font-semibold text-muted-foreground">
+              Paused
+            </span>
+          ) : null}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                aria-label={`${title} options`}
+                // Keep the menu from also triggering the card's
+                // navigate-to-detail click.
+                onClick={(event) => event.stopPropagation()}
+                className="flex size-[26px] shrink-0 items-center justify-center rounded-[7px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <MoreHorizontalIcon className="size-[18px]" aria-hidden />
+              </button>
+            </DropdownMenuTrigger>
+            {/* The menu renders in a portal, but React portals bubble events
+                through the REACT tree — a click on a menu item would reach the
+                card's navigate-to-detail onClick and clobber the item's own
+                navigation. Stop it at the content boundary. */}
+            <DropdownMenuContent
+              align="end"
+              className="w-40"
+              onClick={(event) => event.stopPropagation()}
+            >
+              {job.chatSessionId ? (
+                <DropdownMenuItem asChild>
+                  <Link href={`/chat?session=${encodeURIComponent(job.chatSessionId)}`}>Open channel</Link>
+                </DropdownMenuItem>
+              ) : null}
+              <DropdownMenuItem asChild>
+                <Link href={`/jobs?job=${encodeURIComponent(job.id)}`}>View in Jobs</Link>
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={remove.isPending} onSelect={() => remove.mutate()}>
+                Remove
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+      <div className="flex flex-col gap-[7px]">
+        <div className="line-clamp-2 text-sm font-semibold">{title}</div>
+        <div className="line-clamp-2 text-[14px] leading-normal text-muted-foreground">{jobDescription(job)}</div>
       </div>
     </div>
   );

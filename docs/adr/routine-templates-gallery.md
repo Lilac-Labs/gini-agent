@@ -86,6 +86,29 @@ the jobId changes), and Delete routine uninstalls. Errors surface as toasts;
 the install endpoint's skill-resolve 400 is the connector-readiness signal
 (no pre-flight on the card).
 
+### My routines is the agent's full routine surface
+
+My routines lists every routine the effective agent owns, partitioned into
+three card kinds:
+
+- **catalog installs** — template cards keyed on `templateId` (above);
+- **email watchers** — cards over `GET /api/email/watchers`, with a detail
+  page at `/routines/watch/[watcherId]` (see ADR email-watch.md);
+- **custom scheduled jobs** — every other job from the agent-scoped
+  `GET /api/jobs?agentId=` (chat-created via `create_job`): a generic card
+  (humanized job name, first prompt line, Paused state, Open channel / View
+  in Jobs / Remove) with a detail page at `/routines/job/[jobId]` — Recent
+  sessions and Info tabs, pause/resume, Run Now, Delete; no Settings tab
+  (prompt/cron editing stays in chat and /jobs).
+
+The one exclusion from the custom partition besides `templateId` is the
+shared email-watch detection job, identified **structurally** — a
+`skill-script` pre-run hook routed at the `gmail-watch` skill, the same
+marker the runtime provisions and finds it by (`findSharedJobId` in
+`src/state/email-watchers.ts`) — never by name. That job is infrastructure;
+its watchers are the routines. Partition helpers live in
+`packages/web/src/app/routines/custom-jobs.ts`.
+
 ## Consequences
 
 - Installed routines are ordinary `active` jobs: the user can pause, edit,

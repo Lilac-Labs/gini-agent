@@ -11,21 +11,17 @@ export type Activation = {
 };
 
 // Compute the effective activation status for the Skills page. The runtime
-// is the source of truth for "is this skill in the agent's set"; we replay
-// the same dependency check here so users see the badge that matches what
-// the agent loop sees. Mirrors src/integrations/connectors/index.ts
-// isSkillActive: a skill is active when every required credential NAME maps to
-// a connector that is healthy OR (when its provider has no probe) configured
-// with unknown health. Without the provider info we'd diverge from the runtime
-// gate for demo / generic providers, which sit at health: "unknown" at rest.
-// Also mirrored: the absent-record fallthrough — when NO connector record
-// with the required name exists at all, the owning provider's live
-// `externallySatisfied` bit (its credentialExternallySatisfied hook, e.g.
-// the boot-registered hosted Google account) satisfies the credential. This
-// is the path that keeps the Google Workspace API skills ACTIVE in hosted,
-// where the guest ships with its Google credential already in place and no
-// connector record is ever created. An existing record of any status
-// (including disabled — explicit operator off) keeps the record-based gate.
+// is the source of truth for "is this skill in the agent's set"; we read the
+// server-computed `usable` bit on each connector record so the client never
+// reimplements the usability predicate (it lives in connectorIsUsable on the
+// runtime). Mirrors src/integrations/connectors/index.ts isSkillActive: a
+// skill is active when every required credential NAME maps to a connector
+// whose `usable` bit is true. The absent-record fallthrough still applies:
+// when NO connector record with the required name exists at all, the owning
+// provider's `externallySatisfied` bit (its credentialExternallySatisfied
+// hook, e.g. the boot-registered hosted Google account) satisfies the
+// credential. An existing record of any status (including disabled — explicit
+// operator off) keeps the record-based gate.
 export function deriveActivation(
   skill: SkillRecord,
   byName: Map<string, ConnectorRecord[]>,
@@ -39,12 +35,12 @@ export function deriveActivation(
   if (required.length === 0) return { label: "active", tone: "ok" };
   for (const credentialName of required) {
     const matches = byName.get(credentialName) ?? [];
+    // Use the server-computed `usable` bit. Falls back to the previous
+    // client-side predicate when `usable` is absent (e.g. stale API
+    // response during a rolling deploy).
     const satisfied = matches.some((c) => {
-      // Mirror the runtime gate exactly: only configured records ever
-      // satisfy. Disabled (tombstoned) and error-status records are
-      // excluded even if they carry a stale `health: "healthy"` from
-      // a prior probe. A typed credential whose provider has no probe is
-      // presence-healthy at unknown (no remote signal to refute it).
+      if (c.usable !== undefined) return c.usable;
+      // Fallback: mirror the runtime gate for backward compat.
       if (c.status !== "configured") return false;
       if (c.health === "healthy") return true;
       const hasProbe = Boolean(providersById.get(c.provider)?.hasProbe);

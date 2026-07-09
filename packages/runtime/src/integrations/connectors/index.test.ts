@@ -6,7 +6,7 @@ import { createEmptyState, mutateState, readState } from "../../state";
 import { writeGoogleAccounts } from "../../state/google-accounts";
 import { writeSecret } from "../../state/secrets";
 import type { ConnectorRecord, RuntimeConfig, SkillRecord } from "../../types";
-import { bindingsForCredentials, checkConnector, createConnector, isSkillActive, resolveSkillEnv } from "./index";
+import { bindingsForCredentials, checkConnector, connectorIsUsable, createConnector, isSkillActive, markConnectorUnhealthyForProvider, resolveSkillEnv, updateConnector } from "./index";
 
 const ROOT = "/tmp/gini-connectors-unit";
 
@@ -1233,5 +1233,203 @@ describe("checkConnector presence-health for typed credentials", () => {
     });
     const probed = await checkConnector(config, "id_untyped_unknown");
     expect(probed.health).toBe("unhealthy");
+  });
+});
+
+// Section A: connectorIsUsable export tests
+describe("connectorIsUsable", () => {
+  test("configured + healthy → usable", () => {
+    expect(connectorIsUsable(newConnector({ status: "configured", health: "healthy", provider: "linear" }))).toBe(true);
+  });
+
+  test("configured + unhealthy → not usable", () => {
+    expect(connectorIsUsable(newConnector({ status: "configured", health: "unhealthy", provider: "linear" }))).toBe(false);
+  });
+
+  test("configured + unknown with probe → not usable", () => {
+    // Linear has a probe.
+    expect(connectorIsUsable(newConnector({ status: "configured", health: "unknown", provider: "linear" }))).toBe(false);
+  });
+
+  test("configured + unknown without probe → usable", () => {
+    // Demo has no probe.
+    expect(connectorIsUsable(newConnector({ status: "configured", health: "unknown", provider: "demo" }))).toBe(true);
+  });
+
+  test("disabled + healthy → not usable", () => {
+    expect(connectorIsUsable(newConnector({ status: "disabled", health: "healthy", provider: "linear" }))).toBe(false);
+  });
+});
+
+// Section C: probe on create/update
+describe("createConnector probes for probe-having providers", () => {
+  function configFor(instance: string): RuntimeConfig {
+    return {
+      instance,
+      port: 0,
+      token: "t",
+      provider: { name: "echo" as const, model: "echo" },
+      workspaceRoot: `${ROOT}/${instance}/workspace`,
+      stateRoot: `${ROOT}/${instance}`,
+      logRoot: `${ROOT}/${instance}/logs`
+    };
+  }
+
+  test("probe-having provider (linear) returns settled health on create", async () => {
+    const config = configFor("create-probe-linear");
+    const connector = await createConnector(config, {
+      name: "Linear",
+      provider: "linear",
+      secrets: { token: "fake_token" }
+    });
+    // Probe ran against a fake token, so health is settled (unhealthy).
+    expect(connector.health).not.toBe("unknown");
+    expect(connector.lastHealthAt).toBeDefined();
+  });
+
+  test("probe-less provider (demo) keeps presence-only health on create", async () => {
+    const config = configFor("create-noprobe-demo");
+    const connector = await createConnector(config, {
+      name: "demo-test",
+      provider: "demo"
+    });
+    // Demo has no probe; createConnector seeds health via updateConnectorHealth.
+    expect(connector.health).toBe("healthy");
+  });
+
+  test("updateConnector probes after secret rotation for probe-having providers", async () => {
+    const config = configFor("update-probe-rotate");
+    // First create with demo (no probe) so we have a known connector id.
+    await mutateState(config.instance, (state) => {
+      state.connectors.push(newConnector({
+        id: "id_update_probe",
+        instance: config.instance,
+        provider: "linear",
+        type: "api-key",
+        name: "LINEAR_API_KEY",
+        status: "configured",
+        health: "healthy",
+        secretRefs: [{ purpose: "token", path: "secrets/id_update_probe.token.json" }]
+      }));
+    });
+    writeSecret(config.instance, "id_update_probe", "token", "new_secret_value");
+    const updated = await updateConnector(config, "id_update_probe", {
+      secrets: { token: "rotated_token" }
+    });
+    // Probe ran (and failed with the test token); health is settled.
+    expect(updated.health).not.toBe("unknown");
+    expect(updated.lastHealthAt).toBeDefined();
+  });
+});
+
+// Section D: markConnectorUnhealthyForProvider
+describe("markConnectorUnhealthyForProvider", () => {
+  test("marks the configured connector unhealthy and emits transition audit", async () => {
+    const instance = "auth-fail-bridge";
+    process.env.GINI_STATE_ROOT = ROOT;
+    await mutateState(instance, (state) => {
+      state.connectors.push(newConnector({
+        id: "id_codex_d",
+        instance,
+        name: "codex",
+        provider: "codex",
+        status: "configured",
+        health: "healthy"
+      }));
+    });
+    await markConnectorUnhealthyForProvider(instance, "codex", "Token expired");
+    const state = readState(instance);
+    const conn = state.connectors.find((c) => c.id === "id_codex_d");
+    expect(conn?.health).toBe("unhealthy");
+    expect(conn?.message).toBe("Token expired");
+    // Audit emits a connector.health.transition event.
+    expect(state.audit.some((e) => e.action === "connector.health.transition" && e.target === "id_codex_d")).toBe(true);
+  });
+
+  test("does not emit a duplicate transition when already unhealthy", async () => {
+    const instance = "auth-fail-bridge-dedup";
+    process.env.GINI_STATE_ROOT = ROOT;
+    await mutateState(instance, (state) => {
+      state.connectors.push(newConnector({
+        id: "id_codex_dup",
+        instance,
+        name: "codex",
+        provider: "codex",
+        status: "configured",
+        health: "unhealthy",
+        message: "already failed"
+      }));
+    });
+    await markConnectorUnhealthyForProvider(instance, "codex", "Still expired");
+    const state = readState(instance);
+    const conn = state.connectors.find((c) => c.id === "id_codex_dup");
+    expect(conn?.health).toBe("unhealthy");
+    expect(conn?.message).toBe("Still expired");
+    // No transition audit since health was already unhealthy.
+    expect(state.audit.filter((e) => e.action === "connector.health.transition" && e.target === "id_codex_dup")).toHaveLength(0);
+  });
+
+  test("skips connectors for other providers", async () => {
+    const instance = "auth-fail-bridge-other";
+    process.env.GINI_STATE_ROOT = ROOT;
+    await mutateState(instance, (state) => {
+      state.connectors.push(newConnector({
+        id: "id_linear_other",
+        instance,
+        name: "LINEAR_API_KEY",
+        provider: "linear",
+        status: "configured",
+        health: "healthy"
+      }));
+    });
+    await markConnectorUnhealthyForProvider(instance, "codex", "Token expired");
+    const state = readState(instance);
+    const conn = state.connectors.find((c) => c.id === "id_linear_other");
+    expect(conn?.health).toBe("healthy");
+  });
+});
+
+// Section F: claude-code/codex skill gating via credentialName
+describe("isSkillActive gates codex/claude-code skills on connector state", () => {
+  test("codex skill is active when a usable 'codex' connector exists", () => {
+    const state = createEmptyState("skill-gate-codex");
+    state.connectors = [newConnector({ name: "codex", provider: "codex", status: "configured", health: "healthy" })];
+    const skill = newSkill({ requiredCredentials: ["codex"] });
+    expect(isSkillActive(state, skill)).toBe(true);
+  });
+
+  test("codex skill is inactive when the codex connector is unhealthy", () => {
+    const state = createEmptyState("skill-gate-codex-unhealthy");
+    state.connectors = [newConnector({ name: "codex", provider: "codex", status: "configured", health: "unhealthy" })];
+    const skill = newSkill({ requiredCredentials: ["codex"] });
+    expect(isSkillActive(state, skill)).toBe(false);
+  });
+
+  test("codex skill is inactive when no connector exists", () => {
+    const state = createEmptyState("skill-gate-codex-missing");
+    state.connectors = [];
+    const skill = newSkill({ requiredCredentials: ["codex"] });
+    expect(isSkillActive(state, skill)).toBe(false);
+  });
+
+  test("claude-code skill is active when a usable 'claude-code' connector exists", () => {
+    const state = createEmptyState("skill-gate-cc");
+    state.connectors = [newConnector({ name: "claude-code", provider: "claude-code", status: "configured", health: "healthy" })];
+    const skill = newSkill({ requiredCredentials: ["claude-code"] });
+    expect(isSkillActive(state, skill)).toBe(true);
+  });
+
+  test("claude-code skill is inactive when connector is unhealthy", () => {
+    const state = createEmptyState("skill-gate-cc-unhealthy");
+    state.connectors = [newConnector({ name: "claude-code", provider: "claude-code", status: "configured", health: "unhealthy" })];
+    const skill = newSkill({ requiredCredentials: ["claude-code"] });
+    expect(isSkillActive(state, skill)).toBe(false);
+  });
+
+  test("bindingsForCredentials yields nothing for codex (presence-only, no type)", () => {
+    const state = createEmptyState("bindings-codex");
+    state.connectors = [newConnector({ name: "codex", provider: "codex", status: "configured", health: "healthy" })];
+    const bindings = bindingsForCredentials(state, ["codex"]);
+    expect(bindings).toEqual({});
   });
 });

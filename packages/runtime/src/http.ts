@@ -59,12 +59,12 @@ import { runMessagingPairingConnect } from "./execution/messaging-pairing-connec
 import { runMessagingRemoveConnect } from "./execution/messaging-remove-connect";
 import { buildNotificationPreview, type PreviewEvent } from "./integrations/apns/preview";
 import { dailyUsage, homeView, mobileBootstrap, publicState } from "./runtime/views";
-import { checkConnector, createConnector, credentialTemplateForProvider, deleteConnector, firstUngrantedCredential, isSkillActive, updateConnector } from "./integrations/connectors";
+import { checkConnector, connectorIsUsable, createConnector, credentialTemplateForProvider, deleteConnector, firstUngrantedCredential, isSkillActive, updateConnector } from "./integrations/connectors";
 import { gwsSessionStatus } from "./integrations/connectors/gws-session";
 import { detachInstanceGoogleAccount, googleAuthMode, listAccountsWithStatus, provisionAccount, registerAccount, removeAccount, retagAccount, signOutInstanceGoogleAccounts, useAccountForInstance } from "./integrations/connectors/google-accounts";
 import { handleGoogleLoginWebCallback, startGoogleLoginWeb } from "./integrations/connectors/google-login-web";
 import { getGoogleAccount, googleAccountsRoot } from "./state/google-accounts";
-import { listProviders } from "./integrations/connectors/registry";
+import { getProvider, listProviders } from "./integrations/connectors/registry";
 import { runConnectorDetection } from "./jobs/connector-detection";
 import { createScheduledJob, listJobRuns, removeJob, replayJobRun, runJobNow, updateJob, updateJobStatus } from "./jobs";
 import { addEmailWatcher, clearEmailWatcherObjective, getEmailWatcher, listEmailWatchers, removeEmailWatcher, setEmailTriageEnabled, setEmailWatcherEnabled, setEmailWatcherObjective } from "./state/email-watchers";
@@ -265,6 +265,10 @@ async function emitConnectorRequestAudit(
     );
   });
 }
+
+// In-flight guard for the on-view revalidation (Section E). Prevents
+// overlapping GETs from stacking background probes for the same connector.
+const connectorRevalidationInFlight = new Set<string>();
 
 export function createHandler(config: RuntimeConfig): (request: Request, peerAddress?: string | null) => Response | Promise<Response> {
   // Ensure a spawned Chrome is live for a browser.connect sign-in, relaunching
@@ -2044,13 +2048,38 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       // The tagged accounts registry is machine-global, so resolve it once and
       // attach to every google-oauth-desktop record alongside `session`.
       const accounts = hasGoogle ? await listAccountsWithStatus() : undefined;
-      return json(
-        connectors.map((c) =>
-          c.provider === "google-oauth-desktop" && session
-            ? { ...c, session, accounts }
-            : c
-        )
-      );
+      // On-view revalidation: trigger background re-probe for stale,
+      // probe-having connectors so the page picks up the flip on the next
+      // refetch. Never blocks the response.
+      const staleThreshold = Number(process.env.GINI_CONNECTOR_STALE_MS ?? 5 * 60_000);
+      const nowMs = Date.now();
+      for (const c of connectors) {
+        if (c.status === "disabled") continue;
+        const module = getProvider(c.provider);
+        if (!module?.probe) continue;
+        const lastMs = c.lastHealthAt ? Date.parse(c.lastHealthAt) : 0;
+        if (Number.isFinite(lastMs) && nowMs - lastMs < staleThreshold) continue;
+        if (connectorRevalidationInFlight.has(c.id)) continue;
+        connectorRevalidationInFlight.add(c.id);
+        void checkConnector(config, c.id)
+          .catch(() => {})
+          .finally(() => connectorRevalidationInFlight.delete(c.id));
+      }
+      // Compute `usable` per record. For google-oauth-desktop records,
+      // usable also requires at least one signed-in account.
+      const enriched = connectors.map((c) => {
+        const base = c.provider === "google-oauth-desktop" && session
+          ? { ...c, session, accounts }
+          : c;
+        let usable: boolean;
+        if (c.provider === "google-oauth-desktop") {
+          usable = connectorIsUsable(c) && Boolean(accounts?.some((a) => a.signedIn));
+        } else {
+          usable = connectorIsUsable(c);
+        }
+        return { ...base, usable };
+      });
+      return json(enriched);
     }],
     ["GET", /^\/api\/connectors\/providers$/, () => json(listProviders().map((p) => ({
       id: p.id,

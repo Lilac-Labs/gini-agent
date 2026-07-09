@@ -1,7 +1,8 @@
 // Pure-JS tests (no React/DOM) for the Integrations directory logic: which
 // providers become tiles, when a tile counts as connected (configured record
 // vs the hosted externallySatisfied path), the Google account-count status
-// line, and chip/search filtering.
+// line, and chip/search filtering. After the usability fix: tiles reflect
+// the three states (connected / needs-attention / available).
 
 import { describe, expect, test } from "bun:test";
 import type { ConnectorRecord } from "@runtime/types";
@@ -32,6 +33,7 @@ function connector(overrides: Partial<ConnectorRecord>): ConnectorRecord {
     createdAt: "",
     updatedAt: "",
     health: "healthy",
+    usable: true,
     ...overrides
   };
 }
@@ -42,27 +44,80 @@ describe("buildTiles", () => {
     expect(tiles.map((t) => t.provider.id)).toEqual(["linear"]);
   });
 
-  test("configured record → connected with 'Connected' status", () => {
-    const [tile] = buildTiles([provider({})], [connector({})], 0);
+  test("configured + usable record -> connected with 'Connected' status", () => {
+    const [tile] = buildTiles([provider({})], [connector({ usable: true })], 0);
     expect(tile!.connected).toBe(true);
+    expect(tile!.state).toBe("connected");
     expect(tile!.status).toBe("Connected");
   });
 
+  test("configured + unhealthy record -> needs-attention with message", () => {
+    const [tile] = buildTiles(
+      [provider({})],
+      [connector({ health: "unhealthy", usable: false, message: "API key invalid" })],
+      0
+    );
+    expect(tile!.connected).toBe(true);
+    expect(tile!.state).toBe("needs-attention");
+    expect(tile!.status).toBe("API key invalid");
+  });
+
+  test("configured + unknown health + probe provider -> needs-attention 'Checking...'", () => {
+    const [tile] = buildTiles(
+      [provider({ hasProbe: true })],
+      [connector({ health: "unknown", usable: false })],
+      0
+    );
+    expect(tile!.connected).toBe(true);
+    expect(tile!.state).toBe("needs-attention");
+    expect(tile!.status).toBe("Checking…");
+  });
+
+  test("configured + unhealthy with no message -> 'Validation failed'", () => {
+    const [tile] = buildTiles(
+      [provider({})],
+      [connector({ health: "unhealthy", usable: false, message: undefined })],
+      0
+    );
+    expect(tile!.state).toBe("needs-attention");
+    expect(tile!.status).toBe("Validation failed");
+  });
+
   test("non-configured record does not connect the tile", () => {
-    const [tile] = buildTiles([provider({})], [connector({ status: "disabled" })], 0);
+    const [tile] = buildTiles([provider({})], [connector({ status: "disabled", usable: false })], 0);
     expect(tile!.connected).toBe(false);
+    expect(tile!.state).toBe("available");
     expect(tile!.status).toBeNull();
   });
 
   test("externallySatisfied provider is connected with no record (hosted Google)", () => {
     const [tile] = buildTiles([provider({ externallySatisfied: true })], [], 0);
     expect(tile!.connected).toBe(true);
+    expect(tile!.state).toBe("connected");
   });
 
-  test("Google status line counts registry accounts", () => {
+  test("Google status line counts registry accounts (all signed in)", () => {
     const google = provider({ id: GOOGLE_PROVIDER_ID, label: "Google Workspace OAuth", externallySatisfied: true });
-    expect(buildTiles([google], [], 1)[0]!.status).toBe("1 account connected");
-    expect(buildTiles([google], [], 2)[0]!.status).toBe("2 accounts connected");
+    const tile1 = buildTiles([google], [], 1, 1)[0]!;
+    expect(tile1.status).toBe("1 account connected");
+    expect(tile1.state).toBe("connected");
+    const tile2 = buildTiles([google], [], 2, 2)[0]!;
+    expect(tile2.status).toBe("2 accounts connected");
+    expect(tile2.state).toBe("connected");
+  });
+
+  test("Google with some accounts needing reconnection -> connected with reconnect count", () => {
+    const google = provider({ id: GOOGLE_PROVIDER_ID, label: "Google Workspace OAuth", externallySatisfied: true });
+    const tile = buildTiles([google], [], 3, 2)[0]!;
+    expect(tile.state).toBe("connected");
+    expect(tile.status).toBe("2 connected, 1 needs reconnection");
+  });
+
+  test("Google with ALL accounts needing reconnection -> needs-attention", () => {
+    const google = provider({ id: GOOGLE_PROVIDER_ID, label: "Google Workspace OAuth", externallySatisfied: true });
+    const tile = buildTiles([google], [], 2, 0)[0]!;
+    expect(tile.state).toBe("needs-attention");
+    expect(tile.status).toBe("Accounts need reconnection");
   });
 
   test("brand color for known providers, gray fallback + label initial otherwise", () => {
@@ -77,6 +132,16 @@ describe("buildTiles", () => {
     expect(tile!.label).toBe("Google");
     // Providers without an override keep the descriptor label.
     expect(buildTiles([provider({})], [], 0)[0]!.label).toBe("Linear");
+  });
+
+  test("needs-attention tile is still counted as connected for chip filtering", () => {
+    const tiles = buildTiles(
+      [provider({})],
+      [connector({ health: "unhealthy", usable: false, message: "expired" })],
+      0
+    );
+    expect(tiles[0]!.connected).toBe(true);
+    expect(tileCounts(tiles)).toEqual({ all: 1, connected: 1, available: 0 });
   });
 });
 
@@ -108,7 +173,7 @@ describe("tileCounts / filterTiles", () => {
     expect(filterTiles(googleTiles, "all", "goog")).toHaveLength(1);
   });
 
-  test("no matches → empty list (empty state)", () => {
+  test("no matches -> empty list (empty state)", () => {
     expect(filterTiles(tiles, "all", "zzz")).toHaveLength(0);
   });
 });

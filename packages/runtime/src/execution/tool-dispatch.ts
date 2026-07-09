@@ -67,7 +67,7 @@ import { resolveEmitContext, setToolCallRunningHint } from "./chat-task-emit";
 import { searchSessions } from "./search";
 import { installSkillFromBody, setSkillStatus } from "../capabilities/skills";
 import { recordFeedbackOutcome } from "../learning/outcomes";
-import { credentialTemplateForProvider, firstUngrantedCredential, isSkillActive } from "../integrations/connectors";
+import { connectorIsUsable, credentialTemplateForProvider, firstUngrantedCredential, isSkillActive } from "../integrations/connectors";
 import { getProvider } from "../integrations/connectors/registry";
 import { resolveConnectorSecret } from "../integrations/connectors";
 import { invokeMcpTool } from "../integrations/mcp";
@@ -1061,7 +1061,7 @@ async function webSearchTool(config: RuntimeConfig, taskId: string, args: Record
   let providerId: WebSearchProvider | undefined;
   for (const id of candidates) {
     const found = state.connectors.find(
-      (c) => c.provider === id && c.status === "configured" && c.health === "healthy"
+      (c) => c.provider === id && connectorIsUsable(c)
     );
     if (found) {
       connector = found;

@@ -2346,6 +2346,12 @@ export interface ConnectorRecord {
   // machine-globally under ~/.gini/google-accounts (src/state/google-accounts.ts);
   // the connector keeps holding only the OAuth *client* creds.
   accounts?: GoogleAccountStatus[];
+  // Transient, API-enrichment-only. Never persisted to state — GET
+  // /api/connectors computes it from connectorIsUsable (status + health +
+  // probe presence) and, for google-oauth-desktop, at-least-one-signed-in
+  // account. The Integrations page reads this to decide whether the tile
+  // is Connected (green) or Needs attention (warning).
+  usable?: boolean;
 }
 
 // A tagged Google account in the machine-global registry. Account identity ==

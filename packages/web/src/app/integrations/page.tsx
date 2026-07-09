@@ -89,14 +89,11 @@ export default function IntegrationsPage() {
   const create = useMutation({
     mutationFn: (body: CreateConnectorBody) =>
       api<ConnectorRecord>("/connectors", { method: "POST", body: JSON.stringify(body) }),
-    onSuccess: async (created) => {
+    onSuccess: (created) => {
       toast.success(`Added ${created.name}`);
+      // The runtime probes on create now, so the response already carries
+      // settled health — no compensating POST /health needed.
       invalidate(["connectors", "events", "skills"]);
-      // Best-effort initial probe — same pattern the old Connectors page
-      // used so the tile flips to healthy without waiting on the periodic
-      // re-probe. Failures land on the connector record itself.
-      await api(`/connectors/${created.id}/health`, { method: "POST" }).catch(() => undefined);
-      invalidate(["connectors", "skills"]);
       setDialog(CLOSED_DIALOG);
       setManualProvider(null);
     },
@@ -106,13 +103,11 @@ export default function IntegrationsPage() {
   const rotate = useMutation({
     mutationFn: ({ id, body }: { id: string; body: CreateConnectorBody }) =>
       api<ConnectorRecord>(`/connectors/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
-    onSuccess: async (updated) => {
+    onSuccess: (updated) => {
       toast.success(`Rotated ${updated.name}`);
+      // The runtime probes on secret rotation now, so the response already
+      // carries settled health — no compensating POST /health needed.
       invalidate(["connectors", "events", "skills"]);
-      // Re-probe immediately so the record flips back to healthy without
-      // waiting on the periodic re-probe — same pattern as the create path.
-      await api(`/connectors/${updated.id}/health`, { method: "POST" }).catch(() => undefined);
-      invalidate(["connectors", "skills"]);
       setDialog(CLOSED_DIALOG);
     },
     onError: (error: Error) => toast.error(error.message)
@@ -138,7 +133,9 @@ export default function IntegrationsPage() {
     onError: (error: Error) => toast.error(error.message)
   });
 
-  const tiles = buildTiles(providers.data ?? [], connectors.data ?? [], (googleAccounts.data ?? []).length);
+  const googleAccountsList = googleAccounts.data ?? [];
+  const googleSignedInCount = googleAccountsList.filter((a) => a.signedIn).length;
+  const tiles = buildTiles(providers.data ?? [], connectors.data ?? [], googleAccountsList.length, googleSignedInCount);
   const counts = tileCounts(tiles);
   const visible = filterTiles(tiles, filter, search);
 
@@ -274,10 +271,15 @@ export default function IntegrationsPage() {
                         )}
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-[14.5px] font-semibold">{tile.label}</span>
-                          {tile.connected ? (
+                          {tile.state === "connected" ? (
                             <span className="mt-0.5 flex items-center gap-1.5">
                               <span className="size-[7px] shrink-0 rounded-full bg-emerald-500" />
                               <span className="text-[12.5px] font-medium text-emerald-600">{tile.status}</span>
+                            </span>
+                          ) : tile.state === "needs-attention" ? (
+                            <span className="mt-0.5 flex items-center gap-1.5">
+                              <span className="size-[7px] shrink-0 rounded-full bg-amber-500" />
+                              <span className="text-[12.5px] font-medium text-amber-600">{tile.status}</span>
                             </span>
                           ) : (
                             <span className="mt-0.5 block truncate text-[12.5px] text-muted-foreground">

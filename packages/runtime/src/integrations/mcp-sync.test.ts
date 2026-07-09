@@ -152,16 +152,15 @@ describe("syncProviderMcpServers", () => {
 
   test("createConnector → checkConnector flow auto-registers via the lifecycle hook", async () => {
     const config = buildConfig("mcp-sync-lifecycle");
-    // Use a real createConnector to mirror the production path. We can't
-    // hit Linear's API from a unit test, so we shortcut by writing a
-    // secret + flipping health directly on the connector, then call
-    // syncProviderMcpServers as `checkConnector` would.
+    // createConnector now probes immediately for probe-having providers.
+    // With a fake token the probe fails, landing health at "unhealthy".
     const connector = await createConnector(config, {
       name: "Linear",
       provider: "linear",
       secrets: { token: "lin_api_test" }
     });
-    expect(connector.health).toBe("unknown");
+    // The probe ran and failed (fake token), so health is unhealthy.
+    expect(connector.health).toBe("unhealthy");
     // Before the connector is healthy, no MCP server should appear.
     await syncProviderMcpServers(config);
     let state = readState(config.instance);

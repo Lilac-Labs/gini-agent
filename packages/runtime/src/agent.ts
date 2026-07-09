@@ -113,6 +113,7 @@ import {
 import { abortTurnForTask } from "./execution/turn-abort";
 import { getSubagentForTask, syncSubagentFromTask } from "./capabilities/subagents";
 import { sendMessagingOutput } from "./integrations/messaging";
+import { markConnectorUnhealthyForProvider } from "./integrations/connectors";
 // Imported from a leaf module (not src/jobs/index.ts) so we don't close
 // the cycle that runs through submitTask. The finalizer flips the linked
 // JobRunRecord from "running" to a terminal status when a Task with a
@@ -1130,6 +1131,11 @@ export async function failTask(config: RuntimeConfig, taskId: string, error: unk
     return task;
   });
   if (!task) return;
+  // Bridge provider auth failure to connector health: mark the matching
+  // connector(s) unhealthy so the Integrations page reflects it immediately.
+  if (authProvider) {
+    void markConnectorUnhealthyForProvider(config.instance, authProvider, message);
+  }
   appendTrace(config.instance, taskId, { type: "error", message, data: {} });
   // Skill learning tier 1: harvest objective failure outcomes from the failed
   // task (ADR skill-learning-from-outcomes.md). Attributes any skill script

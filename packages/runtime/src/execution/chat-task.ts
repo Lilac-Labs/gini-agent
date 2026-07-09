@@ -127,7 +127,7 @@ import { finalizeJobRunFromTask } from "../jobs/finalize";
 import { listJobs } from "../jobs";
 import { isSilentReply } from "../jobs/silent";
 import { peekRefLabel } from "../tools/browser";
-import { isSkillActive } from "../integrations/connectors";
+import { isSkillActive, markConnectorUnhealthyForProvider, reprobeConnectorsForProvider } from "../integrations/connectors";
 import { getProvider, providerForCredentialName } from "../integrations/connectors/registry";
 import { resolveEffectiveContext } from "./effective-context";
 import {
@@ -2763,11 +2763,16 @@ async function runLoop(
     // lock-free first, so the common healthy path writes no state.
     // `evidenceFrom` keeps a record written by a concurrent task while this
     // call was in flight: that failure is newer evidence than this success.
-    await clearProviderAuthFailureIfPresent(config.instance, result.provider.name, {
+    const cleared = await clearProviderAuthFailureIfPresent(config.instance, result.provider.name, {
       reason: "provider call succeeded",
       taskId,
       evidenceFrom: callStartedAt
     });
+    // When the clear actually dropped a needs-reauth record, re-probe the
+    // matching connector so recovery doesn't wait for the 30-min reprobe.
+    if (cleared) {
+      void reprobeConnectorsForProvider(config, result.provider.name);
+    }
 
     // First successful provider call in this runLoop entry: commit the
     // deferred identity snapshot. We only persist once per fresh
@@ -3643,11 +3648,14 @@ async function runLoop(
     // Same clear seam as the main loop: a successful summary call proves the
     // credential works, so drop any persistent needs-reauth record (issue
     // #233). Lock-free check first — no state write on the healthy path.
-    await clearProviderAuthFailureIfPresent(config.instance, summaryResult.provider.name, {
+    const summaryCleared = await clearProviderAuthFailureIfPresent(config.instance, summaryResult.provider.name, {
       reason: "provider call succeeded",
       taskId,
       evidenceFrom: summaryCallStartedAt
     });
+    if (summaryCleared) {
+      void reprobeConnectorsForProvider(config, summaryResult.provider.name);
+    }
     const finalText = summaryResult.text || "(no content)";
     const exhausted = await mutateState(config.instance, (state) => {
       const item = findTask(state, taskId);
@@ -3761,6 +3769,11 @@ async function runLoop(
       item.updatedAt = now();
       return item;
     });
+    // Bridge provider auth failure to connector health so the Integrations
+    // page reflects it immediately.
+    if (authProvider) {
+      void markConnectorUnhealthyForProvider(config.instance, authProvider, message);
+    }
     // Summary-call fail path: emit a system_note so the chat thread has
     // an explicit marker rather than just trailing off after the last
     // assistant_text. Phase blocks track currentStep; the system_note

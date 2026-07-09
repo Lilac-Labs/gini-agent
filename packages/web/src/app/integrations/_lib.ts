@@ -20,6 +20,8 @@ const FALLBACK_TILE_COLOR = "#6B7280";
 
 export type TileFilter = "all" | "connected" | "available";
 
+export type TileState = "connected" | "needs-attention" | "available";
+
 export interface IntegrationTile {
   provider: ProviderDescriptor;
   // Displayed tile name: the override label when one exists, else the
@@ -28,8 +30,13 @@ export interface IntegrationTile {
   color: string;
   initial: string;
   connected: boolean;
-  // Green status line when connected ("Connected" / "2 accounts connected");
-  // null when available (the tile shows the provider description instead).
+  // Three-state: "connected" (green, usable), "needs-attention" (configured
+  // but not usable — stays in the Connected section), "available" (not
+  // configured at all). The tile chip/section filter treats needs-attention
+  // as connected (the user DID connect it; it needs fixing, not re-adding).
+  state: TileState;
+  // Status line: "Connected" / "2 accounts connected" / "Needs attention" /
+  // warning message / null (available tiles show the description instead).
   status: string | null;
 }
 
@@ -43,33 +50,78 @@ export function configuredRecord(
 }
 
 // Directory tiles: every registered provider except `generic` (surfaced via
-// the "Add MCP server" header action instead). Connected = a configured
-// connector record exists for the provider, OR its credential is satisfied
-// out-of-band (`externallySatisfied` — e.g. the hosted pre-provisioned Google
-// credential, which never has a record). The Google tile counts the tagged
-// accounts from the machine-global registry in its status line.
+// the "Add MCP server" action). All local integrations remain visible.
+// Connected = a configured connector record exists for the provider AND is
+// usable, OR its credential is satisfied out-of-band (`externallySatisfied`
+// — e.g. a locally managed Google account, which may not have a connector
+// record). Configured-but-not-usable is "Needs attention" — stays in the
+// Connected chip section (user DID connect it; it needs fixing). The Google
+// tile counts the tagged accounts from the machine-global registry in its
+// status line; if ALL accounts need reconnection → Needs attention.
 export function buildTiles(
   providers: ProviderDescriptor[],
   connectors: ConnectorRecord[],
-  googleAccountCount: number
+  googleAccountCount: number,
+  googleSignedInCount?: number
 ): IntegrationTile[] {
   return providers
     .filter((p) => p.id !== "generic")
     .map((p) => {
       const override = TILE_OVERRIDES[p.id];
       const label = override?.label ?? p.label;
-      const connected = Boolean(configuredRecord(connectors, p.id)) || Boolean(p.externallySatisfied);
-      const status = !connected
-        ? null
-        : p.id === GOOGLE_PROVIDER_ID && googleAccountCount > 0
-          ? `${googleAccountCount} account${googleAccountCount === 1 ? "" : "s"} connected`
-          : "Connected";
+      const record = configuredRecord(connectors, p.id);
+      // Derive the three-state for this tile.
+      let state: TileState;
+      let status: string | null;
+      if (p.id === GOOGLE_PROVIDER_ID) {
+        // Google: externallySatisfied OR configured record constitutes
+        // "has been connected". Usability additionally requires at least
+        // one signed-in account.
+        const hasConnection = Boolean(record) || Boolean(p.externallySatisfied);
+        if (!hasConnection) {
+          state = "available";
+          status = null;
+        } else if (googleAccountCount > 0 && (googleSignedInCount ?? googleAccountCount) > 0) {
+          state = "connected";
+          const signedIn = googleSignedInCount ?? googleAccountCount;
+          const needsReconnect = googleAccountCount - signedIn;
+          status = needsReconnect > 0
+            ? `${signedIn} connected, ${needsReconnect} need${needsReconnect === 1 ? "s" : ""} reconnection`
+            : `${googleAccountCount} account${googleAccountCount === 1 ? "" : "s"} connected`;
+        } else if (googleAccountCount > 0) {
+          // All accounts need reconnection.
+          state = "needs-attention";
+          status = "Accounts need reconnection";
+        } else {
+          // Connected but zero accounts — treat as needs-attention since
+          // the credential isn't yielding anything usable.
+          state = hasConnection && record?.usable ? "connected" : "needs-attention";
+          status = state === "connected" ? "Connected" : "Needs attention";
+        }
+      } else if (record) {
+        // Non-Google: a configured record exists.
+        if (record.usable) {
+          state = "connected";
+          status = "Connected";
+        } else {
+          state = "needs-attention";
+          status = record.message || (record.health === "unknown" ? "Checking…" : "Validation failed");
+        }
+      } else if (p.externallySatisfied) {
+        state = "connected";
+        status = "Connected";
+      } else {
+        state = "available";
+        status = null;
+      }
+      const connected = state !== "available";
       return {
         provider: p,
         label,
         color: override?.color ?? FALLBACK_TILE_COLOR,
         initial: (label.charAt(0) || "?").toUpperCase(),
         connected,
+        state,
         status
       };
     });

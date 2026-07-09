@@ -16,6 +16,9 @@ export const claudeCodeProvider: ProviderModule = {
   id: "claude-code",
   label: "Claude Code",
   description: "Delegate coding work to the Claude Code CLI. No secrets stored — auth lives in your host `claude` install.",
+  // Credential name so canonicalCredentialName resolves and skills with
+  // `requires: connectors: claude-code` gate on this connector's health.
+  credentialName: "claude-code",
   fields: [],
   async probe() {
     const path = which("claude");

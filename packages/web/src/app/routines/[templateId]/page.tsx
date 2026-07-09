@@ -549,9 +549,9 @@ function LabelListEditor({
           <textarea
             value={label.rule}
             aria-label={`Rule for ${label.name}`}
-            rows={2}
+            rows={1}
             onChange={(event) => update(index, { ...label, rule: event.target.value })}
-            className="block w-full resize-none bg-muted px-3.5 py-3 text-[13px] leading-normal text-foreground/80 outline-none"
+            className="block field-sizing-content w-full resize-none bg-muted px-3.5 py-3 text-[13px] leading-normal text-foreground/80 outline-none"
           />
         </div>
       ))}

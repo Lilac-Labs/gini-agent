@@ -157,8 +157,9 @@ export function homeView(
   const state = readState(config.instance);
   const index = buildContainerAttentionIndex(state);
   // Tasks that produced an outbound-message draft render with the draft icon
-  // in Recents. One pass over authorizations (any status — the draft was
-  // reviewed by the time the run completed).
+  // in Recents; message-mode containers render with the chat icon instead. One
+  // pass over authorizations (any status — the draft was reviewed by the time
+  // the run completed).
   const draftTaskIds = new Set<string>();
   for (const auth of state.authorizations) {
     if (auth.action === "messaging.send" && auth.taskId) draftTaskIds.add(auth.taskId);
@@ -194,7 +195,7 @@ export function homeView(
         recents.push({
           id: newest.id,
           containerId: session.id,
-          icon: draftTaskIds.has(newest.id) ? "draft" : "document",
+          icon: session.startedAs === "message" ? "chat" : draftTaskIds.has(newest.id) ? "draft" : "document",
           title: session.title,
           timestamp: newest.updatedAt
         });

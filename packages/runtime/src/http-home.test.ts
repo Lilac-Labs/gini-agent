@@ -336,6 +336,31 @@ describe("GET /api/home", () => {
     ]);
   });
 
+  test("a message-mode container's recents entry carries the chat icon", async () => {
+    const config = buildConfig("home-recents-chat-icon");
+    const handler = createHandler(config);
+    const ids = await mutateState(config.instance, (state) => {
+      // A user-started conversation (Message mode) with a completed run. It
+      // skips the tasks list (it lives in the sidebar Messages section) but
+      // still feeds Recents, where it renders with the chat icon.
+      const convo = createTopic(state, { title: "Chat with Gini", startedAs: "message" });
+      const run = seedTask(state, convo.id, "completed", "2026-07-01T10:00:00.000Z", { summary: "Answered." });
+      return { convo: convo.id, runId: run.id };
+    });
+
+    const home = await getHome(handler, config);
+    expect(home.tasks).toEqual([]);
+    expect(home.recents).toEqual([
+      {
+        id: ids.runId,
+        containerId: ids.convo,
+        icon: "chat",
+        title: "Chat with Gini",
+        timestamp: "2026-07-01T10:00:00.000Z"
+      }
+    ]);
+  });
+
   test("a failed newest outcome stamps failed; completed does not", async () => {
     const config = buildConfig("home-failed");
     const handler = createHandler(config);

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FileText, SquarePen } from "lucide-react";
+import { FileText, MessageSquare, SquarePen } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatRecentTimestamp } from "@/components/chat/relative-time";
 import { useHome } from "@/lib/queries";
@@ -42,7 +42,9 @@ export function RecentsList() {
           href={`/chat?session=${item.containerId}`}
           className="flex items-center gap-[11px] rounded-lg px-1 py-[9px] transition-colors hover:bg-accent/45"
         >
-          {item.icon === "draft" ? (
+          {item.icon === "chat" ? (
+            <MessageSquare className="size-[15px] shrink-0 text-muted-foreground" />
+          ) : item.icon === "draft" ? (
             <SquarePen className="size-[15px] shrink-0 text-muted-foreground" />
           ) : (
             <FileText className="size-[15px] shrink-0 text-muted-foreground" />

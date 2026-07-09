@@ -1219,7 +1219,10 @@ export interface RecentItem {
   id: string;
   // Owning container (chat session) id — the row deep-links there.
   containerId: string;
-  icon: "draft" | "document";
+  // Row glyph. "chat" marks a message-mode container (startedAs === "message"),
+  // "draft" a task that produced an outbound-message draft, "document" any
+  // other task.
+  icon: "draft" | "document" | "chat";
   title: string;
   timestamp: string;
 }

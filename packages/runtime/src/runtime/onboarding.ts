@@ -34,6 +34,8 @@ import { runProfileScan } from "./onboarding-scan";
 import {
   ROUTINE_TEMPLATES,
   createRoutineJob,
+  legacyOptionsToSettings,
+  resolveSettings,
   reusableRoutineSessionId,
   routineTemplate,
   validateTimezone
@@ -310,9 +312,12 @@ export async function applyOnboardingRoutines(
 // Build the createScheduledJob payloads for the enabled routines by mapping
 // the POST body's toggle state onto the shared routine-template catalog
 // (src/runtime/routine-templates.ts) — the prompts/crons/skills are
-// product-owned there (never composed in the browser), and the Auto-inbox
-// spec is composed ONLY of the behaviors the user toggled on (zero behaviors
-// ⇒ buildSpec returns undefined ⇒ no job).
+// product-owned there (never composed in the browser). The body's flat
+// booleans go through the same legacy-options mapping the gallery install
+// accepts (each template's legacySettings hook, then resolveSettings fills
+// the field defaults), and the Auto-inbox spec is composed ONLY of the
+// behaviors the user toggled on (zero behaviors ⇒ buildSpec returns
+// undefined ⇒ no job).
 function routineJobSpecs(payload: Record<string, unknown>, timezone: string): Record<string, unknown>[] {
   const selections: Array<{ templateId: string; section: unknown; options: string[] }> = [
     { templateId: "auto-inbox", section: payload.autoInbox, options: ["labelNewMail", "archiveUnimportant", "assistScheduling", "draftReplies"] },
@@ -324,10 +329,9 @@ function routineJobSpecs(payload: Record<string, unknown>, timezone: string): Re
     if (!flag(section, "enabled")) continue;
     const template = routineTemplate(templateId);
     if (!template) continue;
-    const spec = template.buildSpec(
-      Object.fromEntries(options.map((key) => [key, flag(section, key)])),
-      timezone
-    );
+    const legacyOptions = Object.fromEntries(options.map((key) => [key, flag(section, key)]));
+    const settings = resolveSettings(template, legacyOptionsToSettings(template, legacyOptions));
+    const spec = template.buildSpec(settings, timezone);
     if (spec) specs.push(spec);
   }
   return specs;

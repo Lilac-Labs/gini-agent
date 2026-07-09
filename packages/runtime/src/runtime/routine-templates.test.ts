@@ -3,14 +3,18 @@
 // covered:
 //   - catalog buildSpec parity with the onboarding starter-routine specs
 //     (prompts/crons/skills, incl. the Auto-inbox zero-behaviors → no spec
-//     rule)
+//     rule and the label-list prompt enumeration)
+//   - resolveSettings validation (unknown keys, per-kind shapes, label
+//     caps/canonicalization) and the legacy flat-options mapping
 //   - GET reflects installed state (templateId join, agent scoping)
-//   - install: templateId stamping, option defaults, idempotent per-template
-//     replace, timezone precedence (payload > onboarding record > UTC),
-//     skill-resolve 400 with zero side effects, payload validation, unknown
-//     template → 404
-//   - install persists the resolved options (defaults merged with overrides)
-//     as templateOptions, and GET exposes them as installed.options
+//   - install: templateId stamping, settings defaults, idempotent
+//     per-template replace, timezone precedence (payload > onboarding record
+//     > UTC), skill-resolve 400 with zero side effects, payload validation,
+//     unknown template → 404
+//   - install persists the resolved settings (defaults merged with
+//     overrides) as templateSettings, and GET exposes them as
+//     installed.settings — including the legacy templateOptions
+//     normalization for jobs predating the field
 //   - install provisions a channel session titled after message-delivering
 //     routines; reinstall carries the same session forward; uninstall
 //     archives it with the job; Auto-inbox gets only a hidden working
@@ -20,8 +24,9 @@
 //   - install/uninstall are agent-scoped: one agent's install never touches
 //     another agent's job for the same template
 //   - the onboarding routines path stamps the same templateIds (and
-//     templateOptions), and its replace pass reconciles gallery installs
-//     (one live job per template)
+//     templateSettings, mapping the retired archiveUnimportant boolean onto
+//     per-label auto-archive), and its replace pass reconciles gallery
+//     installs (one live job per template)
 //
 // Hermetic: HOME + GINI_STATE_ROOT point at a per-test scratch dir so
 // instance state never touches the developer machine; the provider is the
@@ -34,8 +39,20 @@ import { join } from "node:path";
 import { createHandler } from "../http";
 import { readState } from "../state";
 import { writeOnboarding } from "../state/onboarding";
-import { ROUTINE_TEMPLATES, routineTemplate } from "./routine-templates";
+import { ROUTINE_TEMPLATES, resolveSettings, routineTemplate } from "./routine-templates";
+import type { RoutineLabelRule } from "./routine-templates";
 import type { RuntimeConfig } from "../types";
+
+const DEFAULT_LABEL_NAMES = [
+  "new sender",
+  "awaiting reply",
+  "action needed",
+  "newsletters",
+  "promotional",
+  "orders",
+  "travel",
+  "updates"
+];
 
 function tag(): string {
   return `${process.pid}-${Math.floor(Math.random() * 1_000_000)}`;
@@ -67,41 +84,76 @@ describe("routine templates", () => {
   });
 
   test("buildSpec composes the starter-routine specs (parity with onboarding)", () => {
-    const autoInbox = routineTemplate("auto-inbox")!.buildSpec(
-      { labelNewMail: true, archiveUnimportant: false, assistScheduling: true, draftReplies: true },
-      "America/New_York"
-    )!;
+    const template = routineTemplate("auto-inbox")!;
+    const autoInbox = template.buildSpec(resolveSettings(template, undefined), "America/New_York")!;
     expect(autoInbox.templateId).toBe("auto-inbox");
     expect(autoInbox.cronExpression).toBe("*/30 * * * *");
     expect(autoInbox.cronTimezone).toBe("America/New_York");
     expect(autoInbox.skillNames).toEqual(["google-gmail", "google-calendar"]);
-    expect(autoInbox.prompt).toBe(
-      [
-        "Tidy the user's Gmail inbox: work through mail that arrived since the last run.",
-        "- Label new mail into sensible Gmail labels.",
-        "- Detect scheduling requests. When a response is needed, spawn a surfaced child task to draft the scheduling reply.",
-        "- Detect important emails awaiting a response. For each one, spawn a surfaced child task to draft the reply.",
-        "Silent behaviors: labeling and archiving happen directly in this Auto-inbox run and need no user-facing delivery.",
-        "Draft-producing behaviors: do NOT save draft replies in this Auto-inbox run. For every email that needs a reply or scheduling response, call spawn_task with surface:true and await:\"none\" so the user sees a Home task. Use one task per email thread/message, with a stable correlation_key like `auto-inbox:<account>:<message-or-thread-id>` so later runs do not duplicate it.",
-        "Each spawned task brief must be self-contained: include the exact Gmail account, message id and thread id when known, sender, subject, relevant body/snippet, why a response is needed, and any scheduling constraints/calendar context already discovered.",
-        "The spawned task's goal is to save a Gmail draft and render it as an `email-draft` card with DraftId and Account so the user can review, iterate, and send from the card. If the draft proposes a specific meeting time, the child task must also render the calendar preview required by the google-gmail skill.",
-        "Gini never sends email or messages without the user's review — save drafts only, never send."
-      ].join("\n")
+    const prompt = autoInbox.prompt as string;
+    // The labeling behavior enumerates the exact label list: quoted Gmail
+    // label name, an (auto-archive) marker when set, then the rule text.
+    // Defaults: no marker on any label line, no Gini/ prefix.
+    expect(prompt).toContain(
+      "- Label new mail. Classify each new email into the single best-fitting label from this list, creating the Gmail label first when it doesn't exist yet:"
     );
+    expect(prompt).toContain(
+      '  - "new sender": Direct emails from real people you haven\'t corresponded with before — potential leads, candidates, or business contacts worth reviewing'
+    );
+    expect(prompt).toContain('  - "newsletters": Subscribed content you opted into');
+    expect(prompt).toContain("  When no label fits, leave the email unlabeled — never invent labels outside this list.");
+    expect(prompt).toContain(
+      "  After labeling, archive (remove the INBOX label from) ONLY emails whose label is marked (auto-archive) above; every other email stays in the inbox."
+    );
+    expect(prompt).not.toContain('" (auto-archive)');
+    expect(prompt).not.toContain('"Gini/');
+    // The shared framing lines survive the settings rework unchanged.
+    expect(prompt).toContain("Tidy the user's Gmail inbox: work through mail that arrived since the last run.");
+    expect(prompt).toContain("- Detect scheduling requests. When a response is needed, spawn a surfaced child task to draft the scheduling reply.");
+    expect(prompt).toContain("- Detect important emails awaiting a response. For each one, spawn a surfaced child task to draft the reply.");
+    expect(prompt).toContain("Silent behaviors: labeling and archiving happen directly in this Auto-inbox run and need no user-facing delivery.");
+    expect(prompt).toContain("spawn_task with surface:true");
+    expect(prompt).toContain("email-draft");
+    expect(prompt).toContain("Gini never sends email or messages without the user's review — save drafts only, never send.");
 
-    // Without scheduling assist the calendar skill drops off; every behavior
-    // toggled off yields no spec at all.
-    const gmailOnly = routineTemplate("auto-inbox")!.buildSpec(
-      { labelNewMail: true, archiveUnimportant: true, assistScheduling: false, draftReplies: false },
+    // Prefix, per-label auto-archive markers, and the optional scope/rules
+    // text all flow into the prompt; embedded newlines collapse so a rule
+    // can't forge extra prompt bullets, and an empty rule drops its colon.
+    const custom = template.buildSpec(
+      resolveSettings(template, {
+        labelPrefix: true,
+        labels: [
+          { name: "newsletters", color: "#1FA463", rule: "Subscribed\n  digests and roundups", autoArchive: true },
+          { name: "vip", color: "#4277FB", rule: "", autoArchive: false }
+        ],
+        draftRepliesScope: "Only real people I know",
+        schedulingRules: "Mornings only,\nnever Fridays"
+      }),
       "UTC"
     )!;
+    const customPrompt = custom.prompt as string;
+    expect(customPrompt).toContain('  - "Gini/newsletters" (auto-archive): Subscribed digests and roundups');
+    expect(customPrompt).toContain('  - "Gini/vip"\n');
+    expect(customPrompt).toContain(
+      "- Detect scheduling requests. When a response is needed, spawn a surfaced child task to draft the scheduling reply. The user's scheduling rules and availability: Mornings only, never Fridays"
+    );
+    expect(customPrompt).toContain(
+      "- Detect important emails awaiting a response. For each one, spawn a surfaced child task to draft the reply. Only draft replies to these kinds of emails: Only real people I know"
+    );
+
+    // Without scheduling assist the calendar skill drops off. Labeling
+    // contributes a behavior only when the toggle is on AND at least one
+    // label exists; with every function off there is no spec at all.
+    const gmailOnly = template.buildSpec(resolveSettings(template, { assistScheduling: false }), "UTC")!;
     expect(gmailOnly.skillNames).toEqual(["google-gmail"]);
-    expect(gmailOnly.prompt).toContain("- Archive clearly-unimportant mail");
     expect(
-      routineTemplate("auto-inbox")!.buildSpec(
-        { labelNewMail: false, archiveUnimportant: false, assistScheduling: false, draftReplies: false },
+      template.buildSpec(
+        resolveSettings(template, { labelNewMail: false, assistScheduling: false, draftReplies: false }),
         "UTC"
       )
+    ).toBeUndefined();
+    expect(
+      template.buildSpec(resolveSettings(template, { labels: [], assistScheduling: false, draftReplies: false }), "UTC")
     ).toBeUndefined();
 
     const morning = routineTemplate("morning-briefing")!.buildSpec({ personalizedNews: true }, "UTC")!;
@@ -132,6 +184,54 @@ describe("routine templates", () => {
     );
   });
 
+  test("resolveSettings validates per-kind, caps labels, and canonicalizes values", () => {
+    const template = routineTemplate("auto-inbox")!;
+
+    // Missing keys fall back to the catalog defaults — including the full
+    // starter label set.
+    const defaults = resolveSettings(template, {});
+    expect(defaults.labelNewMail).toBe(true);
+    expect(defaults.labelPrefix).toBe(false);
+    expect(defaults.draftRepliesScope).toBe("");
+    expect((defaults.labels as RoutineLabelRule[]).map((label) => label.name)).toEqual(DEFAULT_LABEL_NAMES);
+    expect((defaults.labels as RoutineLabelRule[]).every((label) => label.autoArchive === false)).toBe(true);
+
+    expect(() => resolveSettings(template, [])).toThrow("settings must be an object");
+    expect(() => resolveSettings(template, { sendEverything: true })).toThrow('unknown setting "sendEverything"');
+    expect(() => resolveSettings(template, { labelNewMail: "yes" })).toThrow('setting "labelNewMail" must be a boolean');
+    expect(() => resolveSettings(template, { schedulingRules: 3 })).toThrow('setting "schedulingRules" must be a string');
+    expect(() => resolveSettings(template, { schedulingRules: "x".repeat(2001) })).toThrow("at most 2000 characters");
+    expect(() => resolveSettings(template, { labels: {} })).toThrow('setting "labels" must be an array of labels');
+    expect(() =>
+      resolveSettings(template, { labels: Array.from({ length: 25 }, (_, i) => ({ name: `label ${i}` })) })
+    ).toThrow("at most 24 labels");
+    expect(() => resolveSettings(template, { labels: [{ name: "   " }] })).toThrow("label names must be non-empty");
+    expect(() => resolveSettings(template, { labels: [{ name: "x".repeat(61) }] })).toThrow("at most 60 characters");
+    expect(() => resolveSettings(template, { labels: [{ name: "ok", rule: 5 }] })).toThrow("label rules must be strings");
+    expect(() => resolveSettings(template, { labels: [{ name: "ok", rule: "x".repeat(501) }] })).toThrow(
+      "at most 500 characters"
+    );
+    expect(() => resolveSettings(template, { labels: [{ name: "ok", autoArchive: "yes" }] })).toThrow(
+      "autoArchive must be a boolean"
+    );
+
+    // Canonicalization: names/rules/text trim (rules keep interior
+    // whitespace — the prompt collapses it), a malformed color falls back to
+    // the palette by list position, and autoArchive defaults to false.
+    const resolved = resolveSettings(template, {
+      labels: [
+        { name: "  Receipts ", rule: " keep these ", color: "red" },
+        { name: "VIP", rule: "", color: "#ABCDEF", autoArchive: true }
+      ],
+      schedulingRules: "  mornings only  "
+    });
+    expect(resolved.labels).toEqual([
+      { name: "Receipts", color: "#4277FB", rule: "keep these", autoArchive: false },
+      { name: "VIP", color: "#ABCDEF", rule: "", autoArchive: true }
+    ]);
+    expect(resolved.schedulingRules).toBe("mornings only");
+  });
+
   test("GET lists the catalog and reflects installed state per agent", async () => {
     const config = testConfig(root, "templates-list");
     const handler = createHandler(config);
@@ -145,11 +245,19 @@ describe("routine templates", () => {
     expect(autoInbox.name).toBe("Auto-inbox");
     expect(autoInbox.icon).toBe("inbox");
     expect(autoInbox.scheduleHint).toBe("Every 30 minutes");
-    expect(autoInbox.options.map((o: { key: string }) => o.key)).toEqual([
+    // The per-function settings sections the detail page renders, with flat
+    // field keys across sections.
+    expect(autoInbox.settings.map((s: { key: string }) => s.key)).toEqual(["labeling", "replies", "scheduling"]);
+    expect(
+      autoInbox.settings.flatMap((s: { fields: Array<{ key: string }> }) => s.fields.map((f) => f.key))
+    ).toEqual([
       "labelNewMail",
-      "archiveUnimportant",
+      "labels",
+      "labelPrefix",
+      "draftReplies",
+      "draftRepliesScope",
       "assistScheduling",
-      "draftReplies"
+      "schedulingRules"
     ]);
 
     const job = await call(handler, config, "/api/routines/templates/meeting-briefing/install", {
@@ -168,12 +276,12 @@ describe("routine templates", () => {
     expect(owner.templates.find((t: { id: string }) => t.id === "meeting-briefing").installed?.jobId).toBe(job.id);
   });
 
-  test("install stamps templateId, applies option defaults, and replaces idempotently", async () => {
+  test("install stamps templateId, applies settings defaults, and replaces idempotently", async () => {
     const config = testConfig(root, "templates-install");
     const handler = createHandler(config);
     await seedWorkspaceSkills(handler, config);
 
-    // Options omitted → the template defaults (archiveUnimportant off).
+    // Settings omitted → the template defaults (every function on).
     const first = await call(handler, config, "/api/routines/templates/auto-inbox/install", {
       method: "POST",
       body: JSON.stringify({ timezone: "Europe/Berlin" })
@@ -183,7 +291,7 @@ describe("routine templates", () => {
     expect(first.cronTimezone).toBe("Europe/Berlin");
     expect(first.skillNames).toEqual(["google-gmail", "google-calendar"]);
     expect(first.prompt).toContain("- Label new mail");
-    expect(first.prompt).not.toContain("- Archive clearly-unimportant mail");
+    expect(first.prompt).toContain("- Detect scheduling requests");
     expect(first.prompt).toContain("spawn_task with surface:true");
     expect(first.prompt).toContain("email-draft");
     expect(first.deliveryPolicy).toBe("silent");
@@ -192,19 +300,19 @@ describe("routine templates", () => {
     expect(firstSession?.title).toBe("Auto-inbox");
     expect(firstSession?.headless).toBe(true);
 
-    // Re-install with explicit options: the previous job is replaced, not
+    // Re-install with explicit settings: the previous job is replaced, not
     // duplicated, the prompt tracks the new selection, and Auto-inbox reuses
     // its hidden working channel instead of creating a Messages conversation.
     const second = await call(handler, config, "/api/routines/templates/auto-inbox/install", {
       method: "POST",
       body: JSON.stringify({
         timezone: "Europe/Berlin",
-        options: { labelNewMail: false, archiveUnimportant: true, assistScheduling: false, draftReplies: false }
+        settings: { labelNewMail: false, assistScheduling: false, draftReplies: true }
       })
     });
     expect(second.id).not.toBe(first.id);
     expect(second.skillNames).toEqual(["google-gmail"]);
-    expect(second.prompt).toContain("- Archive clearly-unimportant mail");
+    expect(second.prompt).toContain("- Detect important emails awaiting a response");
     expect(second.prompt).not.toContain("- Label new mail");
     expect(second.deliveryPolicy).toBe("silent");
     expect(second.chatSessionId).toBe(first.chatSessionId);
@@ -270,54 +378,118 @@ describe("routine templates", () => {
     expect(readState(config.instance).chatSessions.find((s) => s.id === again.chatSessionId)?.archivedAt).toBeUndefined();
   });
 
-  test("install persists the resolved options and GET exposes them as installed.options", async () => {
+  test("install persists the resolved settings and GET exposes them as installed.settings", async () => {
     const config = testConfig(root, "templates-options");
     const handler = createHandler(config);
     await seedWorkspaceSkills(handler, config);
 
-    // Options omitted → the template defaults, persisted in full.
+    // Settings omitted → the template defaults, persisted in full. The
+    // legacy templateOptions stamp is retired — new installs never carry it.
     const first = await call(handler, config, "/api/routines/templates/auto-inbox/install", {
       method: "POST",
       body: JSON.stringify({})
     });
-    expect(first.templateOptions).toEqual({
-      labelNewMail: true,
-      archiveUnimportant: false,
-      assistScheduling: true,
-      draftReplies: true
+    expect(first.templateOptions).toBeUndefined();
+    const firstSettings = first.templateSettings as {
+      labelNewMail: boolean;
+      labels: RoutineLabelRule[];
+      labelPrefix: boolean;
+      draftReplies: boolean;
+      draftRepliesScope: string;
+      assistScheduling: boolean;
+      schedulingRules: string;
+    };
+    expect(firstSettings.labelNewMail).toBe(true);
+    expect(firstSettings.labelPrefix).toBe(false);
+    expect(firstSettings.draftReplies).toBe(true);
+    expect(firstSettings.draftRepliesScope).toBe("");
+    expect(firstSettings.assistScheduling).toBe(true);
+    expect(firstSettings.schedulingRules).toBe("");
+    expect(firstSettings.labels.map((label) => label.name)).toEqual(DEFAULT_LABEL_NAMES);
+    expect(firstSettings.labels[0]).toEqual({
+      name: "new sender",
+      color: "#4277FB",
+      rule: "Direct emails from real people you haven't corresponded with before — potential leads, candidates, or business contacts worth reviewing",
+      autoArchive: false
     });
 
     // Partial overrides merge over the defaults before persisting.
     const second = await call(handler, config, "/api/routines/templates/auto-inbox/install", {
       method: "POST",
-      body: JSON.stringify({ options: { archiveUnimportant: true, draftReplies: false } })
+      body: JSON.stringify({
+        settings: {
+          draftReplies: false,
+          labels: [{ name: "receipts", color: "#9B7DF0", rule: "Order receipts", autoArchive: true }]
+        }
+      })
     });
-    expect(second.templateOptions).toEqual({
-      labelNewMail: true,
-      archiveUnimportant: true,
-      assistScheduling: true,
-      draftReplies: false
-    });
+    const secondSettings = second.templateSettings as { labels: RoutineLabelRule[]; draftReplies: boolean; labelNewMail: boolean };
+    expect(secondSettings.draftReplies).toBe(false);
+    expect(secondSettings.labelNewMail).toBe(true);
+    expect(secondSettings.labels).toEqual([{ name: "receipts", color: "#9B7DF0", rule: "Order receipts", autoArchive: true }]);
 
     const listed = await call(handler, config, "/api/routines/templates");
     const autoInbox = listed.templates.find((t: { id: string }) => t.id === "auto-inbox");
-    expect(autoInbox.installed).toEqual({
-      jobId: second.id,
-      status: "active",
-      options: {
-        labelNewMail: true,
-        archiveUnimportant: true,
-        assistScheduling: true,
-        draftReplies: false
-      }
-    });
+    expect(autoInbox.installed.jobId).toBe(second.id);
+    expect(autoInbox.installed.status).toBe("active");
+    expect(autoInbox.installed.settings).toEqual(second.templateSettings);
 
-    // A template without options carries no templateOptions at all.
+    // The legacy flat boolean options body still installs: it maps through
+    // legacySettings (archiveUnimportant → auto-archive on the unimportant
+    // default labels) and persists as templateSettings.
+    const legacy = await call(handler, config, "/api/routines/templates/auto-inbox/install", {
+      method: "POST",
+      body: JSON.stringify({ options: { archiveUnimportant: true, draftReplies: false } })
+    });
+    expect(legacy.templateOptions).toBeUndefined();
+    const legacySettings = legacy.templateSettings as { labels: RoutineLabelRule[]; draftReplies: boolean };
+    expect(legacySettings.draftReplies).toBe(false);
+    expect(
+      legacySettings.labels.filter((label) => label.autoArchive).map((label) => label.name)
+    ).toEqual(["newsletters", "promotional", "updates"]);
+
+    // A template without settings carries no templateSettings at all.
     const meeting = await call(handler, config, "/api/routines/templates/meeting-briefing/install", {
       method: "POST",
       body: JSON.stringify({})
     });
-    expect(meeting.templateOptions).toBeUndefined();
+    expect(meeting.templateSettings).toBeUndefined();
+  });
+
+  test("GET normalizes a legacy templateOptions job onto the settings model", async () => {
+    const config = testConfig(root, "templates-legacy");
+    const handler = createHandler(config);
+    await seedWorkspaceSkills(handler, config);
+
+    // A job persisted before templateSettings existed: templateId +
+    // templateOptions only (POST /api/jobs threads both through
+    // createScheduledJob unchanged).
+    await call(handler, config, "/api/jobs", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Auto-inbox",
+        prompt: "legacy",
+        cronExpression: "*/30 * * * *",
+        skillNames: ["google-gmail"],
+        templateId: "auto-inbox",
+        templateOptions: { labelNewMail: false, archiveUnimportant: true, assistScheduling: true, draftReplies: true }
+      })
+    });
+
+    const listed = await call(handler, config, "/api/routines/templates");
+    const autoInbox = listed.templates.find((t: { id: string }) => t.id === "auto-inbox");
+    const settings = autoInbox.installed.settings as Record<string, unknown>;
+    // Same-named toggles map by identity; archiveUnimportant becomes
+    // auto-archive on the unimportant default labels; fields the legacy map
+    // never had fill from the catalog defaults.
+    expect(settings.labelNewMail).toBe(false);
+    expect(settings.assistScheduling).toBe(true);
+    expect(settings.labelPrefix).toBe(false);
+    expect(settings.draftRepliesScope).toBe("");
+    expect(
+      (settings.labels as RoutineLabelRule[]).filter((label) => label.autoArchive).map((label) => label.name)
+    ).toEqual(["newsletters", "promotional", "updates"]);
+    expect(settings.archiveUnimportant).toBeUndefined();
   });
 
   test("install timezone precedence: payload > onboarding record > UTC", async () => {
@@ -368,11 +540,19 @@ describe("routine templates", () => {
     });
     expect(badTz.status).toBe(400);
 
+    // Unknown keys are rejected on both wire shapes: an unknown legacy
+    // option rides through the legacySettings mapping into the same
+    // unknown-setting rejection.
     const unknownOption = await rawCall(handler, config, "/api/routines/templates/auto-inbox/install", {
       method: "POST",
       body: JSON.stringify({ options: { sendEverything: true } })
     });
     expect(unknownOption.status).toBe(400);
+    const unknownSetting = await rawCall(handler, config, "/api/routines/templates/auto-inbox/install", {
+      method: "POST",
+      body: JSON.stringify({ settings: { sendEverything: true } })
+    });
+    expect(unknownSetting.status).toBe(400);
 
     const nonBoolean = await rawCall(handler, config, "/api/routines/templates/auto-inbox/install", {
       method: "POST",
@@ -380,11 +560,17 @@ describe("routine templates", () => {
     });
     expect(nonBoolean.status).toBe(400);
 
-    // Every Auto-inbox behavior off yields no spec — a clean 400, no job.
+    const badLabels = await rawCall(handler, config, "/api/routines/templates/auto-inbox/install", {
+      method: "POST",
+      body: JSON.stringify({ settings: { labels: [{ name: "" }] } })
+    });
+    expect(badLabels.status).toBe(400);
+
+    // Every Auto-inbox function off yields no spec — a clean 400, no job.
     const empty = await rawCall(handler, config, "/api/routines/templates/auto-inbox/install", {
       method: "POST",
       body: JSON.stringify({
-        options: { labelNewMail: false, archiveUnimportant: false, assistScheduling: false, draftReplies: false }
+        settings: { labelNewMail: false, assistScheduling: false, draftReplies: false }
       })
     });
     expect(empty.status).toBe(400);
@@ -524,7 +710,7 @@ describe("routine templates", () => {
       method: "POST",
       body: JSON.stringify({
         timezone: "America/New_York",
-        autoInbox: { enabled: true, labelNewMail: true, archiveUnimportant: false, assistScheduling: true, draftReplies: true },
+        autoInbox: { enabled: true, labelNewMail: true, archiveUnimportant: true, assistScheduling: true, draftReplies: true },
         morningBriefing: { enabled: true, personalizedNews: true },
         meetingBriefing: { enabled: true }
       })
@@ -535,18 +721,23 @@ describe("routine templates", () => {
       "morning-briefing"
     ]);
 
-    // The onboarding path persists the toggle state as templateOptions too.
+    // The onboarding path persists the resolved settings as
+    // templateSettings, mapping the body's flat booleans through the same
+    // legacy-options path as the gallery install — archiveUnimportant lands
+    // as auto-archive on the unimportant default labels.
     const jobsByTemplate = new Map(applied.jobs.map((j: { templateId?: string }) => [j.templateId, j]));
-    expect((jobsByTemplate.get("auto-inbox") as { templateOptions?: unknown }).templateOptions).toEqual({
-      labelNewMail: true,
-      archiveUnimportant: false,
-      assistScheduling: true,
-      draftReplies: true
-    });
-    expect((jobsByTemplate.get("morning-briefing") as { templateOptions?: unknown }).templateOptions).toEqual({
+    const autoInboxSettings = (jobsByTemplate.get("auto-inbox") as { templateSettings?: Record<string, unknown> })
+      .templateSettings!;
+    expect(autoInboxSettings.labelNewMail).toBe(true);
+    expect(autoInboxSettings.assistScheduling).toBe(true);
+    expect(autoInboxSettings.draftReplies).toBe(true);
+    expect(
+      (autoInboxSettings.labels as RoutineLabelRule[]).filter((label) => label.autoArchive).map((label) => label.name)
+    ).toEqual(["newsletters", "promotional", "updates"]);
+    expect((jobsByTemplate.get("morning-briefing") as { templateSettings?: unknown }).templateSettings).toEqual({
       personalizedNews: true
     });
-    expect((jobsByTemplate.get("meeting-briefing") as { templateOptions?: unknown }).templateOptions).toBeUndefined();
+    expect((jobsByTemplate.get("meeting-briefing") as { templateSettings?: unknown }).templateSettings).toBeUndefined();
 
     // The onboarding path provisions visible conversations only for
     // message-delivering routines. Auto-inbox gets a hidden working channel

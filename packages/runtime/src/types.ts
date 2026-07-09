@@ -2094,12 +2094,19 @@ export interface JobRecord {
   // per-template replace/remove on it. Optional — ordinary jobs carry no
   // templateId, so no state migration. See ADR routine-templates-gallery.md.
   templateId?: string;
-  // Resolved option state the template was installed with (template defaults
-  // merged with the caller's overrides), stamped by the catalog's buildSpec
-  // alongside templateId so the gallery's Settings view can render the
-  // current selection. Absent on ordinary jobs and on templates without
-  // options; optional, so no state migration.
+  // Legacy flat boolean option state from installs predating
+  // templateSettings. No longer stamped by the catalog's buildSpecs; kept
+  // readable so the gallery can normalize old installs through each
+  // template's legacySettings mapping (src/runtime/routine-templates.ts).
   templateOptions?: Record<string, boolean>;
+  // Resolved settings state the template was installed with (field defaults
+  // merged with the caller's overrides, validated by resolveSettings),
+  // stamped by the catalog's buildSpec alongside templateId so the gallery's
+  // Settings view can render the current configuration. Values are
+  // template-owned shapes (booleans, strings, label-rule lists). Absent on
+  // ordinary jobs and on templates without settings; optional, so no state
+  // migration.
+  templateSettings?: Record<string, unknown>;
   retryLimit: number;
   timeoutSeconds: number;
   costBudget?: number;

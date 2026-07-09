@@ -446,7 +446,9 @@ describe("web onboarding api", () => {
     expect(byName["Auto-inbox"].skillNames).toEqual(["google-gmail", "google-calendar"]);
     expect(byName["Auto-inbox"].status).toBe("active");
     expect(byName["Auto-inbox"].prompt).toContain("Label new mail");
-    expect(byName["Auto-inbox"].prompt).not.toContain("Archive clearly-unimportant");
+    // archiveUnimportant:false ⇒ no label line carries the (auto-archive)
+    // marker (the marker always follows the label name's closing quote).
+    expect(byName["Auto-inbox"].prompt).not.toContain('" (auto-archive)');
     expect(byName["Auto-inbox"].prompt).toContain("never sends email");
     expect(byName["Morning Briefing"].cronExpression).toBe("0 8 * * *");
     expect(byName["Morning Briefing"].skillNames).toEqual(["google-gmail", "google-calendar"]);

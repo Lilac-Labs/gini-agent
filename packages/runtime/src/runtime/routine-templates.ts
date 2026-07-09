@@ -22,12 +22,36 @@ import { mutateState, readState, setContainerArchived } from "../state";
 import { readOnboarding } from "../state/onboarding";
 import type { JobRecord, JobStatus, RuntimeConfig, RuntimeState } from "../types";
 
-export interface RoutineTemplateOption {
-  key: string;
-  label: string;
-  defaultEnabled: boolean;
-  description?: string;
+// One editable Gmail filtering label: the exact label name, a UI-only swatch
+// color (hex — never pushed to Gmail label colors), the natural-language
+// classification rule the prompt embeds, and whether mail filed under it is
+// archived out of the inbox.
+export interface RoutineLabelRule {
+  name: string;
+  color: string;
+  rule: string;
+  autoArchive: boolean;
 }
+
+// One editable field in a settings section, discriminated on `kind`.
+// `text` fields carry multiline textarea semantics.
+export type RoutineSettingField =
+  | { kind: "toggle"; key: string; label: string; description?: string; defaultValue: boolean }
+  | { kind: "text"; key: string; label: string; description?: string; placeholder?: string; defaultValue: string }
+  | { kind: "labelList"; key: string; label: string; description?: string; defaultValue: RoutineLabelRule[] };
+
+// A per-function settings group on a prebuilt routine ("Label new mail",
+// "Draft replies to important emails"), rendered as one collapsible card on
+// the detail page. Sections are presentation grouping only — field keys stay
+// flat across sections and must be unique template-wide.
+export interface RoutineSettingsSection {
+  key: string;
+  title: string;
+  fields: RoutineSettingField[];
+}
+
+// The resolved settings state, keyed by field key (flat across sections).
+export type RoutineSettings = Record<string, boolean | string | RoutineLabelRule[]>;
 
 export interface RoutineTemplate {
   id: string;
@@ -41,18 +65,48 @@ export interface RoutineTemplate {
   // hidden working thread so they can spawn surfaced child tasks without
   // creating a Messages conversation of their own.
   createsMessagesConversation: boolean;
-  options: RoutineTemplateOption[];
-  // Compose the createScheduledJob payload for the given option state.
-  // Templates with options stamp the resolved state as `templateOptions`
-  // (next to `templateId`) so the installed job records the selection it
+  settings: RoutineSettingsSection[];
+  // Map a legacy flat boolean option map — the pre-settings wire shape still
+  // sent by POST /api/onboarding/routines and persisted on older jobs as
+  // templateOptions — onto the settings model. Keys without a same-named
+  // settings field are consumed here (Auto-inbox's retired
+  // archiveUnimportant); absent, the option map is used as settings verbatim.
+  legacySettings?(options: Record<string, boolean>): RoutineSettings;
+  // Compose the createScheduledJob payload for the given resolved settings
+  // state. Templates with settings stamp the state as `templateSettings`
+  // (next to `templateId`) so the installed job records the configuration it
   // was built from. Returns undefined when the selection yields no behavior
-  // at all (an Auto-inbox with every sub-option off), mirroring the
+  // at all (an Auto-inbox with every function off), mirroring the
   // onboarding rule that such a selection creates no job.
-  buildSpec(options: Record<string, boolean>, timezone: string): Record<string, unknown> | undefined;
+  buildSpec(settings: RoutineSettings, timezone: string): Record<string, unknown> | undefined;
 }
 
+// The design's eight label swatch hexes, in default-label order. Doubles as
+// the fallback when a caller-supplied color isn't a #rrggbb hex (cycled by
+// list position) and as the web editor's palette for newly added labels.
+const LABEL_COLOR_PALETTE = ["#4277FB", "#12B5C4", "#F5820A", "#1FA463", "#EC6B9E", "#9B7DF0", "#7DA9FB", "#E8A317"];
+
+// The Auto-inbox starter label set (names, colors, and classification rules
+// from the GiniRoutineDetail design handoff). Every label starts with
+// auto-archive off — archiving is an explicit per-label opt-in.
+const AUTO_INBOX_DEFAULT_LABELS: RoutineLabelRule[] = [
+  { name: "new sender", color: "#4277FB", rule: "Direct emails from real people you haven't corresponded with before — potential leads, candidates, or business contacts worth reviewing", autoArchive: false },
+  { name: "awaiting reply", color: "#12B5C4", rule: "Threads where you were the last to respond and are waiting for a reply from someone else", autoArchive: false },
+  { name: "action needed", color: "#F5820A", rule: "Notifications requiring near-term action: contracts to sign, payments to process, waitlist updates, and time-sensitive status changes", autoArchive: false },
+  { name: "newsletters", color: "#1FA463", rule: "Subscribed content you opted into: recurring digests, blog updates, weekly roundups, and editorial newsletters", autoArchive: false },
+  { name: "promotional", color: "#EC6B9E", rule: "Unsolicited marketing emails, sales campaigns, brand promotions, discount offers, and commercial outreach you did not subscribe to", autoArchive: false },
+  { name: "orders", color: "#9B7DF0", rule: "Order confirmations, receipts, shipping and delivery notifications, package tracking, and carrier logistics updates (including inbound package alerts) from retailers or shipping carriers.", autoArchive: false },
+  { name: "travel", color: "#7DA9FB", rule: "Flight confirmations, hotel reservations, car rental bookings, itinerary updates, boarding passes, and travel alerts", autoArchive: false },
+  { name: "updates", color: "#E8A317", rule: "Routine informational updates about apps, services, or accounts (status notices, product updates, policy changes, and account activity) that are not purchase, shipping, travel, or action-needed messages", autoArchive: false }
+];
+
+// The retired archiveUnimportant boolean archived "promotions,
+// notifications"; the label model expresses that as auto-archive on these
+// default labels (legacySettings below).
+const LEGACY_AUTO_ARCHIVE_LABEL_NAMES = new Set(["newsletters", "promotional", "updates"]);
+
 // The starter catalog. Adding a template is one entry here — prompts and
-// crons are product-owned (never composed in the browser), and the option
+// crons are product-owned (never composed in the browser), and the field
 // defaults match the onboarding StepRoutines defaults.
 export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
   {
@@ -62,35 +116,131 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     icon: "inbox",
     scheduleHint: "Every 30 minutes",
     createsMessagesConversation: false,
-    options: [
-      { key: "labelNewMail", label: "Label new mail", defaultEnabled: true },
-      { key: "archiveUnimportant", label: "Archive unimportant emails", defaultEnabled: false },
-      { key: "assistScheduling", label: "Assist with scheduling", defaultEnabled: true },
-      { key: "draftReplies", label: "Draft replies to important emails", defaultEnabled: true }
+    settings: [
+      {
+        key: "labeling",
+        title: "Label new mail",
+        fields: [
+          {
+            kind: "toggle",
+            key: "labelNewMail",
+            label: "Label new mail",
+            description: "If off, Auto-inbox still analyzes new emails for reply and scheduling decisions, but it will not apply any labels.",
+            defaultValue: true
+          },
+          {
+            kind: "labelList",
+            key: "labels",
+            label: "Filtering labels",
+            description: "All label names and rules are editable.",
+            defaultValue: AUTO_INBOX_DEFAULT_LABELS
+          },
+          {
+            kind: "toggle",
+            key: "labelPrefix",
+            label: "Label prefix",
+            description: "Prefix labels with 'Gini/' so they appear as 'Gini/LabelName'.",
+            defaultValue: false
+          }
+        ]
+      },
+      {
+        key: "replies",
+        title: "Draft replies to important emails",
+        fields: [
+          {
+            kind: "toggle",
+            key: "draftReplies",
+            label: "Allow draft replies",
+            description: "If off, Auto-inbox will never draft email replies.",
+            defaultValue: true
+          },
+          {
+            kind: "text",
+            key: "draftRepliesScope",
+            label: "Only respond to these kinds of emails",
+            description: "Optional. Leave blank to handle any email that matches the routine's normal rules.",
+            placeholder: "e.g. Emails from real people about active work — never newsletters or automated notifications",
+            defaultValue: ""
+          }
+        ]
+      },
+      {
+        key: "scheduling",
+        title: "Assist with scheduling",
+        fields: [
+          {
+            kind: "toggle",
+            key: "assistScheduling",
+            label: "Draft scheduling responses",
+            description: "When someone asks to meet, draft a reply with proposed times based on your availability.",
+            defaultValue: true
+          },
+          {
+            kind: "text",
+            key: "schedulingRules",
+            label: "Scheduling rules & availability",
+            description: "Your availability rules and preferences for scheduling meetings.",
+            defaultValue: ""
+          }
+        ]
+      }
     ],
-    buildSpec: (options, timezone) => {
-      // The prompt is composed ONLY of the behaviors the user toggled on.
+    legacySettings: ({ archiveUnimportant, ...rest }) => ({
+      // labelNewMail / assistScheduling / draftReplies keep their keys (an
+      // unknown legacy key rides through so resolveSettings still rejects
+      // it); archiveUnimportant has no field of its own anymore — true means
+      // the default label set with auto-archive on the unimportant tiers.
+      ...rest,
+      ...(archiveUnimportant
+        ? {
+            labels: AUTO_INBOX_DEFAULT_LABELS.map((label) =>
+              LEGACY_AUTO_ARCHIVE_LABEL_NAMES.has(label.name) ? { ...label, autoArchive: true } : { ...label }
+            )
+          }
+        : {})
+    }),
+    buildSpec: (settings, timezone) => {
+      const labels = (Array.isArray(settings.labels) ? settings.labels : []) as RoutineLabelRule[];
+      const labelPrefix = settings.labelPrefix === true;
+      const draftRepliesScope = collapseWhitespace(typeof settings.draftRepliesScope === "string" ? settings.draftRepliesScope : "");
+      const schedulingRules = collapseWhitespace(typeof settings.schedulingRules === "string" ? settings.schedulingRules : "");
+      // The prompt is composed ONLY of the functions the user toggled on.
       const behaviors: string[] = [];
-      if (options.labelNewMail) {
-        behaviors.push("- Label new mail into sensible Gmail labels.");
+      if (settings.labelNewMail === true && labels.length > 0) {
+        behaviors.push(
+          [
+            "- Label new mail. Classify each new email into the single best-fitting label from this list, creating the Gmail label first when it doesn't exist yet:",
+            ...labels.map((label) => {
+              const name = labelPrefix ? `Gini/${label.name}` : label.name;
+              const rule = collapseWhitespace(label.rule);
+              return `  - "${name}"${label.autoArchive ? " (auto-archive)" : ""}${rule ? `: ${rule}` : ""}`;
+            }),
+            "  When no label fits, leave the email unlabeled — never invent labels outside this list.",
+            "  After labeling, archive (remove the INBOX label from) ONLY emails whose label is marked (auto-archive) above; every other email stays in the inbox."
+          ].join("\n")
+        );
       }
-      if (options.archiveUnimportant) {
-        behaviors.push("- Archive clearly-unimportant mail (promotions, notifications) — never anything personal or important.");
+      if (settings.assistScheduling === true) {
+        behaviors.push(
+          "- Detect scheduling requests. When a response is needed, spawn a surfaced child task to draft the scheduling reply." +
+            (schedulingRules ? ` The user's scheduling rules and availability: ${schedulingRules}` : "")
+        );
       }
-      if (options.assistScheduling) {
-        behaviors.push("- Detect scheduling requests. When a response is needed, spawn a surfaced child task to draft the scheduling reply.");
-      }
-      if (options.draftReplies) {
-        behaviors.push("- Detect important emails awaiting a response. For each one, spawn a surfaced child task to draft the reply.");
+      if (settings.draftReplies === true) {
+        behaviors.push(
+          "- Detect important emails awaiting a response. For each one, spawn a surfaced child task to draft the reply." +
+            (draftRepliesScope ? ` Only draft replies to these kinds of emails: ${draftRepliesScope}` : "")
+        );
       }
       if (behaviors.length === 0) return undefined;
       return {
         name: "Auto-inbox",
         templateId: "auto-inbox",
-        templateOptions: { ...options },
+        templateSettings: { ...settings },
         cronExpression: "*/30 * * * *",
         cronTimezone: timezone,
-        skillNames: options.assistScheduling ? ["google-gmail", "google-calendar"] : ["google-gmail"],
+        skillNames: settings.assistScheduling === true ? ["google-gmail", "google-calendar"] : ["google-gmail"],
         prompt: [
           "Tidy the user's Gmail inbox: work through mail that arrived since the last run.",
           ...behaviors,
@@ -110,17 +260,23 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     icon: "sunrise",
     scheduleHint: "Daily at 8:00 AM",
     createsMessagesConversation: true,
-    options: [{ key: "personalizedNews", label: "Personalized news topics", defaultEnabled: true }],
-    buildSpec: (options, timezone) => ({
+    settings: [
+      {
+        key: "content",
+        title: "Briefing content",
+        fields: [{ kind: "toggle", key: "personalizedNews", label: "Personalized news topics", defaultValue: true }]
+      }
+    ],
+    buildSpec: (settings, timezone) => ({
       name: "Morning Briefing",
       templateId: "morning-briefing",
-      templateOptions: { ...options },
+      templateSettings: { ...settings },
       cronExpression: "0 8 * * *",
       cronTimezone: timezone,
       skillNames: ["google-gmail", "google-calendar"],
       prompt: [
         "Prepare the user's morning briefing: a brief digest of important unread email plus today's calendar.",
-        ...(options.personalizedNews
+        ...(settings.personalizedNews === true
           ? ["Add a short section of news relevant to the user's work, using what you know about them from memory and their profile."]
           : [])
       ].join("\n")
@@ -133,8 +289,8 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     icon: "calendar-check",
     scheduleHint: "Every 15 minutes",
     createsMessagesConversation: true,
-    options: [],
-    buildSpec: (_options, timezone) => ({
+    settings: [],
+    buildSpec: (_settings, timezone) => ({
       name: "Meeting Briefing",
       templateId: "meeting-briefing",
       cronExpression: "*/15 * * * *",
@@ -162,8 +318,8 @@ export function routineTemplate(id: string): RoutineTemplate | undefined {
 // (the create_job tool's `createDedicatedSession` idiom). On a reinstall the
 // caller passes the replaced job's session instead: removeJob archived it
 // with the old job, so bind the new job to it and un-archive it
-// (idempotent, audited `chat.session.unarchived`) — option edits never churn
-// the conversation or its history. Bind BEFORE un-archiving: a live
+// (idempotent, audited `chat.session.unarchived`) — settings edits never
+// churn the conversation or its history. Bind BEFORE un-archiving: a live
 // job-origin channel with no referencing job violates the invariant
 // archiveOrphanJobChannels (state/store.ts) sweeps on every state load, so a
 // channel un-archived first would be re-archived from under the install.
@@ -201,9 +357,9 @@ export function reusableRoutineSessionId(state: RuntimeState, job: JobRecord): s
 
 // The gallery's wire shape: the template presentation fields plus the live
 // installed state — the job carrying this templateId (scoped to `agentId`
-// when supplied, like GET /api/jobs). `installed.options` is the resolved
-// option state the job was installed with (absent on templates without
-// options and on jobs predating templateOptions); `installed.chatSessionId`
+// when supplied, like GET /api/jobs). `installed.settings` is the resolved
+// settings state the job was installed with (absent on templates without
+// settings and on jobs predating provenance); `installed.chatSessionId`
 // is the routine's conversation when this template delivers to Messages
 // (absent for Auto-inbox and on jobs predating session provisioning) so the
 // detail page can deep-link Open messages where applicable.
@@ -213,8 +369,8 @@ export interface RoutineTemplateView {
   description: string;
   icon: string;
   scheduleHint: string;
-  options: RoutineTemplateOption[];
-  installed: { jobId: string; status: JobStatus; options?: Record<string, boolean>; chatSessionId?: string } | null;
+  settings: RoutineSettingsSection[];
+  installed: { jobId: string; status: JobStatus; settings?: RoutineSettings; chatSessionId?: string } | null;
 }
 
 // GET /api/routines/templates
@@ -229,12 +385,12 @@ export function listRoutineTemplates(config: RuntimeConfig, agentId?: string): {
         description: template.description,
         icon: template.icon,
         scheduleHint: template.scheduleHint,
-        options: template.options,
+        settings: template.settings,
         installed: job
           ? {
               jobId: job.id,
               status: job.status,
-              options: job.templateOptions,
+              settings: installedSettings(template, job),
               ...(template.createsMessagesConversation ? { chatSessionId: job.chatSessionId } : {})
             }
           : null
@@ -243,8 +399,26 @@ export function listRoutineTemplates(config: RuntimeConfig, agentId?: string): {
   };
 }
 
-// POST /api/routines/templates/<id>/install body: { timezone?, options? }.
-// Missing option keys fall back to the template defaults. Idempotent
+// The settings state an installed job renders in the Settings tab: the job's
+// persisted templateSettings when stamped, else its legacy templateOptions
+// mapped through the template's legacySettings hook (identity when none) —
+// each filled with the catalog defaults so the tab always sees a complete
+// state. Absent both stamps (templates without settings, jobs predating
+// provenance) → undefined.
+function installedSettings(template: RoutineTemplate, job: JobRecord): RoutineSettings | undefined {
+  const raw =
+    job.templateSettings ??
+    (job.templateOptions !== undefined
+      ? (template.legacySettings?.(job.templateOptions) ?? job.templateOptions)
+      : undefined);
+  if (raw === undefined) return undefined;
+  return fillSettingsDefaults(template, raw as Record<string, unknown>);
+}
+
+// POST /api/routines/templates/<id>/install body: { timezone?, settings?,
+// options? }. Missing setting keys fall back to the template defaults; the
+// legacy flat boolean `options` map is still accepted (mapped through
+// legacySettings) so pre-settings clients keep working. Idempotent
 // per-template replace: any job the OWNING AGENT already has carrying this
 // templateId is deleted, then one fresh job is created — the same
 // createScheduledJob call POST /api/jobs makes. The owning agent is resolved
@@ -264,8 +438,13 @@ export async function installRoutineTemplate(
     payload.timezone !== undefined
       ? validateTimezone(payload.timezone)
       : (readOnboarding(config.instance)?.timezone ?? "UTC");
-  const options = resolveOptions(template, payload.options);
-  const spec = template.buildSpec(options, timezone);
+  const settings = resolveSettings(
+    template,
+    payload.settings !== undefined && payload.settings !== null
+      ? payload.settings
+      : legacyOptionsToSettings(template, payload.options)
+  );
+  const spec = template.buildSpec(settings, timezone);
   if (!spec) {
     throw new Error(`Invalid input: enable at least one ${template.name} option`);
   }
@@ -318,28 +497,141 @@ export async function uninstallRoutineTemplate(
   return { removed };
 }
 
-// Validate the caller's option state against the template (unknown keys and
-// non-boolean values are payload mistakes) and fill missing keys from the
-// template defaults.
-function resolveOptions(template: RoutineTemplate, raw: unknown): Record<string, boolean> {
+// Validate the caller's settings state against the template's fields
+// (unknown keys and wrong-kind values are payload mistakes) and fill missing
+// keys from the field defaults. Values are canonicalized on the way in —
+// text and label names/rules trimmed, label colors falling back to the
+// palette — so what buildSpec composes from and what templateSettings
+// persists is always the normalized shape.
+export function resolveSettings(template: RoutineTemplate, raw: unknown): RoutineSettings {
   if (raw !== undefined && raw !== null && (typeof raw !== "object" || Array.isArray(raw))) {
-    throw new Error("Invalid input: options must be an object of booleans");
+    throw new Error("Invalid input: settings must be an object");
   }
   const supplied = (raw ?? {}) as Record<string, unknown>;
-  const known = new Set(template.options.map((option) => option.key));
-  for (const [key, value] of Object.entries(supplied)) {
+  const fields = settingFields(template);
+  const known = new Set(fields.map((field) => field.key));
+  for (const key of Object.keys(supplied)) {
     if (!known.has(key)) {
-      throw new Error(`Invalid input: unknown option "${key}" for template "${template.id}"`);
+      throw new Error(`Invalid input: unknown setting "${key}" for template "${template.id}"`);
     }
+  }
+  const resolved: RoutineSettings = {};
+  for (const field of fields) {
+    const value = supplied[field.key];
+    resolved[field.key] = value === undefined ? defaultSettingValue(field) : resolveSettingValue(field, value);
+  }
+  return resolved;
+}
+
+// Map a legacy flat boolean option map (the pre-settings install body and
+// the onboarding routines body) onto the settings model, via the template's
+// legacySettings hook when it has one. Returns undefined when no options
+// were supplied so resolveSettings falls back to the field defaults.
+export function legacyOptionsToSettings(template: RoutineTemplate, raw: unknown): unknown {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("Invalid input: options must be an object of booleans");
+  }
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (typeof value !== "boolean") {
       throw new Error(`Invalid input: option "${key}" must be a boolean (got ${String(value)})`);
     }
   }
-  const resolved: Record<string, boolean> = {};
-  for (const option of template.options) {
-    resolved[option.key] = (supplied[option.key] as boolean | undefined) ?? option.defaultEnabled;
+  const options = raw as Record<string, boolean>;
+  return template.legacySettings ? template.legacySettings(options) : options;
+}
+
+const MAX_LABELS = 24;
+const MAX_LABEL_NAME_CHARS = 60;
+const MAX_LABEL_RULE_CHARS = 500;
+const MAX_TEXT_CHARS = 2000;
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+
+function resolveSettingValue(field: RoutineSettingField, value: unknown): RoutineSettings[string] {
+  switch (field.kind) {
+    case "toggle":
+      if (typeof value !== "boolean") {
+        throw new Error(`Invalid input: setting "${field.key}" must be a boolean (got ${String(value)})`);
+      }
+      return value;
+    case "text": {
+      if (typeof value !== "string") {
+        throw new Error(`Invalid input: setting "${field.key}" must be a string`);
+      }
+      const text = value.trim();
+      if (text.length > MAX_TEXT_CHARS) {
+        throw new Error(`Invalid input: setting "${field.key}" must be at most ${MAX_TEXT_CHARS} characters`);
+      }
+      return text;
+    }
+    case "labelList": {
+      if (!Array.isArray(value)) {
+        throw new Error(`Invalid input: setting "${field.key}" must be an array of labels`);
+      }
+      if (value.length > MAX_LABELS) {
+        throw new Error(`Invalid input: setting "${field.key}" allows at most ${MAX_LABELS} labels`);
+      }
+      return value.map((entry, index) => resolveLabelRule(field.key, entry, index));
+    }
+  }
+}
+
+function resolveLabelRule(key: string, entry: unknown, index: number): RoutineLabelRule {
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+    throw new Error(`Invalid input: setting "${key}" labels must be objects`);
+  }
+  const raw = entry as Record<string, unknown>;
+  const name = typeof raw.name === "string" ? raw.name.trim() : "";
+  if (name.length === 0 || name.length > MAX_LABEL_NAME_CHARS) {
+    throw new Error(`Invalid input: setting "${key}" label names must be non-empty strings of at most ${MAX_LABEL_NAME_CHARS} characters`);
+  }
+  if (raw.rule !== undefined && typeof raw.rule !== "string") {
+    throw new Error(`Invalid input: setting "${key}" label rules must be strings`);
+  }
+  const rule = typeof raw.rule === "string" ? raw.rule.trim() : "";
+  if (rule.length > MAX_LABEL_RULE_CHARS) {
+    throw new Error(`Invalid input: setting "${key}" label rules must be at most ${MAX_LABEL_RULE_CHARS} characters`);
+  }
+  if (raw.autoArchive !== undefined && typeof raw.autoArchive !== "boolean") {
+    throw new Error(`Invalid input: setting "${key}" label autoArchive must be a boolean`);
+  }
+  // The color is UI presentation only (never pushed to Gmail), so a missing
+  // or malformed hex falls back to the palette by position instead of
+  // failing the install.
+  const color = typeof raw.color === "string" && HEX_COLOR.test(raw.color) ? raw.color : LABEL_COLOR_PALETTE[index % LABEL_COLOR_PALETTE.length]!;
+  return { name, color, rule, autoArchive: raw.autoArchive === true };
+}
+
+// Fill missing field keys from the catalog defaults WITHOUT re-validating
+// present values: templateSettings passed resolveSettings when it was
+// stamped and legacySettings output is code-built, so this path only
+// completes the shape for jobs installed before a field existed. Keys with
+// no catalog field (a retired option riding in legacy templateOptions) are
+// dropped by construction — only catalog fields are read.
+function fillSettingsDefaults(template: RoutineTemplate, supplied: Record<string, unknown>): RoutineSettings {
+  const resolved: RoutineSettings = {};
+  for (const field of settingFields(template)) {
+    const value = supplied[field.key];
+    resolved[field.key] = value === undefined ? defaultSettingValue(field) : (value as RoutineSettings[string]);
   }
   return resolved;
+}
+
+function settingFields(template: RoutineTemplate): RoutineSettingField[] {
+  return template.settings.flatMap((section) => section.fields);
+}
+
+// labelList defaults are cloned per resolution so a caller mutating the
+// resolved state can never alias-mutate the catalog constants.
+function defaultSettingValue(field: RoutineSettingField): RoutineSettings[string] {
+  return field.kind === "labelList" ? field.defaultValue.map((label) => ({ ...label })) : field.defaultValue;
+}
+
+// Rule and free-text fragments embed into single prompt lines — collapse
+// user-entered newlines/runs of whitespace so one field can't visually forge
+// additional prompt bullets.
+function collapseWhitespace(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 // Probe-validate an IANA timezone by constructing a formatter with it — Intl

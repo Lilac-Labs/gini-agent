@@ -424,6 +424,19 @@ export async function createScheduledJob(
     }
     templateOptions = { ...(input.templateOptions as Record<string, boolean>) };
   }
+  // Resolved routine-template settings (JobRecord.templateSettings): the
+  // settings state buildSpec composed the spec from, stamped next to
+  // templateId so the gallery's Settings view can render the installed
+  // configuration. Values are template-owned shapes (booleans, strings,
+  // label-rule lists) validated per-field by resolveSettings upstream; here
+  // only the container shape is checked.
+  let templateSettings: Record<string, unknown> | undefined;
+  if (input.templateSettings !== undefined && input.templateSettings !== null) {
+    if (typeof input.templateSettings !== "object" || Array.isArray(input.templateSettings)) {
+      throw new Error("Invalid input: templateSettings must be a plain object");
+    }
+    templateSettings = { ...(input.templateSettings as Record<string, unknown>) };
+  }
   // A parent task that has already transitioned terminal must not
   // create a durable scheduled job. Without this, a `cancelTask`
   // queued between the dispatcher's lock-free pre-check and our
@@ -528,6 +541,7 @@ export async function createScheduledJob(
       skillNames,
       templateId,
       templateOptions,
+      templateSettings,
       retryLimit,
       timeoutSeconds,
       costBudget: typeof input.costBudget === "number" ? input.costBudget : undefined,

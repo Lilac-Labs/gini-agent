@@ -14,11 +14,23 @@ a shared **routine-template catalog** in the runtime
 The catalog is a typed array in code — deliberately *not* a marketplace, a
 disk loader, or a user-authored template system. Each `RoutineTemplate`
 carries the presentation fields the gallery renders (`name`, `description`,
-`icon` key, `scheduleHint`, sub-`options` with defaults) and a `buildSpec`
-that composes the `createScheduledJob` payload (prompt, cron, skills)
-server-side. Prompts and cron expressions are product-owned in the catalog
-and never composed in the browser — the client only sends toggle state.
-Adding a template is one catalog entry.
+`icon` key, `scheduleHint`) plus **per-function settings sections**
+(`settings: RoutineSettingsSection[]` — one collapsible group per routine
+function, e.g. Auto-inbox's "Label new mail" / "Draft replies to important
+emails" / "Assist with scheduling") and a `buildSpec` that composes the
+`createScheduledJob` payload (prompt, cron, skills) server-side from the
+resolved settings state. Each section holds typed fields discriminated on
+`kind` — `toggle` (boolean), `text` (multiline string, e.g. a draft-replies
+scope or scheduling rules), and `labelList` (editable Gmail filtering labels:
+name, UI-only swatch color, classification rule, per-label auto-archive) —
+each with a catalog default. Field keys are flat across sections (sections
+are presentation grouping only), and the resolved state
+(`RoutineSettings`, keyed by field key) is validated server-side by
+`resolveSettings` (unknown keys rejected; per-kind shape checks; label list
+capped with trimmed names/rules and palette-fallback colors). Prompts and
+cron expressions stay product-owned in the catalog and are never composed in
+the browser — the client only sends settings state. Adding a template is one
+catalog entry.
 
 Two callers share the catalog:
 
@@ -30,8 +42,8 @@ Two callers share the catalog:
 
 | Endpoint | Behavior |
 | --- | --- |
-| `GET /api/routines/templates` | The catalog joined with installed state — the live job carrying each `templateId`, scoped by `?agentId=` like `GET /api/jobs`. `installed.options` carries the job's persisted `templateOptions` (absent on templates without options and on jobs predating the field). |
-| `POST /api/routines/templates/<id>/install` | Body `{ timezone?, options? }`. Missing option keys fall back to the template defaults; timezone precedence is payload > onboarding record > UTC. Idempotent per-template replace scoped to the active agent: skills are pre-validated (`assertSkillNamesResolve`, a clean 400 with zero side effects), then the owning agent's job with this `templateId` is deleted and one fresh job created via `createScheduledJob` — the same call `POST /api/jobs` makes. The owning agent is resolved server-side (never caller-supplied), the same way `createScheduledJob` stamps `agentId`. Returns the `JobRecord`. |
+| `GET /api/routines/templates` | The catalog joined with installed state — the live job carrying each `templateId`, scoped by `?agentId=` like `GET /api/jobs`. `installed.settings` carries the job's resolved settings state: the persisted `templateSettings` when stamped, else the legacy `templateOptions` mapped through the template's `legacySettings` hook, each filled with the catalog defaults (absent on templates without settings and on jobs predating provenance). |
+| `POST /api/routines/templates/<id>/install` | Body `{ timezone?, settings?, options? }`. Missing setting keys fall back to the template defaults; the legacy flat boolean `options` map is still accepted and mapped through `legacySettings`; timezone precedence is payload > onboarding record > UTC. Idempotent per-template replace scoped to the active agent: skills are pre-validated (`assertSkillNamesResolve`, a clean 400 with zero side effects), then the owning agent's job with this `templateId` is deleted and one fresh job created via `createScheduledJob` — the same call `POST /api/jobs` makes. The owning agent is resolved server-side (never caller-supplied), the same way `createScheduledJob` stamps `agentId`. Returns the `JobRecord`. |
 | `DELETE /api/routines/templates/<id>` | Removes the active agent's installed job(s) with this `templateId` (same server-side agent resolution as install); 404 when that agent has none. For message-delivering routines, `removeJob` archives the routine's conversation with the job — it leaves the Messages list, its history stays addressable by id. |
 
 ### Delivery: visible routines own conversations when they produce chat output
@@ -51,7 +63,7 @@ through the shared `createRoutineJob` helper when the template sets
 - a **reinstall** (the detail page's Settings save, or an onboarding
   re-apply over a gallery install) captures the replaced job's live channel
   before the replace pass, un-archives it (`removeJob` archived it with the
-  old job) and binds the new job to it via `chatSessionId` — option edits
+  old job) and binds the new job to it via `chatSessionId` — settings edits
   never churn the conversation or its history.
 
 Auto-inbox is the exception: it sets `createsMessagesConversation: false`,
@@ -74,13 +86,20 @@ message-delivering routine's conversation is visible without a deep link.
 Installed jobs link back to their template through an optional
 `JobRecord.templateId`, stamped by `buildSpec` on both the gallery and
 onboarding paths and threaded through `createScheduledJob` like any other
-create-payload field. Templates with options also stamp the resolved option
-state as `JobRecord.templateOptions` (defaults merged with the caller's
-overrides) so the detail page's Settings view can render the installed
-selection. Both fields are optional, so no state migration; ordinary jobs
-never carry them. A selection that yields no behavior (an Auto-inbox with
-every sub-option off) builds no spec — the onboarding path skips it, the
-install endpoint rejects it with a 400.
+create-payload field. Templates with settings also stamp the resolved
+settings state as `JobRecord.templateSettings` (defaults merged with the
+caller's overrides, validated by `resolveSettings`) so the detail page's
+Settings view can render the installed configuration. The pre-settings
+`JobRecord.templateOptions` boolean map is no longer stamped but stays
+readable: each template's optional `legacySettings` hook maps it onto the
+settings model (Auto-inbox translates the retired `archiveUnimportant`
+boolean into per-label auto-archive on the unimportant default labels), and
+`POST /api/onboarding/routines` — whose flat-boolean body contract is
+unchanged — routes through the same mapping before `buildSpec`. All these
+fields are optional, so no state migration; ordinary jobs never carry them.
+A selection that yields no behavior (an Auto-inbox with every function off)
+builds no spec — the onboarding path skips it, the install endpoint rejects
+it with a 400.
 
 The web gallery (`packages/web/src/app/routines/page.tsx`, linked from the
 sidebar) renders a card per template — icon, name, description — with a
@@ -90,9 +109,12 @@ installed card opens the detail page
 (`packages/web/src/app/routines/[templateId]/page.tsx`): pause/resume and
 Run Now proxy the job endpoints (`POST /api/jobs/<id>/{pause,resume,run}`),
 Open messages deep-links the routine's conversation when one exists,
-Recent sessions lists the job's run history, Settings edits the template
-options and saves by re-installing (the idempotent per-template replace —
-the jobId changes), and Delete routine uninstalls. Errors surface as toasts;
+Recent sessions lists the job's run history, Settings renders the template's
+settings sections (toggle rows, text fields, and the filtering-label editor
+— per-label name/rule/auto-archive edits, add and remove) and saves by
+re-installing with the full settings state (the idempotent per-template
+replace — the jobId changes), and Delete routine uninstalls. Errors surface
+as toasts;
 the install endpoint's skill-resolve 400 is the connector-readiness signal
 (no pre-flight on the card).
 
@@ -143,7 +165,7 @@ label, the calendar views, `EditJobDialog`) live in
   or delete them in /routines, and the job scheduler/channel provisioning
   are inherited unchanged from `createScheduledJob`.
 - Because install is a per-template replace keyed on `templateId` and the
-  owning agent (like the delete), re-installing with different options never
+  owning agent (like the delete), re-installing with different settings never
   duplicates a routine — but it re-creates the job, so run history on the
   replaced job is dropped with it (message-delivering routines' conversation
   and message history survive the replace). Each agent can hold its own

@@ -184,9 +184,9 @@ function RoutineDetail({ template }: { template: RoutineTemplateView }) {
                 Run Now
               </button>
               {installed.chatSessionId ? (
-                // The routine's dedicated conversation — where each run's
-                // briefing lands (same idiom as the watcher detail's Open
-                // channel). Absent only on installs predating provisioning.
+                // The routine's dedicated conversation when the template
+                // delivers into Messages (same idiom as the watcher detail's
+                // Open channel).
                 <button
                   type="button"
                   onClick={() => router.push(`/chat?session=${encodeURIComponent(installed.chatSessionId!)}`)}

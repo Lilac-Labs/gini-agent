@@ -969,6 +969,60 @@ function migrateJobsDeliveryPolicyDefaulted(state: RuntimeState): void {
   dyn.migrations = { ...(dyn.migrations ?? {}), jobsDeliveryPolicyDefaulted: now() };
 }
 
+// Auto-inbox used to be installable as a normal message-delivering routine.
+// Existing installs must be repaired on read so the watcher stays headless and
+// only its spawned draft tasks surface on Home.
+function migrateAutoInboxJobsToSilentDelivery(state: RuntimeState): void {
+  let repaired = 0;
+  let mintedChannels = 0;
+  const at = now();
+  for (const job of state.jobs) {
+    if (job.templateId !== "auto-inbox") continue;
+    let mutated = false;
+    if (job.deliveryPolicy !== "silent") {
+      job.deliveryPolicy = "silent";
+      mutated = true;
+    }
+
+    let session = job.chatSessionId
+      ? state.chatSessions.find((candidate) => candidate.id === job.chatSessionId)
+      : undefined;
+    if (!session || session.kind !== "channel") {
+      session = createChatSession(state, job.name || "Auto-inbox", undefined, job.agentId, "job", "channel");
+      job.chatSessionId = session.id;
+      mintedChannels += 1;
+      mutated = true;
+    }
+
+    if (session.headless !== true) {
+      session.headless = true;
+      mutated = true;
+    }
+    if (session.archivedAt !== undefined) {
+      delete session.archivedAt;
+      mutated = true;
+    }
+    if (mutated) {
+      job.updatedAt = at;
+      session.updatedAt = at;
+      repaired += 1;
+    }
+  }
+  if (repaired > 0) {
+    addAudit(
+      state,
+      {
+        actor: "runtime",
+        action: "auto-inbox.silent-delivery.migrated",
+        target: state.instance,
+        risk: "low",
+        evidence: { repaired, mintedChannels }
+      },
+      { system: true }
+    );
+  }
+}
+
 // Backfill `pinned: true` on existing non-archived Topics. The sidebar's
 // topics section moves from a kind-based filter (`kind === "topic"`) to a
 // pinned-based one (`pinned === true`) — without this one-time backfill,
@@ -1503,6 +1557,7 @@ export function normalizeState(instance: Instance, state: RuntimeState): Runtime
   migrateJobsToTopics(state);
   // Default deliveryPolicy on jobs that predate the field. Marker-gated.
   migrateJobsDeliveryPolicyDefaulted(state);
+  migrateAutoInboxJobsToSilentDelivery(state);
   // Archive job channels orphaned by a pre-cleanup job deletion (issue #369).
   // Runs after the channel-kind backfill above so a legacy `origin:"job"`
   // session that just gained `kind:"channel"` is in scope, and after

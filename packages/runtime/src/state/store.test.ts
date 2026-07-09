@@ -1434,4 +1434,57 @@ describe("normalizeState job deliveryPolicy migration", () => {
     normalizeState("mig-jobs-delivery-policy-gated", state);
     expect(fresh.deliveryPolicy).toBeUndefined();
   });
+
+  test("auto-inbox legacy jobs are repaired to silent delivery with a hidden channel", () => {
+    const state = createEmptyState("mig-auto-inbox-silent");
+    const at = new Date().toISOString();
+    const job = createJob(state, {
+      name: "Auto-inbox",
+      prompt: "p",
+      nextRunAt: at,
+      templateId: "auto-inbox",
+      deliveryPolicy: "always"
+    });
+
+    normalizeState(state.instance, state);
+
+    expect(job.deliveryPolicy).toBe("silent");
+    expect(job.chatSessionId).toBeString();
+    const session = state.chatSessions.find((candidate) => candidate.id === job.chatSessionId);
+    expect(session).toMatchObject({
+      title: "Auto-inbox",
+      kind: "channel",
+      origin: "job",
+      headless: true,
+      agentId: "agent_default"
+    });
+    expect(session?.archivedAt).toBeUndefined();
+    expect(
+      state.audit.some((event) => event.action === "auto-inbox.silent-delivery.migrated" && event.evidence?.mintedChannels === 1)
+    ).toBe(true);
+
+    const sessionCount = state.chatSessions.length;
+    normalizeState(state.instance, state);
+    expect(state.chatSessions.length).toBe(sessionCount);
+  });
+
+  test("auto-inbox jobs with an existing visible channel keep the channel but hide it", () => {
+    const state = createEmptyState("mig-auto-inbox-existing-channel");
+    const at = new Date().toISOString();
+    const session = createChatSession(state, "Auto-inbox", undefined, "agent_default", "job", "channel");
+    const job = createJob(state, {
+      name: "Auto-inbox",
+      prompt: "p",
+      nextRunAt: at,
+      templateId: "auto-inbox",
+      chatSessionId: session.id
+    });
+
+    normalizeState(state.instance, state);
+
+    expect(job.deliveryPolicy).toBe("silent");
+    expect(job.chatSessionId).toBe(session.id);
+    expect(state.chatSessions.find((candidate) => candidate.id === session.id)?.headless).toBe(true);
+    expect(state.chatSessions.filter((candidate) => candidate.title === "Auto-inbox")).toHaveLength(1);
+  });
 });

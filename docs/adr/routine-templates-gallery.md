@@ -32,17 +32,18 @@ Two callers share the catalog:
 | --- | --- |
 | `GET /api/routines/templates` | The catalog joined with installed state — the live job carrying each `templateId`, scoped by `?agentId=` like `GET /api/jobs`. `installed.options` carries the job's persisted `templateOptions` (absent on templates without options and on jobs predating the field). |
 | `POST /api/routines/templates/<id>/install` | Body `{ timezone?, options? }`. Missing option keys fall back to the template defaults; timezone precedence is payload > onboarding record > UTC. Idempotent per-template replace scoped to the active agent: skills are pre-validated (`assertSkillNamesResolve`, a clean 400 with zero side effects), then the owning agent's job with this `templateId` is deleted and one fresh job created via `createScheduledJob` — the same call `POST /api/jobs` makes. The owning agent is resolved server-side (never caller-supplied), the same way `createScheduledJob` stamps `agentId`. Returns the `JobRecord`. |
-| `DELETE /api/routines/templates/<id>` | Removes the active agent's installed job(s) with this `templateId` (same server-side agent resolution as install); 404 when that agent has none. `removeJob` archives the routine's conversation with the job — it leaves the Messages list, its history stays addressable by id. |
+| `DELETE /api/routines/templates/<id>` | Removes the active agent's installed job(s) with this `templateId` (same server-side agent resolution as install); 404 when that agent has none. For message-delivering routines, `removeJob` archives the routine's conversation with the job — it leaves the Messages list, its history stays addressable by id. |
 
-### Delivery: every routine owns a conversation
+### Delivery: visible routines own conversations when they produce chat output
 
-An installed routine's delivery surface is its own **dedicated channel
-session titled after the routine** ("Morning Briefing" in the Messages
-list), never a forward into the main agent Chat — the templates set no
-`forwardToChat`, and each fire's final answer lands in the routine's
-conversation through the ordinary jobs delivery path
+An installed routine that produces chat-visible output uses its own
+**dedicated channel session titled after the routine** ("Morning Briefing"
+in the Messages list), never a forward into the main agent Chat — the
+templates set no `forwardToChat`, and each fire's final answer lands in the
+routine's conversation through the ordinary jobs delivery path
 (`dispatchPromptRun` / `finalizeJobRunFromTask`). Both writers provision it
-through the shared `createRoutineJob` helper:
+through the shared `createRoutineJob` helper when the template sets
+`createsMessagesConversation: true`:
 
 - a **fresh install** passes `createDedicatedSession: { title }` (the
   `create_job` tool's idiom), so `createScheduledJob` mints the channel
@@ -53,13 +54,22 @@ through the shared `createRoutineJob` helper:
   old job) and binds the new job to it via `chatSessionId` — option edits
   never churn the conversation or its history.
 
+Auto-inbox is the exception: it sets `createsMessagesConversation: false`,
+so installing it creates a scheduled job with an internal headless working
+channel, not a visible Messages conversation. The hidden channel gives the
+Auto-inbox run a parent container so it can call `spawn_task` for
+draft-worthy emails; those child tasks set `surface:true` and appear on Home
+for review. Labeling and archiving stay inside the Auto-inbox run and need no
+user-facing delivery.
+
 `GET /api/routines/templates` exposes the session as
-`installed.chatSessionId` (absent only on installs predating provisioning),
-which the detail page's Open messages action deep-links as
-`/chat?session=<id>`. The web sidebar's Messages section lists live job
-delivery channels (`kind:"channel"` + `origin:"job"`, not headless, no
-feature owner like email-watch) alongside the user's own conversations, so
-an installed routine's conversation is visible without a deep link.
+`installed.chatSessionId` only for visible delivery conversations (absent
+for Auto-inbox and on installs predating provisioning), which the detail
+page's Open messages action deep-links as `/chat?session=<id>`. The web
+sidebar's Messages section lists live job delivery channels
+(`kind:"channel"` + `origin:"job"`, not headless, no feature owner like
+email-watch) alongside the user's own conversations, so an installed
+message-delivering routine's conversation is visible without a deep link.
 
 Installed jobs link back to their template through an optional
 `JobRecord.templateId`, stamped by `buildSpec` on both the gallery and
@@ -79,7 +89,7 @@ one-click Add that installs the catalog defaults, split into My routines
 installed card opens the detail page
 (`packages/web/src/app/routines/[templateId]/page.tsx`): pause/resume and
 Run Now proxy the job endpoints (`POST /api/jobs/<id>/{pause,resume,run}`),
-Open messages deep-links the routine's conversation,
+Open messages deep-links the routine's conversation when one exists,
 Recent sessions lists the job's run history, Settings edits the template
 options and saves by re-installing (the idempotent per-template replace —
 the jobId changes), and Delete routine uninstalls. Errors surface as toasts;
@@ -127,9 +137,10 @@ label, the calendar views, `EditJobDialog`) live in
 - Because install is a per-template replace keyed on `templateId` and the
   owning agent (like the delete), re-installing with different options never
   duplicates a routine — but it re-creates the job, so run history on the
-  replaced job is dropped with it (the routine's conversation and its
-  message history survive the replace). Each agent can hold its own install
-  of the same template; one agent's install/remove never touches another's.
+  replaced job is dropped with it (message-delivering routines' conversation
+  and message history survive the replace). Each agent can hold its own
+  install of the same template; one agent's install/remove never touches
+  another's.
 - A gallery install or Remove leaves a stale id in the onboarding record's
   `routineJobIds`. The onboarding replace pass ignores ids that no longer
   exist AND additionally deletes the owning agent's live jobs carrying a

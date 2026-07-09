@@ -11,9 +11,11 @@
 //     template → 404
 //   - install persists the resolved options (defaults merged with overrides)
 //     as templateOptions, and GET exposes them as installed.options
-//   - install provisions a channel session titled after the routine (the
-//     job's delivery surface); reinstall carries the same session forward;
-//     uninstall archives it with the job
+//   - install provisions a channel session titled after message-delivering
+//     routines; reinstall carries the same session forward; uninstall
+//     archives it with the job; Auto-inbox gets only a hidden working
+//     channel so it can spawn surfaced child tasks while staying out of
+//     Messages
 //   - uninstall: removes the installed job, 404 when nothing is installed
 //   - install/uninstall are agent-scoped: one agent's install never touches
 //     another agent's job for the same template
@@ -77,8 +79,12 @@ describe("routine templates", () => {
       [
         "Tidy the user's Gmail inbox: work through mail that arrived since the last run.",
         "- Label new mail into sensible Gmail labels.",
-        "- Detect scheduling requests and propose times based on the user's calendar.",
-        "- Draft (never send) replies to important emails awaiting a response.",
+        "- Detect scheduling requests. When a response is needed, spawn a surfaced child task to draft the scheduling reply.",
+        "- Detect important emails awaiting a response. For each one, spawn a surfaced child task to draft the reply.",
+        "Silent behaviors: labeling and archiving happen directly in this Auto-inbox run and need no user-facing delivery.",
+        "Draft-producing behaviors: do NOT save draft replies in this Auto-inbox run. For every email that needs a reply or scheduling response, call spawn_task with surface:true and await:\"none\" so the user sees a Home task. Use one task per email thread/message, with a stable correlation_key like `auto-inbox:<account>:<message-or-thread-id>` so later runs do not duplicate it.",
+        "Each spawned task brief must be self-contained: include the exact Gmail account, message id and thread id when known, sender, subject, relevant body/snippet, why a response is needed, and any scheduling constraints/calendar context already discovered.",
+        "The spawned task's goal is to save a Gmail draft and render it as an `email-draft` card with DraftId and Account so the user can review, iterate, and send from the card. If the draft proposes a specific meeting time, the child task must also render the calendar preview required by the google-gmail skill.",
         "Gini never sends email or messages without the user's review — save drafts only, never send."
       ].join("\n")
     );
@@ -178,9 +184,17 @@ describe("routine templates", () => {
     expect(first.skillNames).toEqual(["google-gmail", "google-calendar"]);
     expect(first.prompt).toContain("- Label new mail");
     expect(first.prompt).not.toContain("- Archive clearly-unimportant mail");
+    expect(first.prompt).toContain("spawn_task with surface:true");
+    expect(first.prompt).toContain("email-draft");
+    expect(first.deliveryPolicy).toBe("silent");
+    expect(typeof first.chatSessionId).toBe("string");
+    const firstSession = readState(config.instance).chatSessions.find((s) => s.id === first.chatSessionId);
+    expect(firstSession?.title).toBe("Auto-inbox");
+    expect(firstSession?.headless).toBe(true);
 
     // Re-install with explicit options: the previous job is replaced, not
-    // duplicated, and the prompt tracks the new selection.
+    // duplicated, the prompt tracks the new selection, and Auto-inbox reuses
+    // its hidden working channel instead of creating a Messages conversation.
     const second = await call(handler, config, "/api/routines/templates/auto-inbox/install", {
       method: "POST",
       body: JSON.stringify({
@@ -192,6 +206,12 @@ describe("routine templates", () => {
     expect(second.skillNames).toEqual(["google-gmail"]);
     expect(second.prompt).toContain("- Archive clearly-unimportant mail");
     expect(second.prompt).not.toContain("- Label new mail");
+    expect(second.deliveryPolicy).toBe("silent");
+    expect(second.chatSessionId).toBe(first.chatSessionId);
+    const sessions = readState(config.instance).chatSessions.filter((s) => s.title === "Auto-inbox");
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.headless).toBe(true);
+    expect(sessions[0]?.archivedAt).toBeUndefined();
     const jobs = readState(config.instance).jobs.filter((j) => j.templateId === "auto-inbox");
     expect(jobs.map((j) => j.id)).toEqual([second.id]);
   });
@@ -289,8 +309,7 @@ describe("routine templates", () => {
         archiveUnimportant: true,
         assistScheduling: true,
         draftReplies: false
-      },
-      chatSessionId: second.chatSessionId
+      }
     });
 
     // A template without options carries no templateOptions at all.
@@ -529,11 +548,19 @@ describe("routine templates", () => {
     });
     expect((jobsByTemplate.get("meeting-briefing") as { templateOptions?: unknown }).templateOptions).toBeUndefined();
 
-    // The onboarding path provisions each routine's conversation too: a live
-    // channel session titled after the routine, bound as the job's delivery
-    // surface.
+    // The onboarding path provisions visible conversations only for
+    // message-delivering routines. Auto-inbox gets a hidden working channel
+    // for spawned draft tasks and stays out of Messages.
     const sessions = readState(config.instance).chatSessions;
     for (const job of applied.jobs as Array<{ name: string; chatSessionId?: string }>) {
+      if (job.name === "Auto-inbox") {
+        const session = sessions.find((s) => s.id === job.chatSessionId);
+        expect(session?.title).toBe("Auto-inbox");
+        expect(session?.kind).toBe("channel");
+        expect(session?.headless).toBe(true);
+        expect(session?.archivedAt).toBeUndefined();
+        continue;
+      }
       const session = sessions.find((s) => s.id === job.chatSessionId);
       expect(session?.title).toBe(job.name);
       expect(session?.kind).toBe("channel");

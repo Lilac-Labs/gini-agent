@@ -264,6 +264,48 @@ describe("GET /api/home", () => {
     });
   });
 
+  test("surfaces a child task even when the parent watcher container is headless", async () => {
+    const config = buildConfig("home-headless-parent-child");
+    const handler = createHandler(config);
+
+    const ids = await mutateState(config.instance, (state) => {
+      const parent = createTopic(state, { title: "Auto-inbox", headless: true });
+      seedTask(state, parent.id, "completed", "2026-07-01T10:00:00.000Z");
+
+      const child = createTopic(state, {
+        title: "Draft reply to Alex about renewal",
+        parentChatSessionId: parent.id,
+        spawnedByTaskId: "task_auto_inbox",
+        surfaced: true
+      });
+      const childTask = seedTask(state, child.id, "completed", "2026-07-01T10:05:00.000Z", {
+        summary: "Draft ready for review."
+      });
+      return { parent: parent.id, child: child.id, childTask: childTask.id };
+    });
+
+    const home = await getHome(handler, config);
+
+    expect(home.tasks.map((task) => task.id)).toEqual([ids.child]);
+    expect(home.tasks[0]).toMatchObject({
+      id: ids.child,
+      title: "Draft reply to Alex about renewal",
+      startedBy: "agent",
+      attention: "done_unacknowledged",
+      outcomeLine: "Draft ready for review."
+    });
+    expect(home.recents).toEqual([
+      {
+        id: ids.childTask,
+        containerId: ids.child,
+        icon: "document",
+        title: "Draft reply to Alex about renewal",
+        timestamp: "2026-07-01T10:05:00.000Z"
+      }
+    ]);
+    expect(home.tasks.some((task) => task.id === ids.parent)).toBe(false);
+  });
+
   test("recents dedupe to one entry per container: newest completed run wins", async () => {
     const config = buildConfig("home-recents-dedupe");
     const handler = createHandler(config);

@@ -36,6 +36,11 @@ export interface RoutineTemplate {
   // Icon key the web maps to a lucide icon — presentation hint only.
   icon: string;
   scheduleHint: string;
+  // Whether installing this template should create a visible Messages
+  // conversation for job output. Some routines, like Auto-inbox, keep a
+  // hidden working thread so they can spawn surfaced child tasks without
+  // creating a Messages conversation of their own.
+  createsMessagesConversation: boolean;
   options: RoutineTemplateOption[];
   // Compose the createScheduledJob payload for the given option state.
   // Templates with options stamp the resolved state as `templateOptions`
@@ -56,6 +61,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     description: "Your inbox, organized without the work.",
     icon: "inbox",
     scheduleHint: "Every 30 minutes",
+    createsMessagesConversation: false,
     options: [
       { key: "labelNewMail", label: "Label new mail", defaultEnabled: true },
       { key: "archiveUnimportant", label: "Archive unimportant emails", defaultEnabled: false },
@@ -72,10 +78,10 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
         behaviors.push("- Archive clearly-unimportant mail (promotions, notifications) — never anything personal or important.");
       }
       if (options.assistScheduling) {
-        behaviors.push("- Detect scheduling requests and propose times based on the user's calendar.");
+        behaviors.push("- Detect scheduling requests. When a response is needed, spawn a surfaced child task to draft the scheduling reply.");
       }
       if (options.draftReplies) {
-        behaviors.push("- Draft (never send) replies to important emails awaiting a response.");
+        behaviors.push("- Detect important emails awaiting a response. For each one, spawn a surfaced child task to draft the reply.");
       }
       if (behaviors.length === 0) return undefined;
       return {
@@ -88,6 +94,10 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
         prompt: [
           "Tidy the user's Gmail inbox: work through mail that arrived since the last run.",
           ...behaviors,
+          "Silent behaviors: labeling and archiving happen directly in this Auto-inbox run and need no user-facing delivery.",
+          "Draft-producing behaviors: do NOT save draft replies in this Auto-inbox run. For every email that needs a reply or scheduling response, call spawn_task with surface:true and await:\"none\" so the user sees a Home task. Use one task per email thread/message, with a stable correlation_key like `auto-inbox:<account>:<message-or-thread-id>` so later runs do not duplicate it.",
+          "Each spawned task brief must be self-contained: include the exact Gmail account, message id and thread id when known, sender, subject, relevant body/snippet, why a response is needed, and any scheduling constraints/calendar context already discovered.",
+          "The spawned task's goal is to save a Gmail draft and render it as an `email-draft` card with DraftId and Account so the user can review, iterate, and send from the card. If the draft proposes a specific meeting time, the child task must also render the calendar preview required by the google-gmail skill.",
           "Gini never sends email or messages without the user's review — save drafts only, never send."
         ].join("\n")
       };
@@ -99,6 +109,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     description: "Start your day knowing exactly what matters.",
     icon: "sunrise",
     scheduleHint: "Daily at 8:00 AM",
+    createsMessagesConversation: true,
     options: [{ key: "personalizedNews", label: "Personalized news topics", defaultEnabled: true }],
     buildSpec: (options, timezone) => ({
       name: "Morning Briefing",
@@ -121,6 +132,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     description: "Get meeting prep in email and Gini.",
     icon: "calendar-check",
     scheduleHint: "Every 15 minutes",
+    createsMessagesConversation: true,
     options: [],
     buildSpec: (_options, timezone) => ({
       name: "Meeting Briefing",
@@ -138,25 +150,39 @@ export function routineTemplate(id: string): RoutineTemplate | undefined {
   return ROUTINE_TEMPLATES.find((template) => template.id === id);
 }
 
-// The job's delivery surface: every installed routine owns a live
-// channel-kind session titled after the routine (the "Morning Briefing"
-// conversation in Messages), and each fire's final answer lands there as an
-// assistant message (dispatchPromptRun / finalizeJobRunFromTask). Absent
-// `reuseSessionId`, createScheduledJob mints the session inside the same
-// write as the job (the create_job tool's `createDedicatedSession` idiom).
-// On a reinstall the caller passes the replaced job's session instead:
-// removeJob archived it with the old job, so bind the new job to it and
-// un-archive it (idempotent, audited `chat.session.unarchived`) — option
-// edits never churn the conversation or its history. Bind BEFORE
-// un-archiving: a live job-origin channel with no referencing job violates
-// the invariant archiveOrphanJobChannels (state/store.ts) sweeps on every
-// state load, so a channel un-archived first would be re-archived from
-// under the install.
+// The job's delivery surface: templates that create Messages conversations
+// own a live channel-kind session titled after the routine (the "Morning
+// Briefing" conversation in Messages), and each fire's final answer lands
+// there as an assistant message (dispatchPromptRun /
+// finalizeJobRunFromTask). Templates that opt out of visible delivery (Auto-
+// inbox) still get a HEADLESS working channel with deliveryPolicy:"silent":
+// the parent job can call spawn_task from a container, while user-visible
+// work appears only as surfaced child tasks. Absent `reuseSessionId`,
+// createScheduledJob mints the session inside the same write as the job
+// (the create_job tool's `createDedicatedSession` idiom). On a reinstall the
+// caller passes the replaced job's session instead: removeJob archived it
+// with the old job, so bind the new job to it and un-archive it
+// (idempotent, audited `chat.session.unarchived`) — option edits never churn
+// the conversation or its history. Bind BEFORE un-archiving: a live
+// job-origin channel with no referencing job violates the invariant
+// archiveOrphanJobChannels (state/store.ts) sweeps on every state load, so a
+// channel un-archived first would be re-archived from under the install.
 export async function createRoutineJob(
   config: RuntimeConfig,
   spec: Record<string, unknown>,
   reuseSessionId?: string
 ): Promise<JobRecord> {
+  const templateId = typeof spec.templateId === "string" ? spec.templateId : undefined;
+  const createsMessagesConversation = templateId ? (routineTemplate(templateId)?.createsMessagesConversation ?? true) : true;
+  if (!createsMessagesConversation) {
+    const hiddenSpec = { ...spec, deliveryPolicy: "silent" };
+    if (reuseSessionId !== undefined) {
+      const job = await createScheduledJob(config, { ...hiddenSpec, chatSessionId: reuseSessionId });
+      await mutateState(config.instance, (state) => setContainerArchived(state, reuseSessionId, false));
+      return job;
+    }
+    return createScheduledJob(config, { ...hiddenSpec, createDedicatedSession: { title: String(spec.name) } });
+  }
   if (reuseSessionId !== undefined) {
     const job = await createScheduledJob(config, { ...spec, chatSessionId: reuseSessionId });
     await mutateState(config.instance, (state) => setContainerArchived(state, reuseSessionId, false));
@@ -178,8 +204,9 @@ export function reusableRoutineSessionId(state: RuntimeState, job: JobRecord): s
 // when supplied, like GET /api/jobs). `installed.options` is the resolved
 // option state the job was installed with (absent on templates without
 // options and on jobs predating templateOptions); `installed.chatSessionId`
-// is the routine's conversation (absent only on jobs predating session
-// provisioning) so the detail page can deep-link Open messages.
+// is the routine's conversation when this template delivers to Messages
+// (absent for Auto-inbox and on jobs predating session provisioning) so the
+// detail page can deep-link Open messages where applicable.
 export interface RoutineTemplateView {
   id: string;
   name: string;
@@ -204,7 +231,12 @@ export function listRoutineTemplates(config: RuntimeConfig, agentId?: string): {
         scheduleHint: template.scheduleHint,
         options: template.options,
         installed: job
-          ? { jobId: job.id, status: job.status, options: job.templateOptions, chatSessionId: job.chatSessionId }
+          ? {
+              jobId: job.id,
+              status: job.status,
+              options: job.templateOptions,
+              ...(template.createsMessagesConversation ? { chatSessionId: job.chatSessionId } : {})
+            }
           : null
       };
     })
@@ -243,7 +275,9 @@ export async function installRoutineTemplate(
   // Capture the replaced install's conversation BEFORE the replace pass:
   // removeJob archives a job's dedicated channel along with the job, and
   // createRoutineJob un-archives + rebinds it so a Settings save keeps the
-  // routine's Messages history instead of minting a fresh thread.
+  // message-delivering routine's Messages history instead of minting a
+  // fresh thread. Templates that opt out of Messages ignore the captured
+  // session in createRoutineJob.
   let reuseSessionId: string | undefined;
   for (const job of state.jobs.filter((j) => j.templateId === template.id && j.agentId === owningAgentId)) {
     reuseSessionId ??= reusableRoutineSessionId(state, job);
@@ -260,8 +294,10 @@ export async function installRoutineTemplate(
 // job(s) carrying this templateId (owning agent resolved server-side, same
 // as install). 404 when that agent has none installed, so the gallery's
 // Remove is an honest one-click inverse of Install. removeJob archives the
-// routine's conversation with the job — it leaves the Messages list but its
-// history stays addressable, and a later re-install starts a fresh thread.
+// routine's conversation with the job when one exists — it leaves the
+// Messages list but its history stays addressable, and a later re-install
+// starts a fresh thread. Templates that opt out of Messages simply remove
+// the job.
 export async function uninstallRoutineTemplate(
   config: RuntimeConfig,
   templateId: string

@@ -232,7 +232,7 @@ function resolveScanConfigDir(): string | undefined {
 // owning agent's live jobs carrying a catalog templateId, which the
 // /routines gallery may have installed — then create one job per enabled
 // routine via createRoutineJob, which also provisions (or carries forward)
-// the routine's dedicated conversation.
+// a dedicated conversation for templates that deliver into Messages.
 export async function applyOnboardingRoutines(
   config: RuntimeConfig,
   payload: Record<string, unknown>
@@ -260,8 +260,11 @@ export async function applyOnboardingRoutines(
   const catalogIds = new Set(ROUTINE_TEMPLATES.map((template) => template.id));
   // Capture each replaced template's conversation BEFORE the replace pass:
   // removeJob archives a job's dedicated channel with the job, and
-  // createRoutineJob un-archives + rebinds it so a re-apply keeps every
-  // routine's Messages history (same reuse rule as the gallery install).
+  // createRoutineJob un-archives + rebinds it so a re-apply keeps
+  // message-delivering routines' history (same reuse rule as the gallery
+  // install). Hidden-worker templates (Auto-inbox) reuse the captured
+  // headless channel so their spawned child-task dedup keys stay scoped to
+  // one stable parent container.
   const reusableSessions = new Map<string, string>();
   for (const job of state.jobs) {
     if (job.agentId !== owningAgentId || job.templateId === undefined || !catalogIds.has(job.templateId)) continue;

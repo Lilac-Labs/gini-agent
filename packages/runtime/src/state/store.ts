@@ -784,6 +784,92 @@ function matchGenericByEnv(skillEnv: string[], generics: GenericCredential[]): s
   return undefined;
 }
 
+// Rename connector records whose name no longer matches their provider's
+// canonical credential name. Skill activation matches credentials BY NAME
+// (isSkillActive, connectors/index.ts) and the skill loader maps legacy
+// `requires.connectors` providers through `canonicalCredentialName`
+// (connectors/registry.ts) — so a record auto-detected under a display label
+// (e.g. "Codex", "Claude Code") before its provider declared a
+// `credentialName` never matches the skill's requiredCredentials and the
+// skill stays inactive despite a healthy connector. The detection job never
+// renames existing records (runConnectorDetection skips providers that
+// already have a record), so this one-time rename is the only path that
+// heals pre-existing instances.
+//
+// Marker-gated on `state.migrations.connectorsCanonicalNames` so it runs
+// once per instance, idempotent, with a single summary audit row. Runs AFTER
+// migrateConnectorsToTypedCredentials so template records (linear /
+// google-oauth-desktop) already carry their canonical names and pass through
+// untouched. Providers with no canonical name (generic, demo) are skipped.
+//
+// Collision (same rule as the typed-credential migration, LOCKED decision 4):
+// if the canonical name is already claimed by another record, the claimer
+// keeps it and the renamed record takes the first free `<name>_N` with a
+// `connector.migration_collision` audit.
+function migrateConnectorCanonicalNames(state: RuntimeState): void {
+  const dyn = state as unknown as {
+    migrations?: { connectorsCanonicalNames?: string };
+  };
+  if (dyn.migrations?.connectorsCanonicalNames) return;
+  if (!Array.isArray(state.connectors)) state.connectors = [];
+
+  const at = now();
+  const claimedNames = new Set(state.connectors.map((c) => c.name));
+  // Pick the first `<name>_N` not already claimed (loops past `_2`, `_3`, …)
+  // so two colliding records can't both land on `<name>_2`.
+  const firstFreeSuffixedName = (base: string): string => {
+    let n = 2;
+    while (claimedNames.has(`${base}_${n}`)) n += 1;
+    return `${base}_${n}`;
+  };
+
+  const renames: Array<{ connectorId: string; from: string; to: string }> = [];
+  const collisions: Array<{ connectorId: string; from: string; to: string }> = [];
+  for (const connector of state.connectors) {
+    const canonical = canonicalCredentialName(connector.provider);
+    if (!canonical || connector.name === canonical) continue;
+    let target = canonical;
+    if (claimedNames.has(target)) {
+      target = firstFreeSuffixedName(canonical);
+      collisions.push({ connectorId: connector.id, from: connector.name, to: target });
+    }
+    renames.push({ connectorId: connector.id, from: connector.name, to: target });
+    connector.name = target;
+    claimedNames.add(target);
+  }
+
+  // Emit the audit rows only when something actually renamed — a fresh or
+  // already-canonical instance sets the marker silently.
+  if (renames.length > 0) {
+    addAudit(
+      state,
+      {
+        actor: "runtime",
+        action: "connector.migration.canonical_names",
+        target: "state.connectors",
+        risk: "low",
+        evidence: { renamed: renames.length, renames, collisions: collisions.length }
+      },
+      { system: true }
+    );
+    for (const collision of collisions) {
+      addAudit(
+        state,
+        {
+          actor: "runtime",
+          action: "connector.migration_collision",
+          target: collision.connectorId,
+          risk: "low",
+          evidence: { from: collision.from, to: collision.to }
+        },
+        { system: true }
+      );
+    }
+  }
+
+  dyn.migrations = { ...(dyn.migrations ?? {}), connectorsCanonicalNames: at };
+}
+
 // Archive job channels orphaned by a job deletion that pre-dated removeJob's
 // channel cleanup. A recurring job's dedicated channel (kind:"channel",
 // origin:"job") is surfaced on the Recurring Jobs rails (web sidebar + mobile
@@ -1619,6 +1705,11 @@ export function normalizeState(instance: Instance, state: RuntimeState): Runtime
   // every skill's requires is on the provider shape this migration reads.
   // Marker-gated + idempotent.
   migrateConnectorsToTypedCredentials(state);
+  // Rename records to their provider's canonical credential name (e.g. a
+  // pre-existing auto-detected "Codex" record → "codex") so name-based skill
+  // activation (isSkillActive) matches them. Runs after the typed-credential
+  // migration so template records already carry canonical names. Marker-gated.
+  migrateConnectorCanonicalNames(state);
   for (const subagent of state.subagents) {
     // Slice 4 introduced `systemPrompt` (always present) and optional
     // toolsetIds/skillNames/resultSummary/resultError. Records persisted

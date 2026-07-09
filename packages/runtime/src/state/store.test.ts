@@ -1083,6 +1083,96 @@ describe("normalizeState provider-keyed → typed-named-credential migration", (
   });
 });
 
+describe("normalizeState connector canonical-name rename migration", () => {
+  const at = new Date().toISOString();
+
+  // A pre-existing auto-detected record, named by the provider label before
+  // the provider declared a `credentialName` (the shape the rename heals).
+  function mkConnector(instance: string, id: string, name: string, provider: string): ConnectorRecord {
+    return {
+      id,
+      instance,
+      name,
+      provider,
+      status: "configured",
+      scopes: [],
+      secretRefs: [],
+      createdAt: at,
+      updatedAt: at,
+      health: "healthy",
+      source: "auto"
+    };
+  }
+
+  test("renames stale-named auto records to their provider's canonical credential name", () => {
+    const instance = "test-canon-rename";
+    const state = createEmptyState(instance);
+    state.connectors = [
+      mkConnector(instance, "id_codex", "Codex", "codex"),
+      mkConnector(instance, "id_cc", "Claude Code", "claude-code")
+    ];
+    const normalized = normalizeState(instance, state);
+    // Renamed to the names skill activation (isSkillActive) matches against.
+    expect(normalized.connectors.find((c) => c.id === "id_codex")!.name).toBe("codex");
+    expect(normalized.connectors.find((c) => c.id === "id_cc")!.name).toBe("claude-code");
+    // Exactly one summary audit row documenting both renames.
+    const summary = normalized.audit.filter((a) => a.action === "connector.migration.canonical_names");
+    expect(summary.length).toBe(1);
+    expect((summary[0]!.evidence as { renamed?: number }).renamed).toBe(2);
+    // Marker set.
+    const marker = (normalized as unknown as { migrations?: { connectorsCanonicalNames?: string } }).migrations
+      ?.connectorsCanonicalNames;
+    expect(typeof marker).toBe("string");
+  });
+
+  test("suffixes to the first free _N when the canonical name is already claimed", () => {
+    const instance = "test-canon-collision";
+    const state = createEmptyState(instance);
+    state.connectors = [
+      mkConnector(instance, "id_new", "codex", "codex"),
+      mkConnector(instance, "id_old", "Codex", "codex")
+    ];
+    const normalized = normalizeState(instance, state);
+    // The claimer keeps the canonical name; the stale record takes _2.
+    expect(normalized.connectors.find((c) => c.id === "id_new")!.name).toBe("codex");
+    expect(normalized.connectors.find((c) => c.id === "id_old")!.name).toBe("codex_2");
+    const collisions = normalized.audit.filter((a) => a.action === "connector.migration_collision");
+    expect(collisions.length).toBe(1);
+    expect(collisions[0]!.evidence).toEqual({ from: "Codex", to: "codex_2" });
+  });
+
+  test("marker prevents a re-run from renaming records again", () => {
+    const instance = "test-canon-marker";
+    const state = createEmptyState(instance);
+    state.connectors = [mkConnector(instance, "id_codex", "Codex", "codex")];
+    const normalized = normalizeState(instance, state);
+    expect(normalized.connectors.find((c) => c.id === "id_codex")!.name).toBe("codex");
+    // Rename back to the stale label; the marker gates the second pass so the
+    // record stays as the operator left it and no new audit row appears.
+    normalized.connectors.find((c) => c.id === "id_codex")!.name = "Codex";
+    const second = normalizeState(instance, normalized);
+    expect(second.connectors.find((c) => c.id === "id_codex")!.name).toBe("Codex");
+    expect(second.audit.filter((a) => a.action === "connector.migration.canonical_names").length).toBe(1);
+  });
+
+  test("leaves records whose provider has no canonical credential name untouched", () => {
+    const instance = "test-canon-skip";
+    const state = createEmptyState(instance);
+    // createEmptyState seeds a demo connector (presence-only, no canonical
+    // name); add a generic record too — neither may be renamed, and with no
+    // renames the summary audit is skipped (marker still set silently).
+    state.connectors.push(mkConnector(instance, "id_generic", "My Service", "generic"));
+    const demoName = state.connectors.find((c) => c.provider === "demo")!.name;
+    const normalized = normalizeState(instance, state);
+    expect(normalized.connectors.find((c) => c.provider === "demo")!.name).toBe(demoName);
+    expect(normalized.connectors.find((c) => c.id === "id_generic")!.name).toBe("My Service");
+    expect(normalized.audit.filter((a) => a.action === "connector.migration.canonical_names").length).toBe(0);
+    const marker = (normalized as unknown as { migrations?: { connectorsCanonicalNames?: string } }).migrations
+      ?.connectorsCanonicalNames;
+    expect(typeof marker).toBe("string");
+  });
+});
+
 const MARKER_TASK = {
   id: "task_marker",
   title: "marker",

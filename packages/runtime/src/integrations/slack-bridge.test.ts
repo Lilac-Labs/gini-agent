@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import type { RuntimeConfig } from "../types";
-import { mutateState, readState } from "../state";
+import { isTerminalTaskStatus, mutateState, readState } from "../state";
+import { clearEchoToolCallingResponses, normalizeProvider, setEchoToolCallingResponse } from "../provider";
 import { addMessagingBridge, resetMessagingDeps, setMessagingDeps } from "./messaging";
 import { __internalsForTests, createSlackBridgeSupervisor } from "./slack-bridge";
 import { setMaxTaskWaitMsForTests } from "./messaging-poller-helpers";
@@ -134,6 +135,7 @@ describe("slack bridge supervisor", () => {
     }
     resetMessagingDeps();
     setMaxTaskWaitMsForTests(undefined);
+    clearEchoToolCallingResponses();
   });
 
   async function addSlackBridge(config: RuntimeConfig) {
@@ -562,9 +564,17 @@ describe("slack bridge supervisor", () => {
     const { client, removeReactionCalls } = programmableClient();
     setMessagingDeps({ slackClientFactory: () => client });
     const bridge = await addSlackBridge(config);
-    // Force awaitTerminalTask to time out immediately — the task will
-    // be in "running" state and the 1ms cap expires before the echo
-    // provider can settle it.
+    // Hold the turn's model call open so the task is DETERMINISTICALLY still
+    // running when the 1ms terminal-wait cap fires. The prior version relied on
+    // the in-process echo settling slower than 1ms, but it usually settles under
+    // 1ms — so awaitTerminalTask read a terminal status and removeReaction fired
+    // ~83% of runs (a timing flake). A delayed echo stub makes "task not yet
+    // terminal at the cap" reliable regardless of host speed / CI load.
+    setEchoToolCallingResponse(
+      { provider: normalizeProvider(config.provider), text: "still working", toolCalls: [], finishReason: "stop" },
+      undefined,
+      { delayMs: 500 }
+    );
     setMaxTaskWaitMsForTests(1);
 
     const controller = new AbortController();
@@ -579,6 +589,13 @@ describe("slack bridge supervisor", () => {
     // The task timed out (non-terminal) — the 👀 stays as "still
     // working" signal; removeReaction must NOT be called.
     expect(removeReactionCalls.length).toBe(0);
+
+    // Drain the held turn so it settles inside this test's own isolated instance
+    // rather than leaking a detached task into the next test.
+    await waitFor(
+      () => readState(config.instance).tasks.every((t) => isTerminalTaskStatus(t.status)),
+      "echo turn to settle after the timeout assertion"
+    );
   });
 
   test("eyes reaction is NOT removed when addReaction itself failed", async () => {

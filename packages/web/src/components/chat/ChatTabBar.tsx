@@ -19,17 +19,21 @@ export function ChatTabBar({
   active,
   onChange,
   jobCount,
-  hideJobsTab
+  hideJobsTab,
+  hideWhenSingleTab
 }: {
   active: ChatTab;
   onChange: (tab: ChatTab) => void;
   jobCount?: number;
   hideJobsTab?: boolean;
+  hideWhenSingleTab?: boolean;
 }) {
   const tabs: TabSpec[] = [
     { id: "messages", label: "Messages" },
     ...(hideJobsTab ? [] : [{ id: "jobs", label: "Jobs", count: jobCount } as TabSpec])
   ];
+  if (hideWhenSingleTab && tabs.length <= 1) return null;
+
   return (
     <div className="flex shrink-0 items-end gap-1.5 border-b border-border px-7">
       {tabs.map((tab) => {

@@ -1,7 +1,8 @@
 /// <reference lib="dom" />
 
 // ChatTabBar tests. Pins the tab strip's contract:
-//   - the Jobs visibility flag (hidden on channels)
+//   - tab visibility flag (Jobs hidden on channels)
+//   - optional whole-strip hiding when only one tab remains
 //   - count pills hide at zero and carry an accessible label
 //   - clicking a tab reports its id
 
@@ -25,6 +26,12 @@ describe("ChatTabBar", () => {
     render(<ChatTabBar active="messages" onChange={() => {}} hideJobsTab />);
     expect(screen.queryByText("Jobs")).toBeNull();
     expect(screen.getByText("Messages")).not.toBeNull();
+  });
+
+  test("can hide the whole strip when only one tab remains", () => {
+    render(<ChatTabBar active="messages" onChange={() => {}} hideJobsTab hideWhenSingleTab />);
+    expect(screen.queryByText("Messages")).toBeNull();
+    expect(screen.queryByText("Jobs")).toBeNull();
   });
 
   test("shows the Jobs count pill only when non-zero", () => {

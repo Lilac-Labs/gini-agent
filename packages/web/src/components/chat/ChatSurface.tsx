@@ -440,12 +440,16 @@ export function ChatSurface({
             }
           />
         )}
-        {/* A topic's only tab is Messages (Jobs hidden via isTopic), so the
-            bar is a redundant single tab — drop it entirely, matching panel
-            mode. The transcript still renders since `tab` defaults to
-            "messages". */}
+        {/* Topics and channels only expose Messages, so the tab bar is a
+            redundant single tab. The transcript still renders since `tab`
+            defaults to "messages". */}
         {panel || isTopic ? null : (
-          <ChatTabBar active={tab} onChange={setTab} hideJobsTab={isChannel} />
+          <ChatTabBar
+            active={tab}
+            onChange={setTab}
+            hideJobsTab={isChannel}
+            hideWhenSingleTab={isChannel}
+          />
         )}
 
         {tab === "messages" ? (

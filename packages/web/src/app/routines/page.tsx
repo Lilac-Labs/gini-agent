@@ -144,11 +144,6 @@ export default function RoutinesPage() {
                             className="w-40"
                             onClick={(event) => event.stopPropagation()}
                           >
-                            <DropdownMenuItem asChild>
-                              <Link href={`/jobs?job=${encodeURIComponent(template.installed!.jobId)}`}>
-                                View in Jobs
-                              </Link>
-                            </DropdownMenuItem>
                             <DropdownMenuItem disabled={pending} onSelect={() => submitRemove(template)}>
                               Remove
                             </DropdownMenuItem>
@@ -313,8 +308,7 @@ function WatcherCard({ watcher }: { watcher: EmailWatcherRecord }) {
 // A custom scheduled-job routine card (chat-created via create_job, no
 // catalog template). Same shape as the watcher card: violet chip, humanized
 // job name, first prompt line as description, a paused job renders dimmed
-// with a Paused pill, and the ⋯ menu deep-links the job's conversation and
-// /jobs entry.
+// with a Paused pill, and the ⋯ menu deep-links the job's conversation.
 function CustomJobCard({ job }: { job: JobRecord }) {
   const router = useRouter();
   const invalidate = useInvalidate();
@@ -381,9 +375,6 @@ function CustomJobCard({ job }: { job: JobRecord }) {
                   <Link href={`/chat?session=${encodeURIComponent(job.chatSessionId)}`}>Open channel</Link>
                 </DropdownMenuItem>
               ) : null}
-              <DropdownMenuItem asChild>
-                <Link href={`/jobs?job=${encodeURIComponent(job.id)}`}>View in Jobs</Link>
-              </DropdownMenuItem>
               <DropdownMenuItem disabled={remove.isPending} onSelect={() => remove.mutate()}>
                 Remove
               </DropdownMenuItem>

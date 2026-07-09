@@ -31,7 +31,7 @@ export function jobDisplayName(job: JobRecord): string {
 }
 
 // Card/detail description: the prompt's first non-empty line (the card
-// clamps it; the full prompt stays in /jobs).
+// clamps it; the full prompt stays on the job record).
 export function jobDescription(job: JobRecord): string {
   return (
     job.prompt

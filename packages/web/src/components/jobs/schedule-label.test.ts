@@ -1,5 +1,5 @@
-// Unit tests for the schedule-label helper used by JobList rows, the
-// JobDetail header, and EditJobDialog. Three modes to cover:
+// Unit tests for the schedule-label helper used by the chat Jobs tab,
+// the routine detail pages, and EditJobDialog. Three modes to cover:
 //   - cron with TZ: cronstrue renders human English + we append "(TZ)"
 //   - interval: keeps the existing "every Ns" shape
 //   - invalid cron: helper returns the raw expression so the UI doesn't

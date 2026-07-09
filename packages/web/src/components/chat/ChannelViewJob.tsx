@@ -9,8 +9,9 @@ import { useInvalidate } from "@/lib/queries";
 
 // Header pill on a recurring-job channel that opens the originating job.
 // Switches the active agent to the job's owning agent when it differs (mirrors
-// the sidebar's agent-switch mutation), then deep-links into /jobs with that
-// job preselected.
+// the sidebar's agent-switch mutation), then deep-links the job's routine
+// detail page (/routines/job/<id> forwards template installs to their
+// template detail itself).
 export function ChannelViewJob({
   jobId,
   agentId,
@@ -36,7 +37,7 @@ export function ChannelViewJob({
         toast.error(error instanceof Error ? error.message : "Failed to switch agent");
       }
     }
-    router.push(`/jobs?job=${encodeURIComponent(jobId)}`);
+    router.push(`/routines/job/${encodeURIComponent(jobId)}`);
   };
 
   return (

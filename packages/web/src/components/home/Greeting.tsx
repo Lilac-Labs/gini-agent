@@ -14,7 +14,7 @@ function timeOfDayGreeting(hour: number): string {
 }
 
 // The home greeting: muted day-of-week row (with a "View schedule" link to
-// /jobs — the calendar lives there) over the big time-of-day salutation.
+// /routines — the scheduled-work surface) over the big time-of-day salutation.
 // All `new Date()` reads are mount-gated so SSR markup never bakes in the
 // server's clock/timezone; the name comes from the gateway's optional
 // owner setting (never derived from an email local-part).
@@ -31,7 +31,7 @@ export function Greeting() {
         <span>{dayName}</span>
         <span className="opacity-50">·</span>
         <Link
-          href="/jobs"
+          href="/routines"
           className="inline-flex items-center gap-[5px] transition-colors hover:text-foreground"
         >
           <Calendar className="size-[13px]" />

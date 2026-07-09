@@ -1,34 +1,46 @@
 "use client";
 
-import { use, useState } from "react";
+import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { notFound, useRouter } from "next/navigation";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ChevronRightIcon, MessageSquareIcon, PlayIcon, Trash2Icon, ZapIcon } from "lucide-react";
+import { ChevronRightIcon, MessageSquareIcon, PencilIcon, PlayIcon, Trash2Icon, ZapIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { EmptyState } from "@/components/PageHeader";
 import { api } from "@/lib/api";
 import { formatRelativeTime } from "@/components/chat/relative-time";
 import { useInvalidate, useJobRuns, useJobs } from "@/lib/queries";
 import type { JobRecord } from "@runtime/types";
-import { scheduleLabel } from "@/app/jobs/_components/schedule-label";
+import { scheduleLabel } from "@/components/jobs/schedule-label";
+import { EditJobDialog } from "@/components/jobs/EditJobDialog";
 import { CUSTOM_JOB_CHIP } from "../../chips";
 import { jobDescription, jobDisplayName } from "../../custom-jobs";
 
 // Detail page for a custom scheduled-job routine (chat-created via
 // create_job, no catalog template). Same visual language as the template
 // detail (/routines/[templateId]): breadcrumb, sticky tinted hero (enable
-// toggle = job pause/resume, Run Now + Open messages actions) and underline
-// tabs — Recent sessions (the job's run history) and Info (schedule, skills,
-// status, Delete routine). No Settings tab: prompt/cron editing lives in
-// chat and the /jobs page.
+// toggle = job pause/resume, Run Now + Edit schedule + Open messages
+// actions) and underline tabs — Recent sessions (the job's run history) and
+// Info (schedule, skills, status, Delete routine). No Settings tab: prompt
+// editing lives in chat.
+//
+// This is the canonical per-job URL (the /jobs?job= redirect lands here for
+// ANY job id): a job carrying a templateId forwards to its template detail
+// page, everything else renders the generic detail below.
 export default function JobRoutineDetailPage({ params }: { params: Promise<{ jobId: string }> }) {
   const { jobId } = use(params);
+  const router = useRouter();
   const jobs = useJobs();
 
   const all = jobs.data;
   const job = all?.find((candidate) => candidate.id === jobId);
+
+  const templateId = job?.templateId;
+  useEffect(() => {
+    if (templateId) router.replace(`/routines/${encodeURIComponent(templateId)}`);
+  }, [templateId, router]);
+
   // Only a loaded list can rule the id unknown — while loading, show a quiet
   // placeholder instead of flashing the 404 boundary.
   if (all && !job) notFound();
@@ -43,7 +55,7 @@ export default function JobRoutineDetailPage({ params }: { params: Promise<{ job
         <ChevronRightIcon className="size-[15px] text-muted-foreground/65" aria-hidden />
         <span className="font-medium">{job ? jobDisplayName(job) : "…"}</span>
       </header>
-      {job ? (
+      {job && !job.templateId ? (
         <JobRoutineDetail job={job} />
       ) : (
         <div className="p-6 text-sm text-muted-foreground">
@@ -63,7 +75,7 @@ function JobRoutineDetail({ job }: { job: JobRecord }) {
   const name = jobDisplayName(job);
   const description = jobDescription(job);
 
-  // Same inline mutation shape as the jobs page: POST /jobs/<id>/{run,pause,resume}.
+  // Inline job-action mutation: POST /jobs/<id>/{run,pause,resume}.
   const action = useMutation({
     mutationFn: (op: "run" | "pause" | "resume") =>
       api<JobRecord>(`/jobs/${job.id}/${op}`, { method: "POST" }),
@@ -128,6 +140,20 @@ function JobRoutineDetail({ job }: { job: JobRecord }) {
               <PlayIcon className="size-[17px] text-muted-foreground" aria-hidden />
               Run Now
             </button>
+            {/* Interval/cron/timezone (plus retry/timeout/budget/delivery)
+                editing — the dialog the jobs page used to own. */}
+            <EditJobDialog
+              job={job}
+              trigger={
+                <button
+                  type="button"
+                  className="flex items-center gap-3 rounded-lg px-2 py-2.5 text-left text-sm font-medium transition-colors hover:bg-muted"
+                >
+                  <PencilIcon className="size-[17px] text-muted-foreground" aria-hidden />
+                  Edit schedule
+                </button>
+              }
+            />
             {job.chatSessionId ? (
               // The job's delivery conversation (same idiom as the template
               // detail's Open messages).

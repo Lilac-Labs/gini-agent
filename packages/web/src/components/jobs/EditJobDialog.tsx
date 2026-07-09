@@ -14,7 +14,10 @@ import { humanCron } from "./schedule-label";
 
 type ScheduleMode = "interval" | "cron";
 
-export function EditJobDialog({ job }: { job: JobRecord }) {
+// `trigger` swaps the default "Edit" button for a caller-styled element
+// (rendered via DialogTrigger asChild), so surfaces like the routine detail
+// hero can open the dialog from their own action row.
+export function EditJobDialog({ job, trigger }: { job: JobRecord; trigger?: React.ReactNode }) {
   const invalidate = useInvalidate();
   const [open, setOpen] = useState(false);
   // Schedule mode: interval-driven (intervalSeconds) or cron-driven
@@ -46,8 +49,8 @@ export function EditJobDialog({ job }: { job: JobRecord }) {
   const [deliveryTargetsRaw, setDeliveryTargetsRaw] = useState((job.deliveryTargets ?? []).join(", "));
 
   // The selected job can change while this component instance is reused
-  // (parent JobDetail re-renders with a different `job` when the user picks
-  // a different row in the list). Reset form state when the job id changes
+  // (a parent can re-render with a different `job` record). Reset form
+  // state when the job id changes
   // OR when the dialog opens — otherwise edits silently overwrite the wrong
   // record with stale field values from the previous selection. The mode
   // gets reset alongside the fields so opening on a cron job after editing
@@ -123,7 +126,7 @@ export function EditJobDialog({ job }: { job: JobRecord }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button size="sm" variant="outline">Edit</Button>
+        {trigger ?? <Button size="sm" variant="outline">Edit</Button>}
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>

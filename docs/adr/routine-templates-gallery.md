@@ -96,10 +96,11 @@ three card kinds:
   page at `/routines/watch/[watcherId]` (see ADR email-watch.md);
 - **custom scheduled jobs** — every other job from the agent-scoped
   `GET /api/jobs?agentId=` (chat-created via `create_job`): a generic card
-  (humanized job name, first prompt line, Paused state, Open channel / View
-  in Jobs / Remove) with a detail page at `/routines/job/[jobId]` — Recent
-  sessions and Info tabs, pause/resume, Run Now, Delete; no Settings tab
-  (prompt/cron editing stays in chat and /jobs).
+  (humanized job name, first prompt line, Paused state, Open channel /
+  Remove) with a detail page at `/routines/job/[jobId]` — Recent sessions
+  and Info tabs, pause/resume, Run Now, Edit schedule (the shared
+  `EditJobDialog`: interval/cron/timezone plus retry, timeout, budget, and
+  delivery targets), Delete; no Settings tab (prompt editing stays in chat).
 
 The one exclusion from the custom partition besides `templateId` is the
 shared email-watch detection job, identified **structurally** — a
@@ -109,11 +110,20 @@ marker the runtime provisions and finds it by (`findSharedJobId` in
 its watchers are the routines. Partition helpers live in
 `packages/web/src/app/routines/custom-jobs.ts`.
 
+`/routines` is the **sole scheduled-jobs surface**. The standalone `/jobs`
+page is gone; the route survives only as a stale-link redirect (`/jobs?job=<id>`
+→ `/routines/job/<id>`, bare `/jobs` → `/routines`), and
+`/routines/job/[jobId]` is the canonical per-job URL for *any* job id — a
+job carrying a `templateId` forwards to `/routines/<templateId>`. The pieces
+the old page shared with the chat surface's per-agent Jobs tab (the schedule
+label, the calendar views, `EditJobDialog`) live in
+`packages/web/src/components/jobs/`.
+
 ## Consequences
 
 - Installed routines are ordinary `active` jobs: the user can pause, edit,
-  or delete them in /jobs, and the job scheduler/channel provisioning are
-  inherited unchanged from `createScheduledJob`.
+  or delete them in /routines, and the job scheduler/channel provisioning
+  are inherited unchanged from `createScheduledJob`.
 - Because install is a per-template replace keyed on `templateId` and the
   owning agent (like the delete), re-installing with different options never
   duplicates a routine — but it re-creates the job, so run history on the

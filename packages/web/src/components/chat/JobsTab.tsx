@@ -10,8 +10,8 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { scheduleLabel } from "@/app/jobs/_components/schedule-label";
-import { CalendarView } from "@/app/jobs/_components/calendar/calendar-view";
+import { scheduleLabel } from "@/components/jobs/schedule-label";
+import { CalendarView } from "@/components/jobs/calendar/calendar-view";
 import { adaptJob, adaptRun } from "@/components/calendar/types";
 import { api } from "@/lib/api";
 import { useAllChatSessions, useInvalidate, useJobRuns, useJobs } from "@/lib/queries";
@@ -185,7 +185,7 @@ export function JobsTab() {
                   Recent runs · {runsLast24h} in the last 24h
                 </span>
                 <Link
-                  href="/jobs"
+                  href="/routines"
                   className="flex items-center gap-1 text-[11px] font-semibold text-foreground transition-opacity hover:opacity-80"
                 >
                   View all runs

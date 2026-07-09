@@ -79,7 +79,7 @@ import { computeSkillScores } from "./learning/score";
 import { proposePromotion, reviewPromotion } from "./governance/promotions";
 import { status, updateAutoApproveSettings } from "./runtime";
 import { searchSessions } from "./execution/search";
-import { listToolsets, setToolsetStatus } from "./capabilities/toolsets";
+import { listJobTools, listToolsets, setToolsetStatus } from "./capabilities/toolsets";
 import { cancelSubagent, listSubagents, spawnSubagent } from "./capabilities/subagents";
 import { addMcpServer, checkMcpServer, invokeMcpTool, removeMcpServer } from "./integrations/mcp";
 import { addMessagingBridge, allowChat, checkMessagingBridge, denyChat, disableMessagingBridge, listAllowedChats, listMessagingMessages, receiveMessagingInput, rejectPendingChat, removeMessagingBridge, sendMessagingOutput } from "./integrations/messaging";
@@ -1911,6 +1911,9 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       const runs = listJobRuns(config, params[0]);
       return json(agentId ? runs.filter((run) => run.agentId === agentId) : runs);
     }],
+    // Effective tool catalog for a job's runs (routine detail Tools section).
+    // "Job not found:" maps to 404 via statusFromErrorMessage.
+    ["GET", /^\/api\/jobs\/([^/]+)\/tools$/, (_request, params) => json(listJobTools(config, params[0]))],
     ["POST", /^\/api\/jobs\/([^/]+)\/run$/, async (_request, params) => json(await runJobNow(config, params[0]))],
     ["POST", /^\/api\/job-runs\/([^/]+)\/replay$/, async (_request, params) => json(await replayJobRun(config, params[0]))],
     ["POST", /^\/api\/jobs\/([^/]+)\/pause$/, async (_request, params) => json(await updateJobStatus(config, params[0], "paused"))],

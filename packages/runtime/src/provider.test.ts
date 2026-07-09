@@ -475,6 +475,80 @@ describe("provider", () => {
     }
   });
 
+  // OPE-67: a Responses turn cut short by the output cap arrives as a
+  // `response.incomplete` event with status "incomplete" and
+  // incomplete_details.reason "max_output_tokens". With no tool calls parsed,
+  // finishReason must surface as "length" — NOT a synthesized "stop" that hides
+  // the truncation from the agentic loop.
+  test("codex responses maps an output-cap truncation to finishReason length", async () => {
+    const { restore } = installCodexAuth("codex-incomplete-length");
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (() => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const enc = new TextEncoder();
+          const ev = {
+            type: "response.incomplete",
+            response: { id: "resp_trunc", status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [] }
+          };
+          controller.enqueue(enc.encode(`event: response.incomplete\ndata: ${JSON.stringify(ev)}\n\n`));
+          controller.enqueue(enc.encode("data: [DONE]\n\n"));
+          controller.close();
+        }
+      });
+      return Promise.resolve(new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } }));
+    }) as unknown as typeof fetch;
+
+    try {
+      const provider = normalizeProvider({ name: "codex", model: "gpt-test" });
+      const tools: ToolFunctionSpec[] = [{
+        type: "function",
+        function: { name: "file_list", description: "list", parameters: { type: "object" } }
+      }];
+      const result = await generateToolCallingResponse(config(provider), [{ role: "user", content: "write a lot" }], tools);
+      expect(result.finishReason).toBe("length");
+      expect(result.toolCalls).toHaveLength(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      restore();
+    }
+  });
+
+  test("codex responses maps a content-filter incomplete to finishReason content_filter", async () => {
+    const { restore } = installCodexAuth("codex-incomplete-filter");
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (() => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const enc = new TextEncoder();
+          const ev = {
+            type: "response.incomplete",
+            response: { id: "resp_filtered", status: "incomplete", incomplete_details: { reason: "content_filter" }, output: [] }
+          };
+          controller.enqueue(enc.encode(`event: response.incomplete\ndata: ${JSON.stringify(ev)}\n\n`));
+          controller.enqueue(enc.encode("data: [DONE]\n\n"));
+          controller.close();
+        }
+      });
+      return Promise.resolve(new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } }));
+    }) as unknown as typeof fetch;
+
+    try {
+      const provider = normalizeProvider({ name: "codex", model: "gpt-test" });
+      const tools: ToolFunctionSpec[] = [{
+        type: "function",
+        function: { name: "file_list", description: "list", parameters: { type: "object" } }
+      }];
+      const result = await generateToolCallingResponse(config(provider), [{ role: "user", content: "hi" }], tools);
+      expect(result.finishReason).toBe("content_filter");
+    } finally {
+      globalThis.fetch = originalFetch;
+      restore();
+    }
+  });
+
   // Fix 1 (graceful exhaustion): when the chat-task loop hits the iteration
   // cap it asks for a final summary with `tools: []` but the message array
   // still carries the prior tool transcript. The codex routing must keep

@@ -1472,6 +1472,18 @@ function normalizeFinishReason(value: string | undefined): ToolCallingResult["fi
   return "unknown";
 }
 
+// Map the Responses API's incomplete_details.reason to a finishReason. A turn
+// cut short by the output cap arrives as status "incomplete" with reason
+// "max_output_tokens" and must surface as "length"; a filtered one as
+// "content_filter". Without this a truncated Responses turn with no tool calls
+// would be synthesized as a clean "stop", hiding the truncation from the loop
+// (OPE-67). Any other/absent reason falls back to "stop".
+function mapResponsesIncompleteReason(reason: string | undefined): ToolCallingResult["finishReason"] {
+  if (reason === "max_output_tokens") return "length";
+  if (reason === "content_filter") return "content_filter";
+  return "stop";
+}
+
 // Streaming tool-calling: many compat providers send tool_call argument
 // chunks across multiple SSE events. We accumulate per-index buffers and
 // emit completed tool calls only when the stream finishes.
@@ -1824,6 +1836,10 @@ async function readResponsesToolCallingStream(
   let responseId: string | undefined;
   let usage: Record<string, unknown> | undefined;
   let finalOutput: unknown[] | undefined;
+  // Set when a terminal event reports status "incomplete" (e.g. output-cap
+  // truncation). Drives the finishReason so a cut-off turn isn't mislabeled a
+  // clean stop. See mapResponsesIncompleteReason (OPE-67).
+  let incompleteReason: string | undefined;
   // True once onDelta has actually fired with a text chunk. textParts
   // and callsById are internal accumulation — nothing in them reaches
   // the caller until this function returns successfully — so they
@@ -1855,6 +1871,9 @@ async function readResponsesToolCallingStream(
       if (!responseId && typeof resp.id === "string") responseId = resp.id;
       if (isRecord(resp.usage)) usage = resp.usage;
       if (Array.isArray(resp.output)) finalOutput = resp.output;
+      if (isRecord(resp.incomplete_details) && typeof resp.incomplete_details.reason === "string") {
+        incompleteReason = resp.incomplete_details.reason;
+      }
     }
 
     // Backend-emitted error events (session rotation mid-stream, request-
@@ -2060,7 +2079,8 @@ async function readResponsesToolCallingStream(
     }
     const finalText = extracted.residual;
 
-    const finishReason: ToolCallingResult["finishReason"] = toolCalls.length > 0 ? "tool_calls" : "stop";
+    const finishReason: ToolCallingResult["finishReason"] =
+      toolCalls.length > 0 ? "tool_calls" : mapResponsesIncompleteReason(incompleteReason);
     return {
       provider,
       text: finalText.trim(),

@@ -399,7 +399,7 @@ export function ChatSurface({
             name={headerName}
             seed={headerSeed}
             lastActiveAt={session.updatedAt}
-            subtitle={isChannel ? "recurring job channel" : isTopic ? "topic" : undefined}
+            subtitle={isChannel ? "routine delivery channel" : isTopic ? "topic" : undefined}
             showAvatar={!isChannel && !isTopic}
             titleAction={
               <>

@@ -5,9 +5,21 @@ import Link from "next/link";
 import { notFound, useRouter } from "next/navigation";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ChevronRightIcon, MessageSquareIcon, PlayIcon, Trash2Icon, ZapIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  ChevronUpIcon,
+  MessageSquareIcon,
+  PlayIcon,
+  PlusIcon,
+  Trash2Icon,
+  XIcon,
+  ZapIcon
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { EmptyState } from "@/components/PageHeader";
 import { api } from "@/lib/api";
 import { formatRelativeTime } from "@/components/chat/relative-time";
@@ -18,6 +30,10 @@ import {
   useJobs,
   useRoutineTemplates,
   useUninstallRoutineTemplate,
+  type RoutineLabelRule,
+  type RoutineSettingField,
+  type RoutineSettings,
+  type RoutineSettingsSection,
   type RoutineTemplateView
 } from "@/lib/queries";
 import type { JobRecord } from "@runtime/types";
@@ -27,10 +43,10 @@ import { chipFor } from "../chips";
 // Routine detail page (GiniRoutineDetail design handoff): breadcrumb, a
 // sticky hero card tinted with the template's chip color (enable toggle =
 // job pause/resume, Run Now action), and underline tabs — Recent sessions
-// (the installed job's run history), Settings (the template's option
-// toggles, saved via the idempotent re-install), and Info (real rows +
-// Delete routine). A template that isn't added renders the hero with an Add
-// button in place of the toggle and tabs.
+// (the installed job's run history), Settings (the template's per-function
+// settings sections, saved via the idempotent re-install), and Info (real
+// rows + Delete routine). A template that isn't added renders the hero with
+// an Add button in place of the toggle and tabs.
 export default function RoutineDetailPage({ params }: { params: Promise<{ templateId: string }> }) {
   const { templateId } = use(params);
   const templates = useRoutineTemplates();
@@ -96,15 +112,15 @@ function RoutineDetail({ template }: { template: RoutineTemplateView }) {
     );
   };
 
-  // Save re-installs with the edited options (idempotent per-template
+  // Save re-installs with the edited settings (idempotent per-template
   // replace server-side — the jobId changes, and the invalidated templates
   // query re-resolves the page onto the new job). The current job's
   // cronTimezone rides along so the schedule's timezone is preserved.
-  const submitSave = (options: Record<string, boolean>) => {
+  const submitSave = (settings: RoutineSettings) => {
     install.mutate(
       {
         id: template.id,
-        options,
+        settings,
         timezone: job?.cronTimezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone
       },
       {
@@ -126,7 +142,7 @@ function RoutineDetail({ template }: { template: RoutineTemplateView }) {
 
   const tabs = [
     { key: "sessions" as const, label: "Recent sessions" },
-    ...(template.options.length > 0 ? [{ key: "settings" as const, label: "Settings" }] : []),
+    ...(template.settings.length > 0 ? [{ key: "settings" as const, label: "Settings" }] : []),
     { key: "info" as const, label: "Info" }
   ];
 
@@ -232,7 +248,7 @@ function RoutineDetail({ template }: { template: RoutineTemplateView }) {
                 <SessionsTab jobId={installed.jobId} />
               ) : tab === "settings" ? (
                 // Keyed by jobId: a Save re-installs onto a fresh job, and the
-                // remount reseeds the toggles from the newly persisted options.
+                // remount reseeds the fields from the newly persisted settings.
                 <SettingsTab
                   key={installed.jobId}
                   template={template}
@@ -332,6 +348,21 @@ function SessionsTab({ jobId }: { jobId: string }) {
   );
 }
 
+// The swatch palette for labels added in the editor, cycled by list
+// position — the same eight design hexes the runtime catalog defaults use
+// (LABEL_COLOR_PALETTE in packages/runtime/src/runtime/routine-templates.ts).
+const LABEL_COLOR_PALETTE = ["#4277FB", "#12B5C4", "#F5820A", "#1FA463", "#EC6B9E", "#9B7DF0", "#7DA9FB", "#E8A317"];
+
+// The state the editor considers "saved": the installed job's
+// server-normalized settings (defaults filled, legacy installs mapped), or
+// the catalog defaults for a job predating settings provenance.
+function baselineSettings(template: RoutineTemplateView): RoutineSettings {
+  return (
+    template.installed?.settings ??
+    Object.fromEntries(template.settings.flatMap((section) => section.fields.map((field) => [field.key, field.defaultValue])))
+  );
+}
+
 function SettingsTab({
   template,
   pending,
@@ -339,50 +370,234 @@ function SettingsTab({
 }: {
   template: RoutineTemplateView;
   pending: boolean;
-  onSave: (options: Record<string, boolean>) => void;
+  onSave: (settings: RoutineSettings) => void;
 }) {
-  // Seed from the installed job's persisted options; a job predating
-  // templateOptions falls back to the catalog defaults.
-  const [values, setValues] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(
-      template.options.map((option) => [
-        option.key,
-        template.installed?.options?.[option.key] ?? option.defaultEnabled
-      ])
-    )
-  );
-  const dirty = template.options.some(
-    (option) => values[option.key] !== (template.installed?.options?.[option.key] ?? option.defaultEnabled)
-  );
+  const [values, setValues] = useState<RoutineSettings>(() => ({ ...baselineSettings(template) }));
+  const setField = (key: string, value: RoutineSettings[string]) =>
+    setValues((current) => ({ ...current, [key]: value }));
+
+  // Deep compare against the baseline in catalog field order, so key
+  // insertion order never fakes (or masks) a dirty state.
+  const serialize = (settings: RoutineSettings) =>
+    JSON.stringify(
+      template.settings.flatMap((section) =>
+        section.fields.map((field) => {
+          const value = settings[field.key];
+          return Array.isArray(value)
+            ? value.map((label) => [label.name, label.color, label.rule, label.autoArchive])
+            : value;
+        })
+      )
+    );
+  const dirty = serialize(values) !== serialize(baselineSettings(template));
 
   return (
     <div className="mt-6">
-      <div className="rounded-xl border border-border bg-card">
-        {template.options.map((option, index) => (
-          <div
-            key={option.key}
-            className={cn("flex items-start justify-between gap-5 px-5 py-4", index > 0 && "border-t border-border")}
-          >
-            <div className="min-w-0">
-              <div className="text-sm font-semibold">{option.label}</div>
-              {option.description ? (
-                <div className="mt-1 max-w-[480px] text-[13px] leading-normal text-muted-foreground">
-                  {option.description}
-                </div>
-              ) : null}
-            </div>
-            <SettingToggle
-              on={values[option.key] ?? option.defaultEnabled}
-              label={option.label}
-              onClick={() => setValues((current) => ({ ...current, [option.key]: !current[option.key] }))}
-            />
-          </div>
+      <div className="flex flex-col gap-4">
+        {template.settings.map((section) => (
+          <SettingsSection key={section.key} section={section} values={values} onChange={setField} />
         ))}
       </div>
       <Button size="sm" className="mt-4" disabled={!dirty || pending} onClick={() => onSave(values)}>
         {pending ? "Saving…" : "Save"}
       </Button>
     </div>
+  );
+}
+
+// One collapsible per-function card (the design's "Label new mail" section):
+// title + chevron header, then the section's fields divided by hairlines.
+function SettingsSection({
+  section,
+  values,
+  onChange
+}: {
+  section: RoutineSettingsSection;
+  values: RoutineSettings;
+  onChange: (key: string, value: RoutineSettings[string]) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const Chevron = open ? ChevronUpIcon : ChevronDownIcon;
+  return (
+    <div className="overflow-hidden rounded-xl border border-border bg-card">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+        className="flex w-full items-center justify-between gap-3 px-[22px] py-5 text-left"
+      >
+        <span className="text-base font-semibold">{section.title}</span>
+        <Chevron className="size-[18px] text-muted-foreground" aria-hidden />
+      </button>
+      {open ? (
+        <div className="px-[22px] pb-6 pt-1">
+          <div className="divide-y divide-border">
+            {section.fields.map((field) => (
+              <div key={field.key} className="py-5 first:pt-1.5 last:pb-0">
+                <SettingField field={field} value={values[field.key]} onChange={(value) => onChange(field.key, value)} />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SettingField({
+  field,
+  value,
+  onChange
+}: {
+  field: RoutineSettingField;
+  value: RoutineSettings[string] | undefined;
+  onChange: (value: RoutineSettings[string]) => void;
+}) {
+  if (field.kind === "toggle") {
+    const on = typeof value === "boolean" ? value : field.defaultValue;
+    return (
+      <div className="flex items-start justify-between gap-5">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold">{field.label}</div>
+          {field.description ? (
+            <div className="mt-1.5 max-w-[480px] text-[13px] leading-normal text-muted-foreground">
+              {field.description}
+            </div>
+          ) : null}
+        </div>
+        <SettingToggle on={on} label={field.label} onClick={() => onChange(!on)} />
+      </div>
+    );
+  }
+  if (field.kind === "text") {
+    return (
+      <div>
+        <div className="text-sm font-semibold">{field.label}</div>
+        {field.description ? (
+          <div className="mt-1 text-[13px] leading-normal text-muted-foreground">{field.description}</div>
+        ) : null}
+        <Textarea
+          className="mt-3"
+          value={typeof value === "string" ? value : field.defaultValue}
+          placeholder={field.placeholder}
+          aria-label={field.label}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      </div>
+    );
+  }
+  return (
+    <div>
+      <div className="text-sm font-semibold">{field.label}</div>
+      {field.description ? (
+        <div className="mt-1 text-[13px] leading-normal text-muted-foreground">{field.description}</div>
+      ) : null}
+      <LabelListEditor value={Array.isArray(value) ? value : field.defaultValue} onChange={onChange} />
+    </div>
+  );
+}
+
+// The filtering-label editor: one bordered card per label (swatch, inline
+// name input, Auto-archive mini toggle, remove) with the muted rule panel
+// below, then the Add new label input appending with a cycled palette color.
+function LabelListEditor({
+  value,
+  onChange
+}: {
+  value: RoutineLabelRule[];
+  onChange: (labels: RoutineLabelRule[]) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const update = (index: number, label: RoutineLabelRule) =>
+    onChange(value.map((current, i) => (i === index ? label : current)));
+  const addLabel = () => {
+    const name = draft.trim();
+    if (!name) return;
+    onChange([
+      ...value,
+      { name, color: LABEL_COLOR_PALETTE[value.length % LABEL_COLOR_PALETTE.length]!, rule: "", autoArchive: false }
+    ]);
+    setDraft("");
+  };
+  return (
+    <div className="mt-3.5 flex flex-col gap-3">
+      {value.map((label, index) => (
+        <div key={index} className="overflow-hidden rounded-lg border border-border">
+          <div className="flex items-center gap-3 px-3 py-[9px]">
+            <span className="size-3.5 shrink-0 rounded-[4px]" style={{ backgroundColor: label.color }} aria-hidden />
+            <input
+              value={label.name}
+              aria-label="Label name"
+              onChange={(event) => update(index, { ...label, name: event.target.value })}
+              className="min-w-0 flex-1 border-none bg-transparent text-sm font-medium outline-none"
+            />
+            <span className="shrink-0 text-[13px] text-muted-foreground">Auto-archive</span>
+            <MiniToggle
+              on={label.autoArchive}
+              label={`Auto-archive ${label.name}`}
+              onClick={() => update(index, { ...label, autoArchive: !label.autoArchive })}
+            />
+            <button
+              type="button"
+              aria-label={`Remove ${label.name}`}
+              onClick={() => onChange(value.filter((_, i) => i !== index))}
+              className="flex size-[26px] shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <XIcon className="size-4" aria-hidden />
+            </button>
+          </div>
+          <textarea
+            value={label.rule}
+            aria-label={`Rule for ${label.name}`}
+            rows={2}
+            onChange={(event) => update(index, { ...label, rule: event.target.value })}
+            className="block w-full resize-none bg-muted px-3.5 py-3 text-[13px] leading-normal text-foreground/80 outline-none"
+          />
+        </div>
+      ))}
+      <div className="flex items-center gap-2">
+        <Input
+          value={draft}
+          placeholder="Add new label..."
+          aria-label="Add new label"
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              addLabel();
+            }
+          }}
+        />
+        <Button type="button" size="icon" variant="outline" aria-label="Add label" disabled={!draft.trim()} onClick={addLabel}>
+          <PlusIcon aria-hidden />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// The label card's 40×23 Auto-archive toggle (the design's smaller variant
+// of SettingToggle).
+function MiniToggle({ on, label, onClick }: { on: boolean; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      onClick={onClick}
+      className={cn(
+        "relative h-[23px] w-10 shrink-0 rounded-full transition-colors",
+        on ? "bg-foreground" : "bg-foreground/25"
+      )}
+    >
+      <span
+        className={cn(
+          "absolute top-[2.5px] size-[18px] rounded-full transition-all",
+          on ? "left-[19.5px] bg-background" : "left-[2.5px] bg-white"
+        )}
+      />
+    </button>
   );
 }
 

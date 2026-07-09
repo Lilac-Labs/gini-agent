@@ -491,13 +491,31 @@ export function useApplyOnboardingRoutines() {
 
 // Routine-template gallery wire shapes — mirror RoutineTemplateView in
 // packages/runtime/src/runtime/routine-templates.ts (prompts/crons are
-// composed server-side; the browser only sends toggle state).
-export interface RoutineTemplateOption {
-  key: string;
-  label: string;
-  defaultEnabled: boolean;
-  description?: string;
+// composed server-side; the browser only sends settings state).
+export interface RoutineLabelRule {
+  name: string;
+  // UI-only swatch hex — never pushed to Gmail label colors.
+  color: string;
+  rule: string;
+  autoArchive: boolean;
 }
+
+// One editable field in a settings section, discriminated on `kind`.
+// `text` fields carry multiline textarea semantics.
+export type RoutineSettingField =
+  | { kind: "toggle"; key: string; label: string; description?: string; defaultValue: boolean }
+  | { kind: "text"; key: string; label: string; description?: string; placeholder?: string; defaultValue: string }
+  | { kind: "labelList"; key: string; label: string; description?: string; defaultValue: RoutineLabelRule[] };
+
+// A per-function settings group ("Label new mail"), one collapsible card on
+// the detail page. Field keys are flat across sections.
+export interface RoutineSettingsSection {
+  key: string;
+  title: string;
+  fields: RoutineSettingField[];
+}
+
+export type RoutineSettings = Record<string, boolean | string | RoutineLabelRule[]>;
 
 export interface RoutineTemplateView {
   id: string;
@@ -505,15 +523,16 @@ export interface RoutineTemplateView {
   description: string;
   icon: string;
   scheduleHint: string;
-  options: RoutineTemplateOption[];
-  // `options` is the resolved option state the job was installed with —
-  // absent on templates without options and on jobs predating it.
+  settings: RoutineSettingsSection[];
+  // `settings` is the resolved settings state the job was installed with
+  // (server-normalized, defaults filled — including legacy installs) —
+  // absent on templates without settings and on jobs predating provenance.
   // `chatSessionId` is the routine's dedicated conversation (absent only on
   // jobs predating session provisioning) — the Open messages deep link.
   installed: {
     jobId: string;
     status: JobRecord["status"];
-    options?: Record<string, boolean>;
+    settings?: RoutineSettings;
     chatSessionId?: string;
   } | null;
 }
@@ -534,7 +553,7 @@ export function useRoutineTemplates() {
 // replace server-side; returns the created JobRecord.
 export function useInstallRoutineTemplate() {
   const qc = useQueryClient();
-  return useMutation<JobRecord, Error, { id: string; timezone?: string; options?: Record<string, boolean> }>({
+  return useMutation<JobRecord, Error, { id: string; timezone?: string; settings?: RoutineSettings }>({
     mutationFn: ({ id, ...body }) =>
       api<JobRecord>(`/routines/templates/${encodeURIComponent(id)}/install`, {
         method: "POST",

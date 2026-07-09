@@ -206,6 +206,13 @@ const MAX_INLINE_SKILL_SCRIPT_ROWS = 40;
 const MAX_IDENTICAL_TOOL_REPEATS = 3;
 const MAX_SAME_ACTION_REPEATS = 6;
 const MAX_NAVIGATION_WITHOUT_ACTION = 8;
+// Bounded re-issue budget for the dropped-tool-call anomaly: the provider
+// reports finishReason "tool_calls" but no tool call survived parsing (a
+// truncated id/name delta the parsers drop). Re-issuing a few times lets a
+// transient parse gap self-heal instead of silently completing the turn, while
+// the cap stops a persistently broken provider from spinning to the iteration
+// limit.
+const MAX_EMPTY_TOOLCALL_RETRIES = 3;
 // Whether an all-chat.choice park exposes the `needs_input` task status.
 // GINI_NEEDS_INPUT_STATUS=0 is a one-release compat escape hatch for clients
 // whose status renderers lag behind the TaskStatus expansion (mobile): the
@@ -2148,6 +2155,7 @@ async function runLoop(
   let sameActionRunLength = 0;
   let navStall = initialNavStallState();
   let loopStallReason: "repeat" | "navigation" | undefined;
+  let emptyToolCallRetries = 0;
 
   // The current turn's most recent pre-tool-call narration. This — never a
   // re-scan of workingMessages — is what the partial-result exit below
@@ -2823,6 +2831,27 @@ async function runLoop(
     // The model's text for this turn, used by both the final-answer and
     // tool-call paths.
     const cleanedTurnText = result.text || "";
+
+    // Dropped-tool-call reconciliation (OPE-66): a finishReason of "tool_calls"
+    // with an empty toolCalls array means the model asked for a tool but its
+    // id/name delta never survived the provider parser (the `if (!id || !name)
+    // continue` drops). The loop otherwise keys done-vs-continue solely on an
+    // empty toolCalls array, so this would silently complete the turn mid-task.
+    // Re-issue the model call a bounded number of times — a one-off dropped
+    // delta self-heals — before falling through to the (now traced) finish.
+    if (
+      result.toolCalls.length === 0 &&
+      result.finishReason === "tool_calls" &&
+      emptyToolCallRetries < MAX_EMPTY_TOOLCALL_RETRIES
+    ) {
+      emptyToolCallRetries += 1;
+      appendTrace(config.instance, taskId, {
+        type: "warning",
+        message: `Provider reported finishReason "tool_calls" but no tool call parsed; re-issuing (attempt ${emptyToolCallRetries}/${MAX_EMPTY_TOOLCALL_RETRIES}).`,
+        data: { iterations, finishReason: result.finishReason }
+      });
+      continue;
+    }
 
     // Final answer path: no tool calls, model said stop (or unknown but
     // produced text).

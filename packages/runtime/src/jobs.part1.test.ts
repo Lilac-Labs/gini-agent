@@ -1542,6 +1542,9 @@ describe("job deliveryTargets delivery", () => {
         },
         async addReaction() {
           return true as const;
+        },
+        async removeReaction() {
+          return true as const;
         }
       })
     });

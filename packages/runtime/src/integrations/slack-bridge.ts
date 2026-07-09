@@ -400,9 +400,11 @@ async function routeInboundAndMirrorReply(
   // reply. Started unawaited; the finally below reaps it so the tracked
   // worker still drains its own I/O before settling (the same
   // decoupling shape as the Discord typing pulse). The loop signal
-  // rides along so a hung call cancels on shutdown.
+  // rides along so a hung call cancels on shutdown. Resolves `true`
+  // when the add succeeded (so we know a reaction exists to remove),
+  // `false` when the add failed.
   const reactionDone = client.addReaction(incoming.channelId, incoming.ts, "eyes", signal).then(
-    () => undefined,
+    () => true,
     (error: unknown) => {
       if (!signal.aborted) {
         appendLog(config.instance, "messaging.slack.reaction_error", {
@@ -411,27 +413,50 @@ async function routeInboundAndMirrorReply(
           error: error instanceof Error ? error.message : String(error)
         });
       }
+      return false;
     }
   );
 
+  let reachedTerminal = false;
   try {
-    await mirrorReply(config, bridgeId, incoming, signal, record.taskId);
+    reachedTerminal = await mirrorReply(config, bridgeId, incoming, signal, record.taskId);
   } finally {
-    await reactionDone;
+    const reactionAdded = await reactionDone;
+    // Remove the 👀 ack after the turn completes — the reaction served
+    // its "working on it" purpose. Only attempt removal when (a) the
+    // add actually succeeded and (b) the task reached terminal state
+    // (if it timed out on the non-terminal path, the 👀 stays as an
+    // honest "still working" signal). Signal-threaded, quiet on abort.
+    if (reactionAdded && reachedTerminal && !signal.aborted) {
+      try {
+        await client.removeReaction(incoming.channelId, incoming.ts, "eyes", signal);
+      } catch (error: unknown) {
+        if (!signal.aborted) {
+          appendLog(config.instance, "messaging.slack.reaction_remove_error", {
+            bridgeId,
+            channelId: incoming.channelId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+    }
   }
 }
 
 // Terminal-wait + reply dispatch for one routed message. Split from
 // routeInboundAndMirrorReply so the reaction ack above can be reaped in
 // a single finally regardless of which early return ends the mirror.
+// Returns `true` when the task reached terminal state (the turn is
+// over, regardless of whether a reply actually posted), `false` when
+// it did not (no taskId, timeout, abort, or session not found).
 async function mirrorReply(
   config: RuntimeConfig,
   bridgeId: string,
   incoming: IncomingSlackMessage,
   signal: AbortSignal,
   taskId: string | undefined
-): Promise<void> {
-  if (!taskId) return;
+): Promise<boolean> {
+  if (!taskId) return false;
 
   // Gate the reply on the task actually reaching terminal state —
   // syncChatTaskResult throws "not ready for chat sync" otherwise.
@@ -442,7 +467,7 @@ async function mirrorReply(
     "messaging.slack.task_wait_timeout"
   );
 
-  if (signal.aborted) return;
+  if (signal.aborted) return false;
 
   if (terminalStatus === undefined || !isTerminalTaskStatus(terminalStatus)) {
     appendLog(config.instance, "messaging.slack.reply_skip_non_terminal", {
@@ -450,11 +475,11 @@ async function mirrorReply(
       taskId,
       status: terminalStatus
     });
-    return;
+    return false;
   }
 
   const session = findSlackChatSession(config, bridgeId, incoming.channelId, incoming.threadTs);
-  if (!session || !session.source || session.source.kind !== "slack") return;
+  if (!session || !session.source || session.source.kind !== "slack") return true;
 
   let replyText: string | undefined;
   try {
@@ -466,16 +491,16 @@ async function mirrorReply(
       taskId,
       error: error instanceof Error ? error.message : String(error)
     });
-    return;
+    return true;
   }
 
-  if (!replyText || replyText.trim().length === 0) return;
+  if (!replyText || replyText.trim().length === 0) return true;
 
   // Re-check abort just before dispatch. The signal is also threaded
   // into sendMessagingOutput so a hung Slack POST gets cancelled on
   // shutdown — without that, stopAll (which awaits this worker) would
   // block forever on a stuck send.
-  if (signal.aborted) return;
+  if (signal.aborted) return true;
   try {
     // threadTs is the session's thread ROOT ts — the reply lands
     // inside the thread anchored on the user's top-level message.
@@ -498,6 +523,7 @@ async function mirrorReply(
       error: error instanceof Error ? error.message : String(error)
     });
   }
+  return true;
 }
 
 // Test seam: exposes the event translator + reply mirror so their

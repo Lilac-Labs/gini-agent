@@ -95,4 +95,25 @@ describe("slack client", () => {
     expect(calls[0]?.url).toBe("https://slack.com/api/reactions.add");
     expect(calls[0]?.body).toEqual({ channel: "D1", timestamp: "1700000000.000100", name: "eyes" });
   });
+
+  test("removeReaction posts the reactions.remove payload", async () => {
+    const { fetchImpl, calls } = stubFetch([{ body: { ok: true } }]);
+    const client = createSlackClient("xoxb-abc", { fetchImpl });
+    await client.removeReaction("D1", "1700000000.000100", "eyes");
+    expect(calls[0]?.url).toBe("https://slack.com/api/reactions.remove");
+    expect(calls[0]?.body).toEqual({ channel: "D1", timestamp: "1700000000.000100", name: "eyes" });
+  });
+
+  test("removeReaction treats no_reaction as success (idempotent removal)", async () => {
+    const { fetchImpl } = stubFetch([{ body: { ok: false, error: "no_reaction" } }]);
+    const client = createSlackClient("xoxb-abc", { fetchImpl });
+    const result = await client.removeReaction("D1", "1700000000.000100", "eyes");
+    expect(result).toBe(true);
+  });
+
+  test("removeReaction throws on errors other than no_reaction", async () => {
+    const { fetchImpl } = stubFetch([{ body: { ok: false, error: "channel_not_found" } }]);
+    const client = createSlackClient("xoxb-abc", { fetchImpl });
+    await expect(client.removeReaction("D1", "1700000000.000100", "eyes")).rejects.toThrow(/channel_not_found/);
+  });
 });

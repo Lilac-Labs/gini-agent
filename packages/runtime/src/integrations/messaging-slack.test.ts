@@ -62,6 +62,10 @@ function stubSlackClient(overrides: Partial<SlackClient> = {}): { client: SlackC
       calls.push({ method: "addReaction", args: [channel, timestamp, name] });
       return true as const;
     },
+    removeReaction: async (channel, timestamp, name) => {
+      calls.push({ method: "removeReaction", args: [channel, timestamp, name] });
+      return true as const;
+    },
     ...overrides
   };
   return { client, calls };

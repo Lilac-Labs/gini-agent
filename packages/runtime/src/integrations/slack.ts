@@ -51,6 +51,11 @@ export interface SlackClient {
   // inbound ack (Slack has no bot typing indicator). Best-effort at
   // the call site — a failure is logged, never gates the reply.
   addReaction(channel: string, timestamp: string, name: string, signal?: AbortSignal): Promise<true>;
+  // Remove an emoji reaction from a message. The bridge removes the
+  // "eyes" ack after the turn completes. Treats Slack's `no_reaction`
+  // error as success (idempotent removal — the reaction may have been
+  // removed by the user or never actually added).
+  removeReaction(channel: string, timestamp: string, name: string, signal?: AbortSignal): Promise<true>;
 }
 
 export type SlackFetch = typeof fetch;
@@ -138,6 +143,20 @@ export function createSlackClient(token: string, options: SlackClientOptions = {
     addReaction: async (channel, timestamp, name, signal) => {
       if (!channel) throw new Error("Slack channel id is required.");
       await call<SlackEnvelope>("reactions.add", { channel, timestamp, name }, signal);
+      return true as const;
+    },
+    removeReaction: async (channel, timestamp, name, signal) => {
+      if (!channel) throw new Error("Slack channel id is required.");
+      try {
+        await call<SlackEnvelope>("reactions.remove", { channel, timestamp, name }, signal);
+      } catch (error) {
+        // Slack returns `no_reaction` when the reaction doesn't exist
+        // on the message. Treat as success — idempotent removal.
+        if (error instanceof Error && error.message.includes("no_reaction")) {
+          return true as const;
+        }
+        throw error;
+      }
       return true as const;
     }
   };

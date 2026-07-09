@@ -1909,6 +1909,9 @@ describe("cron lifecycle", () => {
         },
         async addReaction() {
           return true as const;
+        },
+        async removeReaction() {
+          return true as const;
         }
       })
     });

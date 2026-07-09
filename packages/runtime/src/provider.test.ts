@@ -35,6 +35,7 @@ import {
   providerHealth,
   providerReauth,
   redactSecrets,
+  isResponsesApiRequiredError,
   setEchoToolCallingResponse,
   setEchoVisionResponse,
   shouldUseResponsesWebSearch,
@@ -6448,6 +6449,57 @@ describe("hosted native web search (Responses API)", () => {
         restoreHosted();
       }
     });
+  });
+
+  describe("isResponsesApiRequiredError", () => {
+    test("matches the gpt-5.x '/v1/responses' 400 and nothing else", () => {
+      expect(isResponsesApiRequiredError(new Error(
+        "Function tools with reasoning_effort are not supported for gpt-5.5 in /v1/chat/completions. Please use /v1/responses instead."
+      ))).toBe(true);
+      expect(isResponsesApiRequiredError(new Error("429 rate limited"))).toBe(false);
+      expect(isResponsesApiRequiredError("a bare /v1/responses string")).toBe(true);
+      expect(isResponsesApiRequiredError(undefined)).toBe(false);
+    });
+  });
+
+  test("non-hosted openai tool turn falls back to /responses when chat/completions demands it (gpt-5.x)", async () => {
+    // A guest whose GINI_HOSTED marker is unset (older provisioning the /app-only
+    // roll can't rewrite) takes the chat/completions path, which a gpt-5.x
+    // deployment rejects with a 400 naming the Responses API. The turn must retry
+    // there instead of hard-failing.
+    const restoreHosted = setEnv("GINI_HOSTED", undefined);
+    const restoreKey = setEnv("OPENAI_API_KEY", "sk-fallback");
+    let call = 0;
+    const stub = installFetch(() => {
+      call += 1;
+      if (call === 1) {
+        return anthropicJson({ error: { message: "Function tools with reasoning_effort are not supported for gpt-5.5 in /v1/chat/completions. Please use /v1/responses instead." } }, 400);
+      }
+      return anthropicSse([
+        { event: "response.output_text.delta", data: { type: "response.output_text.delta", delta: "Example Domain" } },
+        { event: "response.completed", data: { type: "response.completed", response: { id: "resp_fb_1", usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 }, output: [{ id: "msg_1", type: "message", content: [{ type: "output_text", text: "Example Domain" }] }] } } }
+      ]);
+    });
+    try {
+      const provider = normalizeProvider({ name: "openai", model: "gini-model", baseUrl: "https://edge.example" });
+      let streamed = "";
+      const result = await generateToolCallingResponse(
+        config(provider),
+        [{ role: "user", content: "open example.com and read the heading" }],
+        [fileListTool],
+        (delta) => { streamed += delta; }
+      );
+      expect(result.text).toBe("Example Domain");
+      expect(streamed).toBe("Example Domain");
+      // Two fetches: chat/completions (400), then the /responses recovery.
+      expect(stub.calls.length).toBe(2);
+      expect(stub.calls[0].url).toBe("https://edge.example/chat/completions");
+      expect(stub.calls[1].url).toBe("https://edge.example/responses");
+    } finally {
+      stub.restore();
+      restoreKey();
+      restoreHosted();
+    }
   });
 
   test("hosted openai routes through /responses with the built-in web_search tool", async () => {

@@ -1154,7 +1154,25 @@ export async function generateToolCallingResponse(
       return callResponsesWithWebSearch(provider, messages, tools, onDelta, signal, onWebSearch);
     }
 
-    return callToolCallingChatCompletions(provider, messages, tools, onDelta, signal);
+    // Chat Completions is the default openai/azure tool-calling path. A gpt-5.x
+    // deployment rejects function tools + reasoning_effort here and demands the
+    // Responses API (a 400 whose message names /v1/responses). That surfaces on
+    // the hosted edge for a guest whose GINI_HOSTED marker is unset — older
+    // provisioning that the /app-only fleet roll can't rewrite. Retry that exact
+    // failure on the Responses path so the turn succeeds instead of hard-failing;
+    // only openai/azure providers can hit it, and the error is specific enough
+    // that a normal turn is never re-routed.
+    try {
+      return await callToolCallingChatCompletions(provider, messages, tools, onDelta, signal);
+    } catch (error) {
+      if (
+        (provider.name === "openai" || provider.name === "azure") &&
+        isResponsesApiRequiredError(error)
+      ) {
+        return callResponsesWithWebSearch(provider, messages, tools, onDelta, signal, onWebSearch);
+      }
+      throw error;
+    }
   };
   try {
     return await dispatch();
@@ -4068,6 +4086,15 @@ function responsesUrl(provider: ProviderConfig, baseUrl: string): string {
 export function shouldUseResponsesWebSearch(provider: ProviderConfig): boolean {
   if (provider.name !== "openai" && provider.name !== "azure") return false;
   return process.env.GINI_HOSTED === "1";
+}
+
+// A gpt-5.x deployment rejects function tools + reasoning_effort on Chat
+// Completions with a 400 whose message names the Responses API as the remedy
+// ("Please use /v1/responses instead"). Detect that specific error so a
+// tool-calling turn can retry on the Responses path instead of hard-failing.
+export function isResponsesApiRequiredError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message.includes("/v1/responses");
 }
 
 // Route an OpenAI/Azure tool-calling turn through the Responses API so the

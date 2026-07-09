@@ -4866,9 +4866,27 @@ export async function browserUploadFileApproved(
     return await withSession(taskId, async (session) => {
       // Trust boundary: the approval was granted for the exact stamped
       // element — no resolveRefForAction self-healing here; a lost stamp
-      // fails loudly (see ADR browser-fill-secret.md).
+      // fails loudly (see ADR browser-fill-secret.md). The liveness
+      // pre-check below keeps that stance: it exists only to fail FAST
+      // with actionable guidance when the stamped node vanished between
+      // approval and execution (a menu closed, an SPA re-render), instead
+      // of hanging 10s in setInputFiles and surfacing a raw Playwright
+      // timeout. Unit tests plant minimal locator stubs without count();
+      // treat those as live (same guard as resolveRefForAction).
       const target = session.refs.get(ref);
       if (!target) return fail(`Unknown ref ${ref}. Take a fresh snapshot first.`);
+      if (typeof target.locator.count === "function") {
+        let stampedCount = 0;
+        try {
+          stampedCount = await target.locator.count();
+        } catch {
+          // A failing count (page navigating mid-call, context churn)
+          // reads as a lost stamp: same fast, actionable failure.
+        }
+        if (stampedCount === 0) {
+          return fail(`The element for ${ref} is no longer on the page — it re-rendered or a menu closed since the snapshot. Take a fresh browser_snapshot and retry with the new ref.`);
+        }
+      }
       await target.locator.setInputFiles(resolved.absolute, { timeout: 10_000 });
       const snap = await snapshot(session.page, false, taskId);
       session.refs = snap.refs;
@@ -4946,9 +4964,28 @@ export async function browserDownloadApproved(
       // Trust boundary: the approval was granted for the exact stamped
       // element — no resolveRefForAction self-healing here; a lost stamp
       // fails loudly (same stance as browser_upload_file; see ADR
-      // browser-fill-secret.md).
+      // browser-fill-secret.md). The liveness pre-check below keeps that
+      // stance: it exists only to fail FAST with actionable guidance when
+      // the stamped node vanished between approval and execution (the
+      // common case: downloading from a row menu that closed after the
+      // previous download), instead of hanging 10s in the click and
+      // surfacing a raw Playwright timeout the model then burns minutes
+      // investigating. Unit tests plant minimal locator stubs without
+      // count(); treat those as live (same guard as resolveRefForAction).
       const target = session.refs.get(ref);
       if (!target) return fail(`Unknown ref ${ref}. Take a fresh snapshot first.`);
+      if (typeof target.locator.count === "function") {
+        let stampedCount = 0;
+        try {
+          stampedCount = await target.locator.count();
+        } catch {
+          // A failing count (page navigating mid-call, context churn)
+          // reads as a lost stamp: same fast, actionable failure.
+        }
+        if (stampedCount === 0) {
+          return fail(`The element for ${ref} is no longer on the page — it re-rendered or a menu closed since the snapshot. Take a fresh browser_snapshot and retry with the new ref.`);
+        }
+      }
       if (typeof session.page.waitForEvent !== "function") {
         return fail("Download capture is not supported by this browser session.");
       }

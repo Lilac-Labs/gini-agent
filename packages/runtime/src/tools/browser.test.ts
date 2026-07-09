@@ -19,6 +19,7 @@ import {
   browserSnapshot,
   browserTabs,
   browserUploadFile,
+  browserUploadFileApproved,
   browserVision,
   browserWaitFor,
   chromeProfileDirFor,
@@ -5474,6 +5475,92 @@ describe("browserUploadFile", () => {
   });
 });
 
+// Approved-upload executor: stale-stamp liveness pre-check. The stamp can
+// be destroyed between approval and execution (a menu closing, an SPA
+// re-render); the pre-check must fail immediately with snapshot guidance
+// instead of hanging 10s in setInputFiles and surfacing a raw Playwright
+// timeout — while the no-heal trust boundary stands (no re-resolution; see
+// ADR browser-fill-secret.md). The path/symlink validation surface is
+// covered by the browserUploadFile suite above (both share
+// resolveUploadPath).
+describe("browserUploadFileApproved", () => {
+  const UPLOAD_ROOT = "/tmp/gini-browser-upload-approved-tests";
+  const WORKSPACE = join(UPLOAD_ROOT, "workspace");
+
+  beforeEach(() => {
+    rmSync(UPLOAD_ROOT, { recursive: true, force: true });
+    mkdirSync(WORKSPACE, { recursive: true });
+    writeFileSync(join(WORKSPACE, "upload.txt"), "hello\n");
+  });
+
+  afterEach(() => {
+    browserTest.clearFakeSessionsForTest();
+    browserTest.setInFlightDisconnectsForTest(0);
+    rmSync(UPLOAD_ROOT, { recursive: true, force: true });
+  });
+
+  function installUploadSession(taskId: string, loc: unknown): void {
+    browserTest.installFakeSessionWithPageForTest(taskId, makeFakePageForRefTools("https://example.com/form"));
+    const refs = new Map<string, unknown>();
+    refs.set("@e2", loc);
+    browserTest.setFakeSessionRefsForTest(taskId, refs);
+  }
+
+  test("fails fast with snapshot guidance when the stamped element vanished (count 0)", async () => {
+    let setInputCalls = 0;
+    installUploadSession("upload-approved-stale", {
+      count: async () => 0,
+      setInputFiles: async () => {
+        setInputCalls++;
+      }
+    });
+
+    const raw = await browserUploadFileApproved("upload-approved-stale", "@e2", WORKSPACE, "upload.txt");
+    const parsed = JSON.parse(raw) as { success: boolean; error?: string };
+    expect(parsed.success).toBe(false);
+    expect(parsed.error).toContain("no longer on the page");
+    expect(parsed.error).toContain("browser_snapshot");
+    // Must never have reached setInputFiles.
+    expect(setInputCalls).toBe(0);
+  });
+
+  test("a count() that throws reads as a lost stamp and fails fast", async () => {
+    let setInputCalls = 0;
+    installUploadSession("upload-approved-count-throw", {
+      count: async () => {
+        throw new Error("Execution context was destroyed");
+      },
+      setInputFiles: async () => {
+        setInputCalls++;
+      }
+    });
+
+    const raw = await browserUploadFileApproved("upload-approved-count-throw", "@e2", WORKSPACE, "upload.txt");
+    const parsed = JSON.parse(raw) as { success: boolean; error?: string };
+    expect(parsed.success).toBe(false);
+    expect(parsed.error).toContain("no longer on the page");
+    expect(setInputCalls).toBe(0);
+  });
+
+  test("a live stamped element (count > 0) proceeds to setInputFiles", async () => {
+    let captured: { files?: unknown; timeout?: number } | undefined;
+    installUploadSession("upload-approved-live", {
+      count: async () => 1,
+      setInputFiles: async (files: unknown, opts?: { timeout?: number }) => {
+        captured = { files, timeout: opts?.timeout };
+      }
+    });
+
+    const raw = await browserUploadFileApproved("upload-approved-live", "@e2", WORKSPACE, "upload.txt");
+    const parsed = JSON.parse(raw) as { success: boolean; path?: string };
+    expect(parsed.success).toBe(true);
+    expect(parsed.path).toBe("upload.txt");
+    expect(captured).toBeDefined();
+    expect(captured!.timeout).toBe(10_000);
+    expect(String(captured!.files).endsWith("/upload.txt")).toBe(true);
+  });
+});
+
 // PDF detection at the navigation boundary: an application/pdf response
 // returns extracted text (bounded to the snapshot char budget) instead of
 // a useless viewer-DOM snapshot; extraction failures degrade to a
@@ -6006,6 +6093,89 @@ describe("browserDownloadApproved", () => {
     expect(parsed.success).toBe(false);
     expect(parsed.error).toContain("Unknown ref @e99");
     expect(healingQueried).toBe(0);
+  });
+
+  test("fails fast with snapshot guidance when the stamped element vanished (count 0)", async () => {
+    // The stamp can be destroyed between approval and execution — the
+    // common case is downloading from a row menu that closed after the
+    // previous download. The pre-check must fail immediately with
+    // actionable guidance instead of hanging 10s in the click and
+    // surfacing a raw Playwright timeout. Still no self-healing: the
+    // no-heal trust boundary stands (see ADR browser-fill-secret.md).
+    let clicks = 0;
+    const fakePage = {
+      ...makeFakePageForRefTools("https://portal.example.com/invoices"),
+      waitForEvent: (() => new Promise(() => undefined)) as unknown as import("playwright-core").Page["waitForEvent"]
+    };
+    browserTest.installFakeSessionWithPageForTest("dl-stale", fakePage);
+    const refs = new Map<string, unknown>();
+    refs.set("@e2", {
+      count: async () => 0,
+      click: async () => {
+        clicks++;
+      }
+    });
+    browserTest.setFakeSessionRefsForTest("dl-stale", refs);
+
+    const raw = await browserDownloadApproved("dl-stale", "@e2", "dl-stale-inst");
+    const parsed = JSON.parse(raw) as { success: boolean; error?: string };
+    expect(parsed.success).toBe(false);
+    expect(parsed.error).toContain("no longer on the page");
+    expect(parsed.error).toContain("browser_snapshot");
+    // Must never have reached the click.
+    expect(clicks).toBe(0);
+  });
+
+  test("a count() that throws reads as a lost stamp and fails fast", async () => {
+    let clicks = 0;
+    const fakePage = {
+      ...makeFakePageForRefTools("https://portal.example.com/invoices"),
+      waitForEvent: (() => new Promise(() => undefined)) as unknown as import("playwright-core").Page["waitForEvent"]
+    };
+    browserTest.installFakeSessionWithPageForTest("dl-count-throw", fakePage);
+    const refs = new Map<string, unknown>();
+    refs.set("@e2", {
+      count: async () => {
+        throw new Error("Execution context was destroyed");
+      },
+      click: async () => {
+        clicks++;
+      }
+    });
+    browserTest.setFakeSessionRefsForTest("dl-count-throw", refs);
+
+    const raw = await browserDownloadApproved("dl-count-throw", "@e2", "dl-count-throw-inst");
+    const parsed = JSON.parse(raw) as { success: boolean; error?: string };
+    expect(parsed.success).toBe(false);
+    expect(parsed.error).toContain("no longer on the page");
+    expect(clicks).toBe(0);
+  });
+
+  test("a live stamped element (count > 0) proceeds to the click and save", async () => {
+    const download = {
+      suggestedFilename: () => "live.pdf",
+      saveAs: async (p: string) => writeFileSync(p, "x")
+    };
+    let clicks = 0;
+    const fakePage = {
+      ...makeFakePageForRefTools("https://portal.example.com/invoices"),
+      waitForEvent: (() => Promise.resolve(download)) as unknown as import("playwright-core").Page["waitForEvent"]
+    };
+    browserTest.installFakeSessionWithPageForTest("dl-live", fakePage);
+    const refs = new Map<string, unknown>();
+    refs.set("@e2", {
+      count: async () => 1,
+      click: async () => {
+        clicks++;
+      }
+    });
+    browserTest.setFakeSessionRefsForTest("dl-live", refs);
+
+    const raw = await browserDownloadApproved("dl-live", "@e2", "dl-live-inst");
+    const parsed = JSON.parse(raw) as { success: boolean; path?: string };
+    expect(parsed.success).toBe(true);
+    expect(clicks).toBe(1);
+    expect(parsed.path).toBe(join(downloadsDirFor("dl-live-inst"), "live.pdf"));
   });
 
   test("fails with a browser_navigate steer when the click never triggers a download", async () => {

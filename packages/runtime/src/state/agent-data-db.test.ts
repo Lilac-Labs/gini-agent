@@ -74,6 +74,10 @@ describe("agent-data-db", () => {
     expect(() => dbExecute(inst, A, "INSERT INTO contacts (first_name, url) VALUES ('U', 'slashy.com')")).toThrow(/CHECK/i);
     expect(() => dbExecute(inst, A, "INSERT INTO contacts (first_name, phone) VALUES ('P', '(404) 729-4874')")).toThrow(/CHECK/i);
     expect(() => dbExecute(inst, A, "INSERT INTO contacts (first_name) VALUES ('  ')")).toThrow(/CHECK/i);
+    expect(() => dbExecute(inst, A, "INSERT INTO contacts (first_name, category) VALUES ('C', 'Vendor')")).toThrow(/CHECK/i);
+    dbExecute(inst, A, "INSERT INTO contacts (first_name, category) VALUES ('Cat', 'Work')");
+    expect(() => dbExecute(inst, A, "UPDATE contacts SET category = 'friendz' WHERE first_name = 'Cat'")).toThrow(/CHECK/i);
+    dbExecute(inst, A, "UPDATE contacts SET category = 'Personal' WHERE first_name = 'Cat'");
     dbExecute(inst, A, "INSERT INTO contacts (first_name, email_address, url, phone) VALUES ('Ok', 'ok@x.io', 'https://x.io', '+14047294874')");
     // Two email-less people with the same name collide (partial unique index);
     // the same name WITH an email doesn't.
@@ -242,6 +246,28 @@ describe("agent-data-db", () => {
     const cols = dbListTables(inst, "agent_custom").find((t) => t.name === "contacts")!.columns.map((c) => c.name);
     expect(cols).not.toContain("id");
     expect(cols).toContain("updated_at"); // additive migrations still apply
+  });
+
+  test("a table that gained category via ALTER enforces its values through the guard triggers", () => {
+    // A pre-category modern table: ALTER (migration 0005) can't attach a
+    // CHECK, so the recreated-on-open triggers must do the enforcement.
+    const inst = "add-cat-alter";
+    const path = agentDataDbPath(inst, "agent_cat");
+    mkdirSync(dirname(path), { recursive: true });
+    const raw = new Database(path, { create: true });
+    raw.exec(`CREATE TABLE contacts (
+      id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+      first_name TEXT NOT NULL, last_name TEXT, email_address TEXT UNIQUE,
+      company TEXT, position TEXT, url TEXT, phone TEXT,
+      description TEXT, profile TEXT, last_spoke_at INTEGER,
+      updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
+    )`);
+    raw.close();
+    expect(dbListTables(inst, "agent_cat").find((t) => t.name === "contacts")!.columns.map((c) => c.name)).toContain("category");
+    expect(() => dbExecute(inst, "agent_cat", "INSERT INTO contacts (first_name, category) VALUES ('X', 'associate')")).toThrow(/CHECK/i);
+    dbExecute(inst, "agent_cat", "INSERT INTO contacts (first_name, category) VALUES ('X', 'Work')");
+    expect(() => dbExecute(inst, "agent_cat", "UPDATE contacts SET category = 'nope'")).toThrow(/CHECK/i);
+    dbExecute(inst, "agent_cat", "UPDATE contacts SET category = NULL");
   });
 
   test("a failing migration rolls back and surfaces instead of half-applying", () => {

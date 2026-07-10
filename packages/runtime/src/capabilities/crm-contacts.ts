@@ -4,7 +4,7 @@
 // is a deliberately narrow projection of the agent database — not a general
 // query surface (see ADR agent-database.md) — so web/mobile clients can
 // render the directory without agent SQL reaching the wire.
-import { dbQuery } from "../state/agent-data-db";
+import { AgentDataError, dbExecute, dbQuery } from "../state/agent-data-db";
 import { readState } from "../state";
 import type { RuntimeConfig } from "../types";
 
@@ -64,6 +64,63 @@ export function listCrmContacts(config: RuntimeConfig): { contacts: CrmContactSu
     `SELECT ${SUMMARY_COLUMNS} FROM contacts ORDER BY lower(first_name), lower(COALESCE(last_name, ''))`,
   ).rows;
   return { contacts: rows.map(toSummary) };
+}
+
+export interface CreateCrmContactInput {
+  firstName?: unknown;
+  lastName?: unknown;
+  email?: unknown;
+  company?: unknown;
+  position?: unknown;
+  category?: unknown;
+  phone?: unknown;
+  description?: unknown;
+}
+
+function optionalText(value: unknown, field: string): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new Error(`Invalid input: ${field} must be a string.`);
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+// Manual creation from the People screen. Normalization the schema can do
+// deterministically happens here (email lowercased); everything else is
+// arbitrated by the table's own CHECKs/triggers, whose violations surface
+// as 400s rather than opaque 500s.
+export function createCrmContact(config: RuntimeConfig, input: CreateCrmContactInput): CrmContactDetail {
+  const firstName = optionalText(input.firstName, "firstName");
+  if (!firstName) throw new Error("Invalid input: firstName is required.");
+  const email = optionalText(input.email, "email")?.toLowerCase() ?? null;
+  const agentId = owningAgentId(config);
+  try {
+    const result = dbExecute(
+      config.instance,
+      agentId,
+      `INSERT INTO contacts (first_name, last_name, email_address, company, position, category, phone, description)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        firstName,
+        optionalText(input.lastName, "lastName"),
+        email,
+        optionalText(input.company, "company"),
+        optionalText(input.position, "position"),
+        optionalText(input.category, "category"),
+        optionalText(input.phone, "phone"),
+        optionalText(input.description, "description"),
+      ],
+    );
+    const row = dbQuery(
+      config.instance,
+      agentId,
+      `SELECT ${SUMMARY_COLUMNS}, profile FROM contacts WHERE rowid = ?`,
+      [result.lastInsertRowid],
+    ).rows[0]!;
+    return { ...toSummary(row), profile: (row.profile as string | null) ?? null };
+  } catch (error) {
+    if (error instanceof AgentDataError) throw new Error(`Invalid input: ${error.message}`);
+    throw error;
+  }
 }
 
 export function getCrmContact(config: RuntimeConfig, id: string): CrmContactDetail | undefined {

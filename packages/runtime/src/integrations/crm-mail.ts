@@ -5,7 +5,7 @@
 //
 // SECURITY: refresh credentials and minted access tokens live in function
 // locals only — never logged, never persisted, never included in errors.
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
 import type { CrmMail, CrmAddress } from "../jobs/crm-extraction-pipeline";
@@ -311,7 +311,19 @@ export function gmailCrmMailSource(options: { configDir?: string; fetchImpl?: Fe
 // ---------------------------------------------------------------------------
 
 export function fixtureCrmMailSource(dir: string): CrmMailSource {
-  const load = (): CrmMail[] => JSON.parse(readFileSync(join(dir, "messages.json"), "utf8")) as CrmMail[];
+  // Reload only when the file actually changed (mtime + size key): the
+  // watcher's per-call reload semantics survive, but a large captured
+  // mailbox isn't re-parsed for each of thousands of thread fetches.
+  let cache: { key: string; messages: CrmMail[] } | undefined;
+  const load = (): CrmMail[] => {
+    const path = join(dir, "messages.json");
+    const stat = statSync(path);
+    const key = `${stat.mtimeMs}:${stat.size}`;
+    if (cache?.key !== key) {
+      cache = { key, messages: JSON.parse(readFileSync(path, "utf8")) as CrmMail[] };
+    }
+    return cache.messages;
+  };
   return {
     kind: "fixture",
     async listMessages(afterMs?: number): Promise<CrmMailRef[]> {

@@ -89,7 +89,7 @@ import { buildModelCatalog } from "./model-routes";
 import { setDefaultModel } from "./runtime/default-model";
 import { archiveAgent, createAgent, deleteAgent, listAgents, renameAgent, setAgentMemory, setAgentProvider, unarchiveAgent, useAgent } from "./capabilities/agents";
 import { crmExtractionStatus, disableCrmExtraction, enableCrmExtraction, pauseCrmExtraction, startCrmExtraction } from "./jobs/crm-extractor";
-import { getCrmContact, listCrmContacts } from "./capabilities/crm-contacts";
+import { createCrmContact, getCrmContact, listCrmContacts } from "./capabilities/crm-contacts";
 import {
   approveSoul,
   approveUserProfile,
@@ -2579,6 +2579,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // People directory: list is profile-less (the dossier is multi-KB), the
     // detail fetch carries it for the panel.
     ["GET", /^\/api\/crm\/contacts$/, () => json(listCrmContacts(config))],
+    ["POST", /^\/api\/crm\/contacts$/, async (request) => json(createCrmContact(config, await body(request)), 201)],
     ["GET", /^\/api\/crm\/contacts\/([^/]+)$/, (_request, params) => {
       const contact = getCrmContact(config, params[0]);
       return contact ? json(contact) : json({ error: "Contact not found" }, 404);

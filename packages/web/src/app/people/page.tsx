@@ -7,13 +7,26 @@
 // the profile-less /crm/contacts list; the multi-KB dossier is fetched per
 // selection.
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { ArrowUpDown, Building2, ListFilter, X } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowUpDown, Building2, ListFilter, Maximize2, UserRoundPlus, X } from "lucide-react";
 import type { CrmContactDetail, CrmContactSummary } from "@runtime/capabilities/crm-contacts";
 import type { CrmExtractionStatus } from "@runtime/jobs/crm-extractor";
+import type { ChatSession } from "@/lib/view-types";
 import { api } from "@/lib/api";
 import { MarkdownContent } from "@/components/chat/MarkdownContent";
 import { EmptyState } from "@/components/PageHeader";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -23,7 +36,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   CATEGORY_ITEMS,
-  FILTER_ITEMS,
   SORT_ITEMS,
   filterContacts,
   fullName,
@@ -32,11 +44,18 @@ import {
   roleLine,
   sortContacts,
   type PeopleCategory,
-  type PeopleFilter,
   type PeopleSort,
 } from "./_lib";
 
 const ROW_GRID = "grid-cols-[minmax(220px,1.1fr)_minmax(190px,0.9fr)_minmax(260px,1.6fr)_92px]";
+
+function inviteMailto(contact?: CrmContactSummary): string {
+  const subject = encodeURIComponent("Join me on Gini");
+  const bodyText = encodeURIComponent(
+    "Hey — I've been using Gini, a personal assistant that actually gets work done. Come try it: https://ginicomputer.com",
+  );
+  return `mailto:${contact?.email ?? ""}?subject=${subject}&body=${bodyText}`;
+}
 
 function Avatar({ contact, size = 34 }: { contact: CrmContactSummary; size?: number }) {
   return (
@@ -51,11 +70,17 @@ function Avatar({ contact, size = 34 }: { contact: CrmContactSummary; size?: num
   );
 }
 
+const EMPTY_DRAFT = { firstName: "", lastName: "", email: "", company: "", position: "", category: "", description: "" };
+
 export default function PeoplePage() {
+  const router = useRouter();
+  const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [sort, setSort] = useState<PeopleSort>("name");
-  const [filter, setFilter] = useState<PeopleFilter>("all");
   const [category, setCategory] = useState<PeopleCategory>("all");
+  const [panelWide, setPanelWide] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [draft, setDraft] = useState(EMPTY_DRAFT);
 
   const contacts = useQuery<{ contacts: CrmContactSummary[] }>({
     queryKey: ["crm-contacts"],
@@ -73,11 +98,38 @@ export default function PeoplePage() {
     enabled: selectedId !== null,
   });
 
+  const createContact = useMutation({
+    mutationFn: () =>
+      api<CrmContactDetail>("/crm/contacts", { method: "POST", body: JSON.stringify(draft) }),
+    onSuccess: (created) => {
+      setCreateOpen(false);
+      setDraft(EMPTY_DRAFT);
+      void queryClient.invalidateQueries({ queryKey: ["crm-contacts"] });
+      setSelectedId(created.id);
+    },
+  });
+
+  // "Update with Gini": hand the person to the assistant in a fresh chat —
+  // research refresh is agent work, not a form.
+  const updateWithGini = useMutation({
+    mutationFn: async (contact: CrmContactSummary) => {
+      const session = await api<ChatSession>("/chat", { method: "POST", body: JSON.stringify({}) });
+      await api(`/chat/${session.id}/messages`, {
+        method: "POST",
+        body: JSON.stringify({
+          content: `Refresh your research on ${fullName(contact)}${contact.email ? ` (${contact.email})` : ""} in my people CRM: re-check our recent threads and their public info, then update the dossier, description, category, and last_spoke_at as warranted.`,
+        }),
+      });
+      return session.id;
+    },
+    onSuccess: (sessionId) => router.push(`/chat?session=${encodeURIComponent(sessionId)}`),
+  });
+
   const rows = useMemo(
-    () => sortContacts(filterContacts(contacts.data?.contacts ?? [], filter, category), sort),
-    [contacts.data, filter, category, sort],
+    () => sortContacts(filterContacts(contacts.data?.contacts ?? [], category), sort),
+    [contacts.data, category, sort],
   );
-  const selected = rows.find((c) => c.id === selectedId) ?? null;
+  const selected = rows.find((c) => c.id === selectedId) ?? contacts.data?.contacts.find((c) => c.id === selectedId) ?? null;
   const status = extraction.data;
   const processed = status ? status.counts.done + status.counts.skipped + status.counts.error : 0;
 
@@ -87,13 +139,22 @@ export default function PeoplePage() {
       <section className="flex min-w-0 flex-1 flex-col">
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto max-w-[1100px] px-10 pb-24 pt-9">
-            <div>
-              <h1 className="text-2xl font-bold tracking-tight">People</h1>
-              <p className="mt-2 max-w-[640px] text-sm text-muted-foreground">
-                Your assistant builds a working profile of the people you interact with, drawn from
-                your conversations and background research. It updates periodically — if anything
-                needs correcting, just ask.
-              </p>
+            <div className="flex items-start gap-3">
+              <div className="min-w-0 flex-1">
+                <h1 className="text-2xl font-bold tracking-tight">People</h1>
+                <p className="mt-2 max-w-[640px] text-sm text-muted-foreground">
+                  Your assistant builds a working profile of the people you interact with, drawn from
+                  your conversations and background research. It updates periodically — if anything
+                  needs correcting, just ask.
+                </p>
+              </div>
+              <Button variant="outline" asChild>
+                <a href={inviteMailto()}>Invite to&nbsp;Gini</a>
+              </Button>
+              <Button onClick={() => setCreateOpen(true)}>
+                <UserRoundPlus className="size-4" />
+                Create contact
+              </Button>
             </div>
 
             {/* Toolbar */}
@@ -145,14 +206,6 @@ export default function PeoplePage() {
                       {category === c.id ? <span className="size-[5px] rounded-full bg-current" /> : null}
                     </DropdownMenuItem>
                   ))}
-                  <div className="mx-1 my-1 h-px bg-border" />
-                  <DropdownMenuLabel className="text-[11.5px] text-muted-foreground">Status</DropdownMenuLabel>
-                  {FILTER_ITEMS.map((f) => (
-                    <DropdownMenuItem key={f.id} onSelect={() => setFilter(f.id)}>
-                      <span className="flex-1">{f.label}</span>
-                      {filter === f.id ? <span className="size-[5px] rounded-full bg-current" /> : null}
-                    </DropdownMenuItem>
-                  ))}
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
@@ -163,7 +216,7 @@ export default function PeoplePage() {
                 <span>Name</span>
                 <span>Contact</span>
                 <span>Description</span>
-                <span className="justify-self-end">Last spoke</span>
+                <span className="justify-self-end">Status</span>
               </div>
               {contacts.isLoading ? (
                 <div className="border-t border-border px-4 py-8 text-center text-sm text-muted-foreground">Loading…</div>
@@ -200,9 +253,17 @@ export default function PeoplePage() {
                       <span className="mt-px block text-[13px] text-muted-foreground">{c.phone ?? "—"}</span>
                     </span>
                     <span className="text-[13px] leading-[1.45]">{c.description ?? ""}</span>
-                    <span className="justify-self-end text-[13px] text-muted-foreground">
-                      {c.isSelf ? "you" : relativeTime(c.lastSpokeAt, Date.now())}
-                    </span>
+                    {c.isSelf || !c.email ? (
+                      <span className="justify-self-end text-[13px] text-muted-foreground">{c.isSelf ? "you" : "—"}</span>
+                    ) : (
+                      <a
+                        href={inviteMailto(c)}
+                        onClick={(event) => event.stopPropagation()}
+                        className="inline-flex h-[30px] items-center justify-center justify-self-end rounded-lg border border-input bg-card px-3.5 text-[13px] font-medium hover:bg-muted"
+                      >
+                        Invite
+                      </a>
+                    )}
                   </button>
                 ))
               )}
@@ -213,9 +274,16 @@ export default function PeoplePage() {
 
       {/* Detail panel */}
       {selected ? (
-        <aside className="flex h-full w-[380px] shrink-0 flex-col border-l border-border bg-card">
+        <aside className={`flex h-full ${panelWide ? "w-[560px]" : "w-[380px]"} shrink-0 flex-col border-l border-border bg-card`}>
           <div className="flex items-center gap-1.5 px-3.5 pb-2.5 pt-3.5">
             <span className="flex-1 text-[13.5px] font-semibold">People</span>
+            <button
+              title="Expand"
+              onClick={() => setPanelWide((w) => !w)}
+              className="flex size-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              <Maximize2 className="size-3.5" />
+            </button>
             <button
               title="Close"
               onClick={() => setSelectedId(null)}
@@ -253,8 +321,90 @@ export default function PeoplePage() {
               </div>
             )}
           </div>
+          <div className="flex flex-col gap-2 border-t border-border px-4 py-3.5">
+            <Button
+              variant="outline"
+              className="w-full"
+              disabled={updateWithGini.isPending}
+              onClick={() => updateWithGini.mutate(selected)}
+            >
+              {updateWithGini.isPending ? "Opening chat…" : "Update with Gini"}
+            </Button>
+            {!selected.isSelf && selected.email ? (
+              <Button variant="outline" className="w-full" asChild>
+                <a href={inviteMailto(selected)}>Invite to&nbsp;Gini</a>
+              </Button>
+            ) : null}
+          </div>
         </aside>
       ) : null}
+
+      {/* Create contact */}
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create contact</DialogTitle>
+            <DialogDescription>
+              Add someone by hand — the assistant researches and fills in the rest over time.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="cc-first">First name</Label>
+              <Input id="cc-first" value={draft.firstName} onChange={(e) => setDraft({ ...draft, firstName: e.target.value })} />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="cc-last">Last name</Label>
+              <Input id="cc-last" value={draft.lastName} onChange={(e) => setDraft({ ...draft, lastName: e.target.value })} />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="cc-email">Email</Label>
+              <Input id="cc-email" value={draft.email} onChange={(e) => setDraft({ ...draft, email: e.target.value })} />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="cc-company">Company</Label>
+              <Input id="cc-company" value={draft.company} onChange={(e) => setDraft({ ...draft, company: e.target.value })} />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="cc-position">Position</Label>
+              <Input id="cc-position" value={draft.position} onChange={(e) => setDraft({ ...draft, position: e.target.value })} />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="cc-category">Category</Label>
+              <select
+                id="cc-category"
+                value={draft.category}
+                onChange={(e) => setDraft({ ...draft, category: e.target.value })}
+                className="h-9 rounded-md border border-input bg-transparent px-3 text-sm"
+              >
+                <option value="">—</option>
+                <option value="Work">Work</option>
+                <option value="Personal">Personal</option>
+              </select>
+            </div>
+            <div className="col-span-2 flex flex-col gap-1.5">
+              <Label htmlFor="cc-desc">Description</Label>
+              <Input
+                id="cc-desc"
+                placeholder="Who they are at a glance"
+                value={draft.description}
+                onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+              />
+            </div>
+          </div>
+          {createContact.isError ? (
+            <p className="text-sm text-destructive">{(createContact.error as Error).message}</p>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCreateOpen(false)}>
+              Cancel
+            </Button>
+            <Button disabled={createContact.isPending || draft.firstName.trim() === ""} onClick={() => createContact.mutate()}>
+              {createContact.isPending ? "Creating…" : "Create"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

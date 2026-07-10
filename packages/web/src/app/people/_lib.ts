@@ -2,18 +2,11 @@
 import type { CrmContactSummary } from "@runtime/capabilities/crm-contacts";
 
 export type PeopleSort = "name" | "recent";
-export type PeopleFilter = "all" | "engaged" | "not-engaged";
 export type PeopleCategory = "all" | "Work" | "Personal";
 
 export const SORT_ITEMS: Array<{ id: PeopleSort; label: string }> = [
   { id: "name", label: "Alphabetical" },
   { id: "recent", label: "Recent" },
-];
-
-export const FILTER_ITEMS: Array<{ id: PeopleFilter; label: string }> = [
-  { id: "all", label: "All" },
-  { id: "engaged", label: "Engaged" },
-  { id: "not-engaged", label: "Not engaged" },
 ];
 
 export const CATEGORY_ITEMS: Array<{ id: PeopleCategory; label: string }> = [
@@ -63,17 +56,11 @@ export function relativeTime(epochMs: number | null, nowMs: number): string {
 
 export function filterContacts(
   contacts: CrmContactSummary[],
-  filter: PeopleFilter,
-  category: PeopleCategory = "all",
+  category: PeopleCategory,
 ): CrmContactSummary[] {
-  let kept = contacts;
-  if (filter === "engaged") kept = kept.filter((c) => c.isSelf || c.lastSpokeAt !== null);
-  if (filter === "not-engaged") kept = kept.filter((c) => !c.isSelf && c.lastSpokeAt === null);
-  if (category !== "all") {
-    // The self row stays visible under any category (it IS the user).
-    kept = kept.filter((c) => c.isSelf || (c.category ?? "").toLowerCase() === category.toLowerCase());
-  }
-  return kept;
+  if (category === "all") return contacts;
+  // The self row stays visible under any category (it IS the user).
+  return contacts.filter((c) => c.isSelf || (c.category ?? "").toLowerCase() === category.toLowerCase());
 }
 
 // "name" keeps the server's case-insensitive name order, with the user's own

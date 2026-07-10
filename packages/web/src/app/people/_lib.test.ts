@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import type { CrmContactSummary } from "@runtime/capabilities/crm-contacts";
 import {
   CATEGORY_ITEMS,
-  FILTER_ITEMS,
   SORT_ITEMS,
   filterContacts,
   fullName,
@@ -58,28 +57,15 @@ describe("people/_lib", () => {
     expect(relativeTime(now + 60_000, now)).toBe("just now"); // clock skew clamps
   });
 
-  test("filterContacts: engaged keeps self + spoken-to; not-engaged is the complement", () => {
-    const you = contact({ id: "you", firstName: "You", isSelf: true });
-    const friend = contact({ id: "f", firstName: "Friend", lastSpokeAt: 5 });
-    const cold = contact({ id: "c", firstName: "Cold" });
-    const all = [you, friend, cold];
-    expect(filterContacts(all, "all")).toEqual(all);
-    expect(filterContacts(all, "engaged").map((c) => c.id)).toEqual(["you", "f"]);
-    expect(filterContacts(all, "not-engaged").map((c) => c.id)).toEqual(["c"]);
-  });
-
-  test("filterContacts: category matches case-insensitively, keeps self, composes with status", () => {
+  test("filterContacts: category matches case-insensitively and always keeps the self row", () => {
     const you = contact({ id: "you", firstName: "You", isSelf: true });
     const work = contact({ id: "w", firstName: "Ada", category: "work", lastSpokeAt: 5 });
     const personal = contact({ id: "p", firstName: "Bea", category: "Personal", lastSpokeAt: 6 });
     const uncategorized = contact({ id: "u", firstName: "Cy", lastSpokeAt: 7 });
     const all = [you, work, personal, uncategorized];
-    expect(filterContacts(all, "all", "all")).toEqual(all);
-    expect(filterContacts(all, "all", "Work").map((c) => c.id)).toEqual(["you", "w"]);
-    expect(filterContacts(all, "all", "Personal").map((c) => c.id)).toEqual(["you", "p"]);
-    // Composed: engaged ∩ Personal (self passes both).
-    expect(filterContacts(all, "engaged", "Personal").map((c) => c.id)).toEqual(["you", "p"]);
-    expect(filterContacts([contact({ id: "cold", firstName: "Z", category: "Work" })], "engaged", "Work")).toEqual([]);
+    expect(filterContacts(all, "all")).toEqual(all);
+    expect(filterContacts(all, "Work").map((c) => c.id)).toEqual(["you", "w"]);
+    expect(filterContacts(all, "Personal").map((c) => c.id)).toEqual(["you", "p"]);
   });
 
   test("sortContacts pins self first; recent orders by lastSpokeAt desc with never-engaged last", () => {
@@ -98,7 +84,6 @@ describe("people/_lib", () => {
 
   test("menu item catalogs are stable", () => {
     expect(SORT_ITEMS.map((s) => s.id)).toEqual(["name", "recent"]);
-    expect(FILTER_ITEMS.map((f) => f.id)).toEqual(["all", "engaged", "not-engaged"]);
     expect(CATEGORY_ITEMS.map((c) => c.id)).toEqual(["all", "Work", "Personal"]);
   });
 });

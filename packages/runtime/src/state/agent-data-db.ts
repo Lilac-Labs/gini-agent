@@ -74,7 +74,7 @@ CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}"${tableName}" (
     OR (email_address = lower(trim(email_address)) AND email_address LIKE '%_@_%._%')
   ),
   company TEXT, position TEXT,
-  category TEXT,
+  category TEXT CHECK (category IS NULL OR category IN ('Work', 'Personal')),
   url TEXT CHECK (url IS NULL OR url LIKE 'http://%' OR url LIKE 'https://%'),
   phone TEXT CHECK (
     phone IS NULL
@@ -114,6 +114,26 @@ BEGIN
   UPDATE contacts
     SET updated_at = MAX(CAST(unixepoch('subsec') * 1000 AS INTEGER), OLD.updated_at + 1)
     WHERE id = NEW.id;
+END;
+`;
+
+// Category values are constrained at the write boundary like every other
+// normalized column. Fresh tables carry a real CHECK in the DDL; tables that
+// gained the column via ALTER (migration 0005 — ALTER can't attach a CHECK)
+// get the equivalent enforcement from these triggers, recreated on open like
+// the touch trigger. Applied only when the column exists.
+const SEED_CONTACTS_CATEGORY_GUARDS = `
+DROP TRIGGER IF EXISTS contacts_category_guard_insert;
+CREATE TRIGGER contacts_category_guard_insert BEFORE INSERT ON contacts
+  FOR EACH ROW WHEN NEW.category IS NOT NULL AND NEW.category NOT IN ('Work', 'Personal')
+BEGIN
+  SELECT RAISE(ABORT, 'CHECK constraint failed: category must be ''Work'' or ''Personal'' (or NULL)');
+END;
+DROP TRIGGER IF EXISTS contacts_category_guard_update;
+CREATE TRIGGER contacts_category_guard_update BEFORE UPDATE OF category ON contacts
+  FOR EACH ROW WHEN NEW.category IS NOT NULL AND NEW.category NOT IN ('Work', 'Personal')
+BEGIN
+  SELECT RAISE(ABORT, 'CHECK constraint failed: category must be ''Work'' or ''Personal'' (or NULL)');
 END;
 `;
 
@@ -392,6 +412,9 @@ function seedBaselineTables(db: Database): void {
   const cols = contactsCols(db);
   if (cols.has("id") && cols.has("updated_at")) {
     db.exec(SEED_CONTACTS_AUX);
+  }
+  if (cols.has("category")) {
+    db.exec(SEED_CONTACTS_CATEGORY_GUARDS);
   }
 }
 

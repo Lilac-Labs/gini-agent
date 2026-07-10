@@ -202,5 +202,33 @@ describe("/api/crm/extraction", () => {
     // And the routes are token-gated like the rest of the surface.
     const anon = await handler(new Request(`http://127.0.0.1:${config.port}/api/crm/contacts`));
     expect(anon.status).toBe(401);
+
+    // Manual creation: normalized insert, schema violations surface as 400s.
+    const created = await call(handler, config, "/api/crm/contacts", {
+      method: "POST",
+      body: JSON.stringify({ firstName: "Grace", lastName: "Hopper", email: "Grace@Navy.mil", category: "Work", description: "Compiler pioneer" }),
+    });
+    expect(created.status).toBe(201);
+    const grace = (await created.json()) as Record<string, unknown>;
+    expect(grace.email).toBe("grace@navy.mil"); // lowercased before insert
+    expect(grace.category).toBe("Work");
+    const noName = await call(handler, config, "/api/crm/contacts", { method: "POST", body: JSON.stringify({ email: "x@y.io" }) });
+    expect(noName.status).toBe(400);
+    const badCategory = await call(handler, config, "/api/crm/contacts", {
+      method: "POST",
+      body: JSON.stringify({ firstName: "Zed", category: "Vendor" }),
+    });
+    expect(badCategory.status).toBe(400);
+    expect(String(((await badCategory.json()) as { error?: string }).error)).toContain("category");
+    const dupEmail = await call(handler, config, "/api/crm/contacts", {
+      method: "POST",
+      body: JSON.stringify({ firstName: "Dup", email: "grace@navy.mil" }),
+    });
+    expect(dupEmail.status).toBe(400); // UNIQUE arbitration surfaces cleanly
+    const badType = await call(handler, config, "/api/crm/contacts", {
+      method: "POST",
+      body: JSON.stringify({ firstName: "T", company: 42 }),
+    });
+    expect(badType.status).toBe(400);
   });
 });

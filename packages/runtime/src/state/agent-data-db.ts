@@ -136,11 +136,13 @@ function seedBaselineTables(db: Database): void {
     db.exec("ALTER TABLE contacts ADD COLUMN description TEXT");
     cols.add("description");
   }
-  // Legacy table (pre-last_spoke_at): when the USER last wrote to this
-  // person (epoch ms; NULL = never observed). Engagement is the strongest
-  // importance signal — most inbound mail is one-way cold outreach the
-  // user never answers — so "important contacts" queries filter/order on
-  // this column instead of guessing from profile prose.
+  // Legacy table (pre-last_spoke_at): when the USER last ENGAGED this
+  // person (epoch ms; NULL = never observed) — wrote to them, replied in
+  // a thread they were part of, or was deliberately cc'd into their
+  // thread. Engagement is the strongest importance signal — most inbound
+  // mail is one-way cold outreach the user never answers — so "important
+  // contacts" queries filter/order on this column instead of guessing
+  // from profile prose.
   if (!cols.has("last_spoke_at")) {
     db.exec("ALTER TABLE contacts ADD COLUMN last_spoke_at INTEGER");
     cols.add("last_spoke_at");

@@ -26,7 +26,7 @@ contacts (
   phone TEXT,                       -- E.164: + then digits only (e.g. +14047294874)
   description TEXT,                 -- one line: who they are at a glance (e.g. "CEO of Slashy — met at a YC dinner, intro'd by Tony")
   profile TEXT,                     -- the dossier (below)
-  last_spoke_at INTEGER,            -- epoch ms the USER last wrote to them (replied, emailed, messaged); NULL = never observed
+  last_spoke_at INTEGER,            -- epoch ms the USER last engaged them (wrote to them, replied in their thread, or was cc'd into it); NULL = never observed
   updated_at INTEGER                -- epoch ms; auto-bumped on every UPDATE — never set it yourself
 )
 relations (a TEXT, b TEXT, kind TEXT, note TEXT)   -- who-knows-whom edges, by contact id
@@ -36,7 +36,7 @@ The database enforces these formats with CHECK constraints — a write with an u
 
 `description` is the cheap list handle; `profile` is the multi-KB dossier. When listing or scanning people, SELECT the scalar columns + `description` and leave `profile` out — read a profile only for the specific row you're about to use or rewrite. Keep `description` to one sentence and refresh it whenever a rewrite of the profile changes who the person is at a glance.
 
-`last_spoke_at` separates real relationships from one-way inbound: most cold outreach is never answered, so a row with `last_spoke_at IS NULL` is usually pipeline, not a relationship. Set/advance it whenever the material shows the USER writing to the person (a reply, an email addressed to them, a scheduled meeting they accepted); never invent it. Questions like "my important contacts" or "who do I know" default to `WHERE last_spoke_at IS NOT NULL ORDER BY last_spoke_at DESC` — include never-spoken rows only when the user asks for everyone or for inbound/pipeline.
+`last_spoke_at` separates real relationships from one-way inbound: most cold outreach is never answered, so a row with `last_spoke_at IS NULL` is usually pipeline, not a relationship. Set/advance it whenever the material shows the user ENGAGING with the person: writing to them, replying in a thread they're part of, or being deliberately looped into their thread (someone cc'ing the user in is an intro shape — those participants count). Never invent it. Questions like "my important contacts" or "who do I know" default to `WHERE last_spoke_at IS NOT NULL ORDER BY last_spoke_at DESC` — include never-engaged rows only when the user asks for everyone or for inbound/pipeline.
 
 Other work may update the same contacts concurrently, so guard every UPDATE with the `updated_at` you read: `UPDATE contacts SET … WHERE id = ? AND updated_at = ?`. A result of 0 changes means the row moved under you — re-query, fold your changes into the fresh state, and retry. Likewise, an INSERT rejected as a duplicate (email or name) means someone inserted them first: query for the row and UPDATE it instead.
 

@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS contacts (
   ),
   description TEXT,
   profile TEXT,
+  last_spoke_at INTEGER,
   updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
 );
 `;
@@ -134,6 +135,15 @@ function seedBaselineTables(db: Database): void {
   if (!cols.has("description")) {
     db.exec("ALTER TABLE contacts ADD COLUMN description TEXT");
     cols.add("description");
+  }
+  // Legacy table (pre-last_spoke_at): when the USER last wrote to this
+  // person (epoch ms; NULL = never observed). Engagement is the strongest
+  // importance signal — most inbound mail is one-way cold outreach the
+  // user never answers — so "important contacts" queries filter/order on
+  // this column instead of guessing from profile prose.
+  if (!cols.has("last_spoke_at")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN last_spoke_at INTEGER");
+    cols.add("last_spoke_at");
   }
   // The touch trigger needs id + updated_at; the retired email-PK shape has no
   // id column, so it runs without the trigger rather than failing every open.

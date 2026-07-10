@@ -58,7 +58,7 @@ describe("agent-data-db", () => {
     const contacts = tables.find((t) => t.name === "contacts")!;
     expect(contacts.rowCount).toBe(0);
     expect(contacts.columns.map((c) => c.name)).toEqual([
-      "id", "first_name", "last_name", "email_address", "company", "position", "url", "phone", "description", "profile", "updated_at"
+      "id", "first_name", "last_name", "email_address", "company", "position", "url", "phone", "description", "profile", "last_spoke_at", "updated_at"
     ]);
     expect(tables.find((t) => t.name === "relations")!.columns.map((c) => c.name)).toEqual(["a", "b", "kind", "note"]);
     // Identity: id auto-generates, email is optional but unique when present.
@@ -119,6 +119,7 @@ describe("agent-data-db", () => {
     const cols = dbListTables(inst, "agent_legacy").find((t) => t.name === "contacts")!.columns.map((c) => c.name);
     expect(cols).toContain("updated_at");
     expect(cols).toContain("description");
+    expect(cols).toContain("last_spoke_at");
     const row = dbQuery(inst, "agent_legacy", "SELECT * FROM contacts").rows[0]! as Record<string, unknown>;
     expect(row.profile).toBe("kept");
     expect(row.description).toBeNull();

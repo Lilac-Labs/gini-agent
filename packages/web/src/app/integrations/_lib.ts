@@ -127,6 +127,66 @@ export function buildTiles(
     });
 }
 
+// The Slack integration is a messaging bridge, not a connector provider, so it
+// never appears in the connectors registry buildTiles derives from. This
+// builds a synthetic tile from the messaging bridges query (GET /api/messaging,
+// kind "slack") so it lists, filters, and counts alongside the connector tiles.
+export const SLACK_PROVIDER_ID = "slack";
+const SLACK_TILE_COLOR = "#4A154B";
+
+// The messaging bridge fields the tile needs — a minimal view of
+// MessagingBridgeRecord (@runtime/types).
+export interface SlackBridgeLike {
+  kind: string;
+  status: string;
+  message?: string;
+  metadata?: { teamName?: string };
+}
+
+// Synthetic ProviderDescriptor for the Slack tile — Slack has no connector
+// provider, so the descriptor exists only to carry the tile's label and the
+// description shown in the available state.
+const SLACK_PROVIDER: ProviderDescriptor = {
+  id: SLACK_PROVIDER_ID,
+  label: "Slack",
+  description: "DM Gini in your Slack workspace.",
+  fields: [],
+  hasProbe: false,
+  hasDetect: false
+};
+
+// Slack tile state, mirroring buildTiles' three-state derivation: a configured
+// bridge is connected (named by teamName when present); an errored or disabled
+// bridge (with none configured) is needs-attention with the bridge's status
+// message; no slack bridge is available.
+export function slackTile(bridges: SlackBridgeLike[]): IntegrationTile {
+  const slack = bridges.filter((b) => b.kind === "slack");
+  const configured = slack.find((b) => b.status === "configured");
+  const attention = slack.find((b) => b.status === "error" || b.status === "disabled");
+  let state: TileState;
+  let status: string | null;
+  if (configured) {
+    state = "connected";
+    const teamName = configured.metadata?.teamName?.trim();
+    status = teamName ? `Connected — ${teamName}` : "Connected";
+  } else if (attention) {
+    state = "needs-attention";
+    status = attention.message?.trim() || "Needs attention";
+  } else {
+    state = "available";
+    status = null;
+  }
+  return {
+    provider: SLACK_PROVIDER,
+    label: SLACK_PROVIDER.label,
+    color: SLACK_TILE_COLOR,
+    initial: "S",
+    connected: state !== "available",
+    state,
+    status
+  };
+}
+
 export function tileCounts(tiles: IntegrationTile[]): Record<TileFilter, number> {
   const connected = tiles.filter((t) => t.connected).length;
   return { all: tiles.length, connected, available: tiles.length - connected };

@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useRouter } from "next/navigation";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ChevronLeft, Search, SearchX } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -24,11 +25,14 @@ import { GoogleAccountsCard, GoogleLogo } from "./_components/GoogleAccountsCard
 import { BRAND_LOGOS } from "./_components/brand-logos";
 import {
   GOOGLE_PROVIDER_ID,
+  SLACK_PROVIDER_ID,
   buildTiles,
   configuredRecord,
   filterTiles,
+  slackTile,
   tileCounts,
   type IntegrationTile,
+  type SlackBridgeLike,
   type TileFilter
 } from "./_lib";
 import type { ConnectorRecord } from "@runtime/types";
@@ -63,6 +67,13 @@ export default function IntegrationsPage() {
   // connector record, so the Google tile count and drilldown render on a
   // registry-only machine.
   const googleAccounts = useGoogleAccounts();
+  // Slack is a messaging bridge, not a connector provider: read the bridge list
+  // to derive its tile alongside credential-backed integrations.
+  const messaging = useQuery({
+    queryKey: ["messaging"],
+    queryFn: () => api<SlackBridgeLike[]>("/messaging")
+  });
+  const router = useRouter();
   const invalidate = useInvalidate();
 
   // The Google drilldown is in-page view state (matching the design), not a
@@ -135,7 +146,10 @@ export default function IntegrationsPage() {
 
   const googleAccountsList = googleAccounts.data ?? [];
   const googleSignedInCount = googleAccountsList.filter((a) => a.signedIn).length;
-  const tiles = buildTiles(providers.data ?? [], connectors.data ?? [], googleAccountsList.length, googleSignedInCount);
+  const tiles = [
+    ...buildTiles(providers.data ?? [], connectors.data ?? [], googleAccountsList.length, googleSignedInCount),
+    slackTile(messaging.data ?? [])
+  ];
   const counts = tileCounts(tiles);
   const visible = filterTiles(tiles, filter, search);
 
@@ -146,6 +160,12 @@ export default function IntegrationsPage() {
     const p = tile.provider;
     if (p.id === GOOGLE_PROVIDER_ID) {
       setView("google");
+      return;
+    }
+    if (p.id === SLACK_PROVIDER_ID) {
+      // The local Messaging card owns Socket Mode credentials and bridge
+      // management until the inline drilldown is opened here.
+      router.push("/settings");
       return;
     }
     if (tile.connected) {

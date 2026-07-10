@@ -7,7 +7,16 @@
 import { describe, expect, test } from "bun:test";
 import type { ConnectorRecord } from "@runtime/types";
 import type { ProviderDescriptor } from "@/lib/queries";
-import { GOOGLE_PROVIDER_ID, buildTiles, configuredRecord, filterTiles, tileCounts } from "./_lib";
+import {
+  GOOGLE_PROVIDER_ID,
+  SLACK_PROVIDER_ID,
+  buildTiles,
+  configuredRecord,
+  filterTiles,
+  slackTile,
+  tileCounts,
+  type SlackBridgeLike
+} from "./_lib";
 
 function provider(overrides: Partial<ProviderDescriptor>): ProviderDescriptor {
   return {
@@ -142,6 +151,72 @@ describe("buildTiles", () => {
     );
     expect(tiles[0]!.connected).toBe(true);
     expect(tileCounts(tiles)).toEqual({ all: 1, connected: 1, available: 0 });
+  });
+});
+
+function slackBridge(overrides: Partial<SlackBridgeLike>): SlackBridgeLike {
+  return { kind: "slack", status: "configured", ...overrides };
+}
+
+describe("slackTile", () => {
+  test("configured bridge with teamName -> connected, named status", () => {
+    const tile = slackTile([slackBridge({ metadata: { teamName: "Open Curiosity" } })]);
+    expect(tile.provider.id).toBe(SLACK_PROVIDER_ID);
+    expect(tile.state).toBe("connected");
+    expect(tile.connected).toBe(true);
+    expect(tile.status).toBe("Connected — Open Curiosity");
+  });
+
+  test("configured bridge without teamName -> connected, plain status", () => {
+    const tile = slackTile([slackBridge({ metadata: {} })]);
+    expect(tile.state).toBe("connected");
+    expect(tile.status).toBe("Connected");
+  });
+
+  test("errored bridge -> needs-attention with the status message", () => {
+    const tile = slackTile([slackBridge({ status: "error", message: "Socket auth failed" })]);
+    expect(tile.state).toBe("needs-attention");
+    expect(tile.connected).toBe(true);
+    expect(tile.status).toBe("Socket auth failed");
+  });
+
+  test("disabled bridge with no message -> needs-attention fallback", () => {
+    const tile = slackTile([slackBridge({ status: "disabled" })]);
+    expect(tile.state).toBe("needs-attention");
+    expect(tile.status).toBe("Needs attention");
+  });
+
+  test("configured wins over a co-existing errored bridge", () => {
+    const tile = slackTile([
+      slackBridge({ status: "error", message: "stale" }),
+      slackBridge({ status: "configured", metadata: { teamName: "Acme" } })
+    ]);
+    expect(tile.state).toBe("connected");
+    expect(tile.status).toBe("Connected — Acme");
+  });
+
+  test("no slack bridge -> available (description shown, not counted connected)", () => {
+    const tile = slackTile([]);
+    expect(tile.state).toBe("available");
+    expect(tile.connected).toBe(false);
+    expect(tile.status).toBeNull();
+    expect(tile.provider.description).toBe("DM Gini in your Slack workspace.");
+    // Non-slack bridges are ignored.
+    expect(slackTile([{ kind: "telegram", status: "configured" }]).state).toBe("available");
+  });
+
+  test("flows through filterTiles / tileCounts like any tile", () => {
+    const tiles = [
+      ...buildTiles([provider({})], [connector({})], 0),
+      slackTile([slackBridge({ metadata: { teamName: "Open Curiosity" } })])
+    ];
+    expect(tileCounts(tiles)).toEqual({ all: 2, connected: 2, available: 0 });
+    // Search matches the "Slack" label.
+    expect(filterTiles(tiles, "all", "slack").map((t) => t.provider.id)).toEqual([SLACK_PROVIDER_ID]);
+    // An available slack tile lands in the Available chip.
+    const withAvailable = [...buildTiles([provider({})], [], 0), slackTile([])];
+    expect(tileCounts(withAvailable)).toEqual({ all: 2, connected: 0, available: 2 });
+    expect(filterTiles(withAvailable, "available", "slack").map((t) => t.provider.id)).toEqual([SLACK_PROVIDER_ID]);
   });
 });
 

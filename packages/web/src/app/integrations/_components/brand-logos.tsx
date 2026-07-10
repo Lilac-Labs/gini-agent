@@ -9,7 +9,7 @@
 // Providers absent from BRAND_LOGOS keep the colored monogram fallback.
 
 import type { ComponentType } from "react";
-import { GOOGLE_PROVIDER_ID } from "../_lib";
+import { GOOGLE_PROVIDER_ID, SLACK_PROVIDER_ID } from "../_lib";
 import { GoogleLogo } from "./GoogleAccountsCard";
 
 export function LinearLogo({ className }: { className?: string }) {
@@ -89,6 +89,23 @@ export function OpenAILogo({ className }: { className?: string }) {
   );
 }
 
+// Slack's multicolor mark (four rounded lozenges). Byte-identical paths to the
+// onboarding StepSlack mark.
+export function SlackLogo({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 122.8 122.8" className={className} aria-hidden>
+      <path d="M25.8 77.6c0 7.1-5.8 12.9-12.9 12.9S0 84.7 0 77.6s5.8-12.9 12.9-12.9h12.9v12.9z" fill="#E01E5A" />
+      <path d="M32.3 77.6c0-7.1 5.8-12.9 12.9-12.9s12.9 5.8 12.9 12.9v32.3c0 7.1-5.8 12.9-12.9 12.9s-12.9-5.8-12.9-12.9V77.6z" fill="#E01E5A" />
+      <path d="M45.2 25.8c-7.1 0-12.9-5.8-12.9-12.9S38.1 0 45.2 0s12.9 5.8 12.9 12.9v12.9H45.2z" fill="#36C5F0" />
+      <path d="M45.2 32.3c7.1 0 12.9 5.8 12.9 12.9s-5.8 12.9-12.9 12.9H12.9C5.8 58.1 0 52.3 0 45.2s5.8-12.9 12.9-12.9h32.3z" fill="#36C5F0" />
+      <path d="M97 45.2c0-7.1 5.8-12.9 12.9-12.9s12.9 5.8 12.9 12.9-5.8 12.9-12.9 12.9H97V45.2z" fill="#2EB67D" />
+      <path d="M90.5 45.2c0 7.1-5.8 12.9-12.9 12.9s-12.9-5.8-12.9-12.9V12.9C64.7 5.8 70.5 0 77.6 0s12.9 5.8 12.9 12.9v32.3z" fill="#2EB67D" />
+      <path d="M77.6 97c7.1 0 12.9 5.8 12.9 12.9s-5.8 12.9-12.9 12.9-12.9-5.8-12.9-12.9V97h12.9z" fill="#ECB22E" />
+      <path d="M77.6 90.5c-7.1 0-12.9-5.8-12.9-12.9s5.8-12.9 12.9-12.9h32.3c7.1 0 12.9 5.8 12.9 12.9s-5.8 12.9-12.9 12.9H77.6z" fill="#ECB22E" />
+    </svg>
+  );
+}
+
 // Provider id → official mark. Tiles for these providers render the white
 // mark treatment; every other provider keeps the colored monogram fallback
 // (exa, bland, demo have no sourceable official mark — never fabricate one).
@@ -97,5 +114,6 @@ export const BRAND_LOGOS: Record<string, ComponentType<{ className?: string }>> 
   "brave-search": BraveLogo,
   "claude-code": AnthropicLogo,
   codex: OpenAILogo,
+  [SLACK_PROVIDER_ID]: SlackLogo,
   [GOOGLE_PROVIDER_ID]: GoogleLogo
 };

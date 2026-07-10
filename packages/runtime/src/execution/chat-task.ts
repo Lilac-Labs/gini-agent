@@ -762,10 +762,20 @@ export async function runChatTask(config: RuntimeConfig, taskId: string): Promis
 
   // Auto-recall: queries the Hindsight bank for relevant context. If
   // recall fails we continue without it — the model can still answer
-  // off USER.md / SOUL.md and the task input.
+  // off USER.md / SOUL.md and the task input. Agents with
+  // `autoMemory: false` skip the query entirely — recall embeds the full
+  // task input and scans the bank in-process, which is pure latency for
+  // an agent that never needs ambient memory.
   let recalledContext: string | undefined;
   let hindsightUnitsRecalled = 0;
-  if (agentIdForMemory) {
+  if (agentIdForMemory && !effectiveForAgent.autoMemory) {
+    appendTrace(config.instance, taskId, {
+      type: "memory",
+      message: "auto-recall skipped: agent autoMemory off",
+      data: { agentId: agentIdForMemory }
+    });
+  }
+  if (agentIdForMemory && effectiveForAgent.autoMemory) {
     try {
       const recalled = await recall(config, {
         agentId: agentIdForMemory,

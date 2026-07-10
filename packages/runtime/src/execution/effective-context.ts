@@ -41,6 +41,11 @@ export interface EffectiveContext {
   providerFallback?: { selected: ProviderName; using: ProviderName };
   toolsetFilter?: Set<string>;
   messagingTargetFilter?: Set<string>;
+  // Whether the ambient memory pipeline (auto-recall before the model
+  // call, auto-retain after completion) runs for this agent's turns.
+  // Only an explicit `autoMemory: false` on the agent record turns it
+  // off; absent agent or absent field ⇒ true.
+  autoMemory: boolean;
   warnings: string[];
 }
 
@@ -74,6 +79,7 @@ export function resolveEffectiveContext(state: RuntimeState, config: RuntimeConf
       provider: dispatch.provider,
       providerSource: "instance",
       ...(dispatch.providerFallback ? { providerFallback: dispatch.providerFallback } : {}),
+      autoMemory: true,
       warnings: []
     };
   }
@@ -169,6 +175,7 @@ export function resolveEffectiveContext(state: RuntimeState, config: RuntimeConf
     ...(dispatch.providerFallback ? { providerFallback: dispatch.providerFallback } : {}),
     toolsetFilter,
     messagingTargetFilter,
+    autoMemory: agent.autoMemory !== false,
     warnings
   };
 }

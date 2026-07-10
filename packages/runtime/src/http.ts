@@ -87,7 +87,7 @@ import { inspectImportSource } from "./integrations/importers";
 import { providerCatalogWithStatus, withProviderAuthStatus } from "./provider";
 import { buildModelCatalog } from "./model-routes";
 import { setDefaultModel } from "./runtime/default-model";
-import { archiveAgent, createAgent, deleteAgent, listAgents, renameAgent, setAgentProvider, unarchiveAgent, useAgent } from "./capabilities/agents";
+import { archiveAgent, createAgent, deleteAgent, listAgents, renameAgent, setAgentMemory, setAgentProvider, unarchiveAgent, useAgent } from "./capabilities/agents";
 import {
   approveSoul,
   approveUserProfile,
@@ -2572,6 +2572,9 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // to set, or both blank/omitted to clear and fall back to the instance
     // default. Credential setup stays on the instance-level setup/provider route.
     ["POST", /^\/api\/agents\/([^/]+)\/provider$/, async (request, params) => json(await setAgentProvider(config, decodeURIComponent(params[0]), await body(request)))],
+    // Toggle the agent's ambient-memory pipeline. Body: { autoMemory: boolean }
+    // — false skips auto-recall + auto-retain for this agent's turns.
+    ["POST", /^\/api\/agents\/([^/]+)\/memory$/, async (request, params) => json(await setAgentMemory(config, decodeURIComponent(params[0]), await body(request)))],
     // Archive (soft-delete) / restore an agent. Body-less POSTs, mirroring /use.
     ["POST", /^\/api\/agents\/([^/]+)\/archive$/, async (_request, params) => json(await archiveAgent(config, decodeURIComponent(params[0])))],
     ["POST", /^\/api\/agents\/([^/]+)\/unarchive$/, async (_request, params) => json(await unarchiveAgent(config, decodeURIComponent(params[0])))],

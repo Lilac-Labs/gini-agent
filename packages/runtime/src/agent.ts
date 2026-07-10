@@ -1016,6 +1016,18 @@ export function scheduleAutoRetain(config: RuntimeConfig, task: Task): void {
     });
     return;
   }
+  // Agents with `autoMemory: false` opt out of the ambient pipeline: the
+  // background retain runs embeds + model-judged link/opinion updates for
+  // minutes per task, and every unit it lands makes the bank's linear
+  // semantic scan slower for all future recalls.
+  if (!effective.autoMemory) {
+    appendTrace(config.instance, task.id, {
+      type: "memory",
+      message: "auto-retain skipped: agent autoMemory off",
+      data: { agentId: effective.agentId }
+    });
+    return;
+  }
   const text = task.summary
     ? `Task input: ${task.input}\n\nTask summary: ${task.summary}`
     : `Task input: ${task.input}`;

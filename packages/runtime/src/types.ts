@@ -1575,6 +1575,16 @@ export interface AgentRecord {
   // beyond the always-on SSRF gate. User-managed by editing the agent
   // record (no CLI/UI surface yet — see ADR browser-domain-policy.md).
   browserDomainPolicy?: BrowserDomainPolicy;
+  // Ambient Hindsight pipeline switch. `false` ⇒ this agent's chat turns
+  // skip auto-recall (the pre-model memory query) and auto-retain (the
+  // post-completion background distillation). Memory TOOLS stay available
+  // when the agent's toolsets expose them — this only silences the
+  // per-turn ambient pipeline. Absent/true ⇒ memory on. Meant for
+  // high-volume mechanical agents (e.g. a CRM curator whose durable
+  // memory is its own agent-data database): recall over a bank the agent
+  // never needs is pure latency, and retaining every processed input
+  // floods the bank and slows recall for everyone.
+  autoMemory?: boolean;
   // ISO timestamp set when the agent is archived (soft delete). Orthogonal
   // to `status` — `activateAgent` flips `status`, so archive state lives in
   // its own field. Absent ⇒ not archived. An archived agent cannot be

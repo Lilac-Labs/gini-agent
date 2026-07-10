@@ -1828,6 +1828,7 @@ describe("buildAgentIdentity", () => {
       memoryNamespace: "agent_x",
       provider: { name: "echo", model: "test-model" },
       providerSource: "agent",
+      autoMemory: true,
       warnings: []
       // no toolsetFilter — unrestricted
     };
@@ -1844,6 +1845,7 @@ describe("buildAgentIdentity", () => {
       memoryNamespace: "agent_x",
       provider: { name: "echo", model: "test-model" },
       providerSource: "agent",
+      autoMemory: true,
       toolsetFilter: new Set(["terminal", "file"]),
       warnings: []
     };
@@ -1867,6 +1869,7 @@ describe("buildAgentIdentity", () => {
       memoryNamespace: "agent_x",
       provider: { name: "echo", model: "test-model" },
       providerSource: "agent",
+      autoMemory: true,
       // Whitelist includes a disabled-in-state name and an entirely
       // unknown name; both must be filtered out of the rendered
       // identity block.
@@ -1882,6 +1885,7 @@ describe("buildAgentIdentity", () => {
     const effective: EffectiveContext = {
       provider: { name: "echo", model: "test-model" },
       providerSource: "instance",
+      autoMemory: true,
       warnings: []
     };
     const identity = buildAgentIdentity(baseConfig, state, effective);
@@ -1901,6 +1905,7 @@ describe("buildAgentIdentity", () => {
       memoryNamespace: "agent_x",
       provider: { name: "echo", model: "test-model" },
       providerSource: "agent",
+      autoMemory: true,
       warnings: []
     };
     const identity = buildAgentIdentity(baseConfig, state, effective);

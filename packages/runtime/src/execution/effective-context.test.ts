@@ -300,6 +300,26 @@ describe("resolveEffectiveContext", () => {
     expect(ctx.warnings).toEqual([]);
     expect(ctx.providerSource).toBe("agent");
   });
+
+  test("autoMemory defaults to true when no active agent", () => {
+    const state = buildState({ agents: [], activeAgentId: undefined });
+    const ctx = resolveEffectiveContext(state, buildConfig());
+    expect(ctx.autoMemory).toBe(true);
+  });
+
+  test("autoMemory defaults to true when the agent record omits the field", () => {
+    const agent = buildAgent();
+    const state = buildState({ agents: [agent], activeAgentId: agent.id });
+    const ctx = resolveEffectiveContext(state, buildConfig());
+    expect(ctx.autoMemory).toBe(true);
+  });
+
+  test("autoMemory is false only for an explicit agent opt-out", () => {
+    const agent = buildAgent({ autoMemory: false });
+    const state = buildState({ agents: [agent], activeAgentId: agent.id });
+    const ctx = resolveEffectiveContext(state, buildConfig());
+    expect(ctx.autoMemory).toBe(false);
+  });
 });
 
 // Transient dispatch fallback: when the resolved provider (instance OR

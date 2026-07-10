@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { archiveAgent, createAgent, deleteAgent, listAgents, renameAgent, setAgentProvider, unarchiveAgent, useAgent } from "./agents";
+import { archiveAgent, createAgent, deleteAgent, listAgents, renameAgent, setAgentMemory, setAgentProvider, unarchiveAgent, useAgent } from "./agents";
 import "../hooks/builtins"; // populates the hook registry so createScheduledJob resolves isKnownHook("skill-script")
 import { addEmailWatcher } from "../state/email-watchers";
 import { soulPath } from "../runtime/identity-files";
@@ -716,6 +716,97 @@ describe("createAgent", () => {
     expect(
       after.audit.some(
         (event) => event.action === "agent.provider_set" && event.target === created.id
+      )
+    ).toBe(false);
+  });
+
+  test("createAgent stores an explicit autoMemory:false and omits it otherwise", async () => {
+    const config = buildConfig(workspaceRoot, "create-agent-auto-memory", root);
+    await install(config);
+    const optedOut = await createAgent(config, { name: "curator", autoMemory: false });
+    expect(optedOut.autoMemory).toBe(false);
+    const plain = await createAgent(config, { name: "research" });
+    expect(plain.autoMemory).toBeUndefined();
+    // A truthy value is NOT stored — only the explicit opt-out persists, so
+    // state.json doesn't accumulate redundant `autoMemory: true` rows.
+    const explicitTrue = await createAgent(config, { name: "writer", autoMemory: true });
+    expect(explicitTrue.autoMemory).toBeUndefined();
+  });
+
+  test("setAgentMemory stores the opt-out and audits agent.memory_set", async () => {
+    const config = buildConfig(workspaceRoot, "set-agent-memory", root);
+    await install(config);
+    const created = await createAgent(config, { name: "curator" });
+    const updated = await setAgentMemory(config, created.id, { autoMemory: false });
+    expect(updated.id).toBe(created.id);
+    expect(updated.autoMemory).toBe(false);
+    const after = readState(config.instance);
+    expect(after.agents.find((agent) => agent.id === created.id)?.autoMemory).toBe(false);
+    const audit = after.audit.find(
+      (event) => event.action === "agent.memory_set" && event.target === created.id
+    );
+    expect(audit).toBeDefined();
+    expect(audit?.evidence).toMatchObject({ autoMemory: false, agentId: created.id });
+  });
+
+  test("setAgentMemory restore deletes the field instead of storing true", async () => {
+    const config = buildConfig(workspaceRoot, "set-agent-memory-restore", root);
+    await install(config);
+    const created = await createAgent(config, { name: "curator", autoMemory: false });
+    const restored = await setAgentMemory(config, created.id, { autoMemory: true });
+    expect(restored.autoMemory).toBeUndefined();
+    const stored = readState(config.instance).agents.find((agent) => agent.id === created.id);
+    expect(stored && "autoMemory" in stored).toBe(false);
+  });
+
+  test("setAgentMemory resolves the target by name", async () => {
+    const config = buildConfig(workspaceRoot, "set-agent-memory-by-name", root);
+    await install(config);
+    const created = await createAgent(config, { name: "curator" });
+    const updated = await setAgentMemory(config, "curator", { autoMemory: false });
+    expect(updated.id).toBe(created.id);
+    expect(updated.autoMemory).toBe(false);
+  });
+
+  test("setAgentMemory rejects a non-boolean autoMemory", async () => {
+    const config = buildConfig(workspaceRoot, "set-agent-memory-invalid", root);
+    await install(config);
+    const created = await createAgent(config, { name: "curator" });
+    await expect(setAgentMemory(config, created.id, { autoMemory: "off" })).rejects.toThrow(
+      "Invalid input: autoMemory must be a boolean."
+    );
+    await expect(setAgentMemory(config, created.id, {})).rejects.toThrow(
+      "Invalid input: autoMemory must be a boolean."
+    );
+  });
+
+  test("setAgentMemory throws when the agent does not exist", async () => {
+    const config = buildConfig(workspaceRoot, "set-agent-memory-missing", root);
+    await install(config);
+    await expect(setAgentMemory(config, "agent_nope", { autoMemory: false })).rejects.toThrow(
+      "Agent not found: agent_nope"
+    );
+  });
+
+  test("setAgentMemory is a no-op when the mode is unchanged", async () => {
+    // Mirrors setAgentProvider's no-op hygiene: a redundant save must not
+    // bump updatedAt or write an agent.memory_set audit row.
+    const config = buildConfig(workspaceRoot, "set-agent-memory-noop", root);
+    await install(config);
+    const created = await createAgent(config, { name: "curator" });
+    const sentinel = "2000-01-01T00:00:00.000Z";
+    await mutateState(config.instance, (state) => {
+      const agent = state.agents.find((a) => a.id === created.id)!;
+      agent.updatedAt = sentinel;
+      return agent;
+    });
+    const same = await setAgentMemory(config, created.id, { autoMemory: true });
+    expect(same.id).toBe(created.id);
+    const after = readState(config.instance);
+    expect(after.agents.find((agent) => agent.id === created.id)?.updatedAt).toBe(sentinel);
+    expect(
+      after.audit.some(
+        (event) => event.action === "agent.memory_set" && event.target === created.id
       )
     ).toBe(false);
   });

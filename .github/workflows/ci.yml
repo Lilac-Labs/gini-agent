@@ -83,7 +83,7 @@ jobs:
       # network. Keyed on bun.lock; restore-keys let a dependency bump reuse the
       # prior cache as a base.
       - name: Cache bun download cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -104,7 +104,7 @@ jobs:
       # Next cache for this OS when the source-hash key misses.
       - name: Cache Next.js build
         if: matrix.leg == 'build-web'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: packages/web/.next/cache
           key: nextjs-${{ runner.os }}-${{ hashFiles('bun.lock') }}-${{ hashFiles('packages/web/src/**') }}

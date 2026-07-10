@@ -4,6 +4,7 @@ import { webBoundRequestAllowed } from "./lib/origin-trust";
 import { resolveBindHost } from "./lib/container-env";
 import "./hooks/builtins"; // registers trusted hook handlers (skill-script) before the scheduler/backfill run
 import { runDueJobs } from "./jobs";
+import { reconcileCrmExtraction } from "./jobs/crm-extractor";
 import { runConnectorReprobe } from "./jobs/connector-reprobe";
 import { runSetupRequestSweep } from "./jobs/setup-request-sweep";
 import { runConnectorDetection } from "./jobs/connector-detection";
@@ -296,6 +297,11 @@ backfillEmailWatcherJobs(config)
       error: error instanceof Error ? error.message : String(error)
     });
   });
+
+// CRM extraction reconcile: a pipeline that was running when the previous
+// process died resumes its backfill/watcher loop; a paused one stays paused.
+// See ADR people-crm-extraction-pipeline.md.
+reconcileCrmExtraction(config);
 
 // APNs push dispatcher. Subscribes to the instance-wide chat-blocks
 // stream and fans `approval_requested` events out to every registered

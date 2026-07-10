@@ -1,0 +1,613 @@
+// End-to-end controller tests: fixture mail source + echo provider drive the
+// real loop — backfill seeding, ingest, decide, curator turns as pinned-agent
+// subagent tasks, the infinite watcher, reopen-on-new-mail, pause/resume,
+// and boot reconcile.
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
+import {
+  __awaitCrmLoopExitForTests,
+  __setCrmMailSourceForTests,
+  CRM_CURATOR_SUBAGENT_NAME,
+  autostartCrmExtractionAfterOnboarding,
+  crmExtractionStatus,
+  disableCrmExtraction,
+  enableCrmExtraction,
+  pauseCrmExtraction,
+  reconcileCrmExtraction,
+  startCrmExtraction,
+} from "./crm-extractor";
+import type { CrmMail } from "./crm-extraction-pipeline";
+import type { CrmMailSource } from "../integrations/crm-mail";
+import { crmQueueCounts, listCrmThreads, setCrmMeta, setCrmRunState, closeAllCrmExtractionDbs, getCrmRunState } from "../state/crm-extraction-db";
+import { closeAllAgentDataDbs, dbExecute, dbQuery } from "../state/agent-data-db";
+import { closeAllMemoryDbs, mutateState, readState, readTrace } from "../state";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { clearEchoToolCallingResponses, normalizeProvider, setEchoToolCallingFailure, setEchoToolCallingResponse } from "../provider";
+import { install } from "../runtime";
+import type { RuntimeConfig } from "../types";
+
+const ROOT = "/tmp/gini-crm-extractor-test";
+const SELF = "me@corp.io";
+
+beforeAll(() => {
+  rmSync(ROOT, { recursive: true, force: true });
+  process.env.GINI_STATE_ROOT = ROOT;
+  process.env.GINI_LOG_ROOT = `${ROOT}-logs`;
+  process.env.GINI_EMBEDDING_PROVIDER = "echo";
+  process.env.GINI_RERANKER_PROVIDER = "none";
+  process.env.GINI_CRM_WATCH_INTERVAL_MS = "50";
+  delete process.env.GINI_CRM_FIXTURE_DIR;
+});
+afterAll(() => {
+  closeAllCrmExtractionDbs();
+  closeAllAgentDataDbs();
+  closeAllMemoryDbs();
+  clearEchoToolCallingResponses();
+  delete process.env.GINI_EMBEDDING_PROVIDER;
+  delete process.env.GINI_RERANKER_PROVIDER;
+  delete process.env.GINI_CRM_WATCH_INTERVAL_MS;
+  rmSync(ROOT, { recursive: true, force: true });
+});
+
+function makeConfig(instance: string): RuntimeConfig {
+  return {
+    instance,
+    port: 0,
+    token: "test",
+    provider: { name: "echo", model: "gini-echo-v0" },
+    workspaceRoot: ROOT,
+    stateRoot: ROOT,
+    logRoot: `${ROOT}-logs`,
+  };
+}
+
+function mail(over: Partial<CrmMail> & { id: string; threadId: string }): CrmMail {
+  return { date: 1_000, to: [], cc: [], subject: "s", body: "b", ...over };
+}
+
+// A mutable fixture: tests push messages to simulate future mail arriving.
+function mutableSource(messages: CrmMail[]): CrmMailSource {
+  return {
+    kind: "fixture",
+    async listMessages(afterMs?: number) {
+      return messages
+        .filter((m) => !afterMs || m.date > afterMs)
+        .map((m) => ({ id: m.id, threadId: m.threadId, internalDate: m.date }));
+    },
+    async fetchThread(threadId: string) {
+      return messages.filter((m) => m.threadId === threadId);
+    },
+  };
+}
+
+async function until(label: string, predicate: () => boolean, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await Bun.sleep(50);
+  }
+  throw new Error(`Timed out waiting for: ${label}`);
+}
+
+describe("crm-extractor", () => {
+  test("backfill → curator turn under pinned agent+subagent → watcher → reopen → pause/resume", async () => {
+    const instance = "crmx-main";
+    const config = makeConfig(instance);
+    await install(config);
+    const provider = normalizeProvider(config.provider);
+    setEchoToolCallingResponse({ provider, text: "CRM updated.", toolCalls: [], finishReason: "stop" });
+
+    const messages: CrmMail[] = [
+      // Engaged thread: friend wrote, user replied.
+      mail({ id: "m1", threadId: "T-eng", date: 1_000, from: { address: "friend@x.com" }, to: [{ address: SELF }] }),
+      mail({ id: "m2", threadId: "T-eng", date: 2_000, from: { address: SELF }, to: [{ address: "friend@x.com" }] }),
+      // Cold one-way inbound: skipped without a turn.
+      mail({ id: "m3", threadId: "T-cold", date: 3_000, from: { address: "sdr@pitch.io" }, to: [{ address: SELF }] }),
+    ];
+    setCrmMeta(instance, "self_email", SELF);
+    __setCrmMailSourceForTests(instance, mutableSource(messages));
+
+    const status = await startCrmExtraction(config);
+    expect(status.runState).toBe("running");
+    expect(status.source).toBe("fixture");
+
+    await until("backfill drains (1 done, 1 skipped)", () => {
+      const c = crmQueueCounts(instance);
+      return c.done === 1 && c.skipped === 1 && c.pending === 0 && c.ingested === 0;
+    });
+
+    // The skipped row carries the reason; the done row carries the task id.
+    const [skippedRow] = listCrmThreads(instance, ["skipped"]);
+    expect(skippedRow!.thread_id).toBe("T-cold");
+    expect(skippedRow!.error).toContain("not engaged");
+    const [doneRow] = listCrmThreads(instance, ["done"]);
+    expect(doneRow!.thread_id).toBe("T-eng");
+    expect(doneRow!.task_id).toBeTruthy();
+
+    // Curator persona: constrained, memory-off, owned by the default agent.
+    const state = readState(instance);
+    const subagent = state.subagents.find((s) => s.name === CRM_CURATOR_SUBAGENT_NAME);
+    expect(subagent).toBeDefined();
+    expect(subagent!.autoMemory).toBe(false);
+    expect(subagent!.toolsetIds).toEqual(["database"]);
+    expect(subagent!.skillNames).toEqual(["people-crm"]);
+    expect(subagent!.agentId).toBe("agent_default");
+
+    // The turn ran as a pinned-agent subagent task with the skill inlined.
+    const task = state.tasks.find((t) => t.id === doneRow!.task_id)!;
+    expect(task.agentId).toBe("agent_default");
+    expect(task.subagentId).toBe(subagent!.id);
+    expect(task.input).toContain("```people-crm-skill");
+    expect(task.input).toContain("```email-thread");
+    expect(task.input).toContain(`I'm ${SELF}.`);
+    // Ambient memory suppressed by the subagent persona (agent_default's own
+    // autoMemory stays on for normal chats).
+    const trace = readTrace(instance, task.id);
+    expect(trace.some((r) => r.message === "auto-recall skipped: agent autoMemory off")).toBe(true);
+
+    // The reserved self row exists in the DEFAULT agent's database.
+    const you = dbQuery(instance, "agent_default", "SELECT first_name, email_address, description FROM contacts WHERE description LIKE 'You —%'");
+    expect(you.rows.length).toBe(1);
+    expect(you.rows[0]!.email_address).toBe(SELF);
+
+    // Watcher: a brand-new engaged thread arrives later → processed without
+    // any restart (the infinite watcher).
+    messages.push(
+      mail({ id: "m4", threadId: "T-new", date: Date.now(), from: { address: SELF }, to: [{ address: "newpal@z.com" }] }),
+    );
+    await until("watcher picks up the new thread", () => crmQueueCounts(instance).done === 2);
+
+    // Reopen: NEW mail lands on the already-done thread → it re-runs.
+    messages.push(
+      mail({ id: "m5", threadId: "T-eng", date: Date.now() + 1_000, from: { address: "friend@x.com" }, to: [{ address: SELF }] }),
+    );
+    await until("reopened thread re-processes", () => {
+      const row = listCrmThreads(instance, ["done"]).find((r) => r.thread_id === "T-eng");
+      return !!row && row.attempts >= 2;
+    });
+
+    // Pause: state persists, loop exits, new mail is NOT processed.
+    const paused = await pauseCrmExtraction(config);
+    expect(paused.runState).toBe("paused");
+    await __awaitCrmLoopExitForTests(instance);
+    const doneBefore = crmQueueCounts(instance).done;
+    messages.push(
+      mail({ id: "m6", threadId: "T-during-pause", date: Date.now() + 2_000, from: { address: SELF }, to: [{ address: "later@z.com" }] }),
+    );
+    await Bun.sleep(400);
+    expect(crmQueueCounts(instance).done).toBe(doneBefore);
+    expect(getCrmRunState(instance)).toBe("paused");
+
+    // Boot reconcile respects paused.
+    reconcileCrmExtraction(config);
+    await Bun.sleep(200);
+    expect(crmExtractionStatus(config).inFlightTurns).toBe(0);
+    expect(crmQueueCounts(instance).done).toBe(doneBefore);
+
+    // Resume: the queued-up mail flows.
+    await startCrmExtraction(config);
+    await until("resume processes the pause-era thread", () => crmQueueCounts(instance).done === doneBefore + 1);
+
+    // Shut down cleanly for the rest of the file.
+    await pauseCrmExtraction(config);
+    await __awaitCrmLoopExitForTests(instance);
+  }, 60_000);
+
+  test("start works against a legacy email-PK contacts table (no id column)", async () => {
+    // Real-world hazard: an agent database created before the id-PK schema
+    // still has the retired email-PK contacts shape. Opening it migrates the
+    // table to the modern schema, and the self-row seed lands on the result.
+    const instance = "crmx-legacy";
+    const config = makeConfig(instance);
+    const { agentDataDbPath } = await import("../state/agent-data-db");
+    const path = agentDataDbPath(instance, "agent_default");
+    const { mkdirSync } = await import("node:fs");
+    const { dirname } = await import("node:path");
+    mkdirSync(dirname(path), { recursive: true });
+    const { Database } = await import("bun:sqlite");
+    const raw = new Database(path, { create: true });
+    raw.exec("CREATE TABLE contacts (email_address TEXT PRIMARY KEY, first_name TEXT, profile TEXT)");
+    raw.run("INSERT INTO contacts VALUES ('old@x.io', 'Old', 'kept')");
+    raw.close();
+    await install(config);
+    setCrmMeta(instance, "self_email", SELF);
+    __setCrmMailSourceForTests(instance, mutableSource([]));
+    const status = await startCrmExtraction(config);
+    expect(status.runState).toBe("running");
+    const you = dbQuery(instance, "agent_default", "SELECT id, email_address FROM contacts WHERE description LIKE 'You —%'");
+    expect(you.rows.length).toBe(1);
+    expect(you.rows[0]!.email_address).toBe(SELF);
+    expect(String(you.rows[0]!.id).length).toBe(32); // migrated to the id-PK shape
+    const old = dbQuery(instance, "agent_default", "SELECT profile FROM contacts WHERE email_address = 'old@x.io'");
+    expect(old.rows[0]!.profile).toBe("kept"); // pre-migration data survived
+    await pauseCrmExtraction(config);
+    await __awaitCrmLoopExitForTests(instance);
+  }, 30_000);
+
+  test("start without any mail source throws the connect-account error", async () => {
+    const instance = "crmx-nosource";
+    const config = makeConfig(instance);
+    await install(config);
+    const prevHome = process.env.HOME;
+    process.env.HOME = `${ROOT}/fake-home`; // no ~/.gini/google-accounts here
+    try {
+      expect(startCrmExtraction(config)).rejects.toThrow(/Google account/);
+      // A failed start must not leave the persisted state claiming "running"
+      // (setup runs first; the state flip is the last step of start).
+      expect(getCrmRunState(instance)).toBe("idle");
+    } finally {
+      process.env.HOME = prevHome;
+    }
+  });
+
+  test("boot reconcile resumes a pipeline that was running when the process died", async () => {
+    const instance = "crmx-reconcile";
+    const config = makeConfig(instance);
+    await install(config);
+    const provider = normalizeProvider(config.provider);
+    setEchoToolCallingResponse({ provider, text: "ok", toolCalls: [], finishReason: "stop" });
+    setCrmMeta(instance, "self_email", SELF);
+    __setCrmMailSourceForTests(
+      instance,
+      mutableSource([
+        mail({ id: "r1", threadId: "T-r", date: 1_000, from: { address: SELF }, to: [{ address: "pal@z.com" }] }),
+      ]),
+    );
+    // Simulate "was running when the process died": persisted run state only.
+    setCrmRunState(instance, "running");
+    reconcileCrmExtraction(config);
+    await until("reconciled loop drains the backfill", () => crmQueueCounts(instance).done === 1);
+    await pauseCrmExtraction(config);
+    await __awaitCrmLoopExitForTests(instance);
+  }, 30_000);
+
+  test("mail listing is incremental after the one-time backfill", async () => {
+    const instance = "crmx-incremental";
+    const config = makeConfig(instance);
+    await install(config);
+    setEchoToolCallingResponse({ provider: normalizeProvider(config.provider), text: "ok", toolCalls: [], finishReason: "stop" });
+    setCrmMeta(instance, "self_email", SELF);
+    // A recent date so cursor − overlap stays positive (visible as a real
+    // incremental bound in the assertions below).
+    const seeded = Date.now();
+    const messages = [mail({ id: "i1", threadId: "T-i", date: seeded, from: { address: SELF }, to: [{ address: "pal@z.com" }] })];
+    const listCalls: Array<number | undefined> = [];
+    const inner = mutableSource(messages);
+    __setCrmMailSourceForTests(instance, {
+      kind: "fixture",
+      async listMessages(afterMs?: number) {
+        listCalls.push(afterMs);
+        return inner.listMessages(afterMs);
+      },
+      fetchThread: inner.fetchThread,
+    });
+    await startCrmExtraction(config);
+    await until("backfill drains", () => crmQueueCounts(instance).done === 1);
+    await until("several watcher polls happened", () => listCalls.length >= 4);
+    await pauseCrmExtraction(config);
+    await __awaitCrmLoopExitForTests(instance);
+    // Exactly ONE full list (the backfill seed); every watcher poll passes
+    // the persisted cursor minus the 60s overlap — never a full rescan.
+    expect(listCalls.filter((a) => a === undefined).length).toBe(1);
+    expect(listCalls[0]).toBeUndefined();
+    for (const after of listCalls.slice(1)) {
+      expect(after).toBe(seeded - 60_000);
+    }
+  }, 30_000);
+
+  test("resolves the connected Google account from the machine registry", async () => {
+    const instance = "crmx-gmail-resolve";
+    const config = makeConfig(instance);
+    await install(config);
+    const prevHome = process.env.HOME;
+    const home = `${ROOT}/gmail-home`;
+    const registryDir = join(home, ".gini", "google-accounts");
+    mkdirSync(registryDir, { recursive: true });
+    const account = (id: string, email: string) => ({ id, tag: id, email, configDir: `${home}/${id}`, addedAt: "2026-01-01T00:00:00Z" });
+    process.env.HOME = home;
+    try {
+      // Primary points at the second account → it wins (email lowercased).
+      writeFileSync(
+        join(registryDir, "accounts.json"),
+        JSON.stringify({ version: 1, accounts: [account("gacct_a", "a@x.io"), account("gacct_b", "B@Y.io")], primaryAccountId: "gacct_b" }),
+      );
+      let status = crmExtractionStatus(config);
+      expect(status.source).toBe("gmail");
+      expect(status.selfEmail).toBe("b@y.io");
+      // A stale primary id falls back to the first account.
+      writeFileSync(
+        join(registryDir, "accounts.json"),
+        JSON.stringify({ version: 1, accounts: [account("gacct_a", "a@x.io")], primaryAccountId: "gacct_gone" }),
+      );
+      status = crmExtractionStatus(config);
+      expect(status.selfEmail).toBe("a@x.io");
+      // An account row without a usable email resolves to no source.
+      writeFileSync(
+        join(registryDir, "accounts.json"),
+        JSON.stringify({ version: 1, accounts: [account("gacct_a", "")] }),
+      );
+      expect(crmExtractionStatus(config).source).toBeNull();
+    } finally {
+      process.env.HOME = prevHome;
+    }
+  });
+
+  test("a mail-source crash surfaces as lastError and exits the loop", async () => {
+    const instance = "crmx-loop-error";
+    const config = makeConfig(instance);
+    await install(config);
+    setCrmMeta(instance, "self_email", SELF);
+    __setCrmMailSourceForTests(instance, {
+      kind: "fixture",
+      async listMessages() {
+        throw new Error("mailbox exploded");
+      },
+      async fetchThread() {
+        return [];
+      },
+    });
+    await startCrmExtraction(config);
+    await until("loop error recorded", () => crmExtractionStatus(config).lastError === "mailbox exploded");
+    await __awaitCrmLoopExitForTests(instance);
+    await pauseCrmExtraction(config);
+    __setCrmMailSourceForTests(instance, undefined);
+  }, 30_000);
+
+  test("losing the mail source mid-run parks the loop with a clear error", async () => {
+    const instance = "crmx-source-lost";
+    const config = makeConfig(instance);
+    await install(config);
+    setEchoToolCallingResponse({ provider: normalizeProvider(config.provider), text: "ok", toolCalls: [], finishReason: "stop" });
+    setCrmMeta(instance, "self_email", SELF);
+    __setCrmMailSourceForTests(
+      instance,
+      mutableSource([mail({ id: "s1", threadId: "T-s", date: 1_000, from: { address: SELF }, to: [{ address: "pal@z.com" }] })]),
+    );
+    await startCrmExtraction(config);
+    await until("backfill drains", () => crmQueueCounts(instance).done === 1);
+    const prevHome = process.env.HOME;
+    process.env.HOME = `${ROOT}/empty-home`; // no registry → no fallback source
+    try {
+      __setCrmMailSourceForTests(instance, undefined);
+      await until("loop parks on missing source", () =>
+        (crmExtractionStatus(config).lastError ?? "").includes("no mail source"),
+      );
+      expect(getCrmRunState(instance)).toBe("running"); // still wants to run
+    } finally {
+      process.env.HOME = prevHome;
+      await pauseCrmExtraction(config);
+      await __awaitCrmLoopExitForTests(instance);
+    }
+  }, 30_000);
+
+  test("ingest failures: vanished threads skip, fetch errors mark error, late-vanish skips at turn time", async () => {
+    const instance = "crmx-ingest-fail";
+    const config = makeConfig(instance);
+    await install(config);
+    setEchoToolCallingResponse({ provider: normalizeProvider(config.provider), text: "ok", toolCalls: [], finishReason: "stop" });
+    setCrmMeta(instance, "self_email", SELF);
+    const late = mail({ id: "l1", threadId: "T-late", date: 1_000, from: { address: SELF }, to: [{ address: "pal@z.com" }] });
+    const fetches = new Map<string, number>();
+    __setCrmMailSourceForTests(instance, {
+      kind: "fixture",
+      async listMessages() {
+        return [
+          { id: "g1", threadId: "T-gone", internalDate: 1_000 },
+          { id: "b1", threadId: "T-boom", internalDate: 2_000 },
+          { id: "l1", threadId: "T-late", internalDate: 3_000 },
+        ];
+      },
+      async fetchThread(threadId: string) {
+        fetches.set(threadId, (fetches.get(threadId) ?? 0) + 1);
+        if (threadId === "T-gone") return [];
+        if (threadId === "T-boom") throw new Error("fetch blew up");
+        // T-late: present at ingest, vanished by turn time.
+        return fetches.get("T-late")! <= 1 ? [late] : [];
+      },
+    });
+    await startCrmExtraction(config);
+    await until("all three threads settled", () => {
+      const c = crmQueueCounts(instance);
+      return c.skipped === 2 && c.error === 1;
+    });
+    const rows = listCrmThreads(instance, ["skipped", "error"]);
+    expect(rows.find((r) => r.thread_id === "T-gone")!.error).toContain("thread vanished");
+    expect(rows.find((r) => r.thread_id === "T-boom")!.error).toContain("ingest: fetch blew up");
+    expect(rows.find((r) => r.thread_id === "T-late")!.error).toContain("thread vanished");
+    await pauseCrmExtraction(config);
+    await __awaitCrmLoopExitForTests(instance);
+  }, 30_000);
+
+  test("turn outcomes: provider failure, stuck approval, vanished task, and timeout-with-retry", async () => {
+    // Each scenario gets its own instance with one engaged thread; the flip
+    // helper mutates the curator task row between the runner's 2s polls.
+    const engaged = (threadId: string) =>
+      mutableSource([mail({ id: `${threadId}-m`, threadId, date: 1_000, from: { address: SELF }, to: [{ address: "pal@z.com" }] })]);
+    const provider = normalizeProvider(makeConfig("x").provider);
+
+    async function runScenario(
+      instance: string,
+      opts: { echo: boolean; echoDelayMs?: number; flip?: (taskId: string) => void; env?: Record<string, string> },
+    ): Promise<string> {
+      const config = makeConfig(instance);
+      await install(config);
+      clearEchoToolCallingResponses();
+      if (opts.echo) {
+        // Stubs are consumed one per provider call; queue two so the
+        // timeout scenario's retry attempt is also delayed (the no-stub
+        // fallback would complete instantly and win the race).
+        for (let i = 0; i < 2; i++) {
+          setEchoToolCallingResponse(
+            { provider, text: "ok", toolCalls: [], finishReason: "stop" },
+            undefined,
+            opts.echoDelayMs ? { delayMs: opts.echoDelayMs } : undefined,
+          );
+        }
+      } else {
+        setEchoToolCallingFailure("provider exploded");
+      }
+      for (const [k, v] of Object.entries(opts.env ?? {})) process.env[k] = v;
+      setCrmMeta(instance, "self_email", SELF);
+      __setCrmMailSourceForTests(instance, engaged(`T-${instance}`));
+      try {
+        await startCrmExtraction(config);
+        if (opts.flip) {
+          // Wait for the curator task to finish, then rewrite its terminal
+          // state before the runner's next poll observes it.
+          let flipped = false;
+          await until("task flipped", () => {
+            const task = readState(instance).tasks.find((t) => t.subagentId && t.status === "completed");
+            if (task && !flipped) {
+              flipped = true;
+              opts.flip!(task.id);
+            }
+            return flipped;
+          });
+        }
+        await until(`thread errored (${instance})`, () => crmQueueCounts(instance).error === 1, 30_000);
+        return listCrmThreads(instance, ["error"])[0]!.error ?? "";
+      } finally {
+        for (const k of Object.keys(opts.env ?? {})) delete process.env[k];
+        await pauseCrmExtraction(config);
+        await __awaitCrmLoopExitForTests(instance);
+      }
+    }
+
+    // No echo response configured → the chat task itself fails.
+    expect(await runScenario("crmx-turn-fail", { echo: false })).toMatch(/failed/);
+    // A task stuck waiting on approval is not retried — surfaced as stuck.
+    expect(
+      await runScenario("crmx-turn-stuck", {
+        echo: true,
+        flip: (taskId) =>
+          void mutateState("crmx-turn-stuck", (state) => {
+            state.tasks.find((t) => t.id === taskId)!.status = "waiting_approval";
+            return null;
+          }),
+      }),
+    ).toContain("stuck: waiting_approval");
+    // A task row that disappears entirely.
+    expect(
+      await runScenario("crmx-turn-gone", {
+        echo: true,
+        flip: (taskId) =>
+          void mutateState("crmx-turn-gone", (state) => {
+            state.tasks = state.tasks.filter((t) => t.id !== taskId);
+            return null;
+          }),
+      }),
+    ).toContain("task disappeared");
+    // A 1ms deadline times out (the echo response is delayed past it),
+    // retries once, then errors.
+    const timeoutError = await runScenario("crmx-turn-timeout", {
+      echo: true,
+      echoDelayMs: 3_000,
+      env: { GINI_CRM_TURN_TIMEOUT_MS: "1" },
+    });
+    expect(timeoutError).toBe("timeout");
+    const attempts = listCrmThreads("crmx-turn-timeout", ["error"])[0]!.attempts;
+    expect(attempts).toBeGreaterThanOrEqual(1);
+  }, 120_000);
+
+  test("boot reconcile survives a start failure (broken agent database)", async () => {
+    const instance = "crmx-reconcile-broken";
+    const config = makeConfig(instance);
+    await install(config);
+    setCrmMeta(instance, "self_email", SELF);
+    __setCrmMailSourceForTests(instance, mutableSource([]));
+    // Replace the contacts table with a shape the self-row seed can't query.
+    dbExecute(instance, "agent_default", "DROP TABLE contacts");
+    dbExecute(instance, "agent_default", "CREATE TABLE contacts (x TEXT)");
+    setCrmRunState(instance, "running");
+    reconcileCrmExtraction(config); // must not throw
+    await Bun.sleep(300);
+    expect(crmExtractionStatus(config).inFlightTurns).toBe(0);
+    await __awaitCrmLoopExitForTests(instance); // no loop was started
+    __setCrmMailSourceForTests(instance, undefined);
+  }, 30_000);
+
+  test("onboarding autostart: fires when idle with a source, never otherwise, and survives failure", async () => {
+    // (a) idle + source → starts.
+    const a = makeConfig("crmx-auto-a");
+    await install(a);
+    setEchoToolCallingResponse({ provider: normalizeProvider(a.provider), text: "ok", toolCalls: [], finishReason: "stop" });
+    setCrmMeta(a.instance, "self_email", SELF);
+    __setCrmMailSourceForTests(a.instance, mutableSource([]));
+    autostartCrmExtractionAfterOnboarding(a);
+    await until("autostart flips to running", () => getCrmRunState(a.instance) === "running");
+    await pauseCrmExtraction(a);
+    await __awaitCrmLoopExitForTests(a.instance);
+
+    // (b) not idle (paused) → untouched.
+    autostartCrmExtractionAfterOnboarding(a);
+    await Bun.sleep(100);
+    expect(getCrmRunState(a.instance)).toBe("paused");
+
+    // (c) idle + no source anywhere → stays idle.
+    const c = makeConfig("crmx-auto-c");
+    await install(c);
+    const prevHome = process.env.HOME;
+    process.env.HOME = `${ROOT}/empty-home-c`;
+    try {
+      autostartCrmExtractionAfterOnboarding(c);
+      await Bun.sleep(100);
+      expect(getCrmRunState(c.instance)).toBe("idle");
+    } finally {
+      process.env.HOME = prevHome;
+    }
+
+    // (d) start throws inside the autostart → caught, state stays idle.
+    const d = makeConfig("crmx-auto-d");
+    await install(d);
+    setCrmMeta(d.instance, "self_email", SELF);
+    __setCrmMailSourceForTests(d.instance, mutableSource([]));
+    dbExecute(d.instance, "agent_default", "DROP TABLE contacts");
+    dbExecute(d.instance, "agent_default", "CREATE TABLE contacts (x TEXT)");
+    autostartCrmExtractionAfterOnboarding(d);
+    await Bun.sleep(300);
+    expect(getCrmRunState(d.instance)).toBe("idle"); // failed start left no state behind
+    __setCrmMailSourceForTests(d.instance, undefined);
+  }, 30_000);
+
+  test("disable is a sticky master switch; enable returns to idle", async () => {
+    const instance = "crmx-disable";
+    const config = makeConfig(instance);
+    await install(config);
+    setEchoToolCallingResponse({ provider: normalizeProvider(config.provider), text: "ok", toolCalls: [], finishReason: "stop" });
+    setCrmMeta(instance, "self_email", SELF);
+    const messages = [mail({ id: "d1", threadId: "T-d", date: 1_000, from: { address: SELF }, to: [{ address: "pal@z.com" }] })];
+    __setCrmMailSourceForTests(instance, mutableSource(messages));
+
+    await startCrmExtraction(config);
+    await until("initial thread done", () => crmQueueCounts(instance).done === 1);
+
+    // Disable stops the loop and persists.
+    const disabled = await disableCrmExtraction(config);
+    expect(disabled.runState).toBe("disabled");
+    await __awaitCrmLoopExitForTests(instance);
+    // New mail is NOT processed while disabled.
+    messages.push(mail({ id: "d2", threadId: "T-d2", date: Date.now(), from: { address: SELF }, to: [{ address: "x@z.com" }] }));
+    await Bun.sleep(300);
+    expect(crmQueueCounts(instance).done).toBe(1);
+    // Start refuses, pause is a no-op, autostart and reconcile stay away.
+    expect(startCrmExtraction(config)).rejects.toThrow(/disabled/);
+    expect((await pauseCrmExtraction(config)).runState).toBe("disabled");
+    autostartCrmExtractionAfterOnboarding(config);
+    reconcileCrmExtraction(config);
+    await Bun.sleep(200);
+    expect(getCrmRunState(instance)).toBe("disabled");
+    expect(crmQueueCounts(instance).done).toBe(1);
+
+    // Enable → idle (not auto-started), then start flows again and the
+    // mail that arrived while disabled is processed.
+    const enabled = await enableCrmExtraction(config);
+    expect(enabled.runState).toBe("idle");
+    await startCrmExtraction(config);
+    await until("disabled-era mail processed after enable", () => crmQueueCounts(instance).done === 2);
+    await pauseCrmExtraction(config);
+    await __awaitCrmLoopExitForTests(instance);
+    // Enabling a non-disabled pipeline changes nothing.
+    expect((await enableCrmExtraction(config)).runState).toBe("paused");
+  }, 60_000);
+});

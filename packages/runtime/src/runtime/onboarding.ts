@@ -28,6 +28,7 @@ import { join } from "node:path";
 
 import { resolveEffectiveContext } from "../execution/effective-context";
 import { assertSkillNamesResolve, removeJob } from "../jobs";
+import { autostartCrmExtractionAfterOnboarding } from "../jobs/crm-extractor";
 import { appendEvent, mutateState, readState } from "../state";
 import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../state/google-accounts";
 import { now } from "../state/ids";
@@ -297,6 +298,11 @@ export async function applyOnboardingRoutines(
     record.routineJobIds.push(job.id);
     writeOnboarding(config.instance, record);
   }
+  // Applying routines is the end of onboarding: kick the CRM extraction
+  // pipeline off in the background (backfill + infinite watcher) when a
+  // Google account is connected. Fire-and-forget — never blocks or fails
+  // the onboarding response. See ADR people-crm-extraction-pipeline.md.
+  autostartCrmExtractionAfterOnboarding(config);
   return { record, jobs };
 }
 

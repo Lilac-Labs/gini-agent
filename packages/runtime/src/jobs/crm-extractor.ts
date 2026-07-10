@@ -1,0 +1,502 @@
+// CRM extraction controller: the always-on pipeline that turns the user's
+// mailbox into people-crm rows. Owns the resumable backfill, the infinite
+// watcher for future mail, and the pause/resume/status surface the gateway
+// exposes. Design and measurements: ADR people-crm-extraction-pipeline.md.
+//
+// Execution model: curator turns are ordinary chat tasks submitted with the
+// OWNING agent pinned (Task.agentId — the user's default agent, so contacts
+// land in the database their assistant queries) and a persistent
+// "crm-curator" subagent persona constraining each turn to the database
+// toolset + people-crm skill with ambient memory off. Turns are convergent
+// (schema-level CAS + UNIQUE arbitration), so the pool runs fully parallel
+// and crash recovery simply re-runs whatever was mid-flight.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { appendLog } from "../state";
+import { readState, mutateState, createSubagentRecord } from "../state";
+import { dbExecute, dbQuery } from "../state/agent-data-db";
+import {
+  crmBroadcastSenders,
+  crmQueueCounts,
+  enqueueCrmThreads,
+  getCrmMeta,
+  getCrmRunState,
+  listCrmThreads,
+  markCrmThreadIngested,
+  markCrmThreads,
+  requeueCrmErrors,
+  setCrmMeta,
+  setCrmRunState,
+  type CrmQueueCounts,
+  type CrmRunState,
+} from "../state/crm-extraction-db";
+import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../state/google-accounts";
+import { fixtureCrmMailSource, gmailCrmMailSource, type CrmMailSource } from "../integrations/crm-mail";
+import {
+  analyzeThread,
+  batchByPrimary,
+  buildTurnMessage,
+  decideThread,
+  makeSelfMatcher,
+} from "./crm-extraction-pipeline";
+import { submitTask } from "../agent";
+import { projectRoot } from "../paths";
+import type { Instance, RuntimeConfig, SubagentRecord } from "../types";
+
+export const CRM_CURATOR_SUBAGENT_NAME = "crm-curator";
+const TURN_WORKERS = 16;
+const INGEST_CONCURRENCY = 8;
+// Read lazily so tests can shrink the timeout/interval after module import.
+function turnTimeoutMs(): number {
+  return Number(process.env.GINI_CRM_TURN_TIMEOUT_MS ?? "240000");
+}
+function watcherIntervalMs(): number {
+  return Number(process.env.GINI_CRM_WATCH_INTERVAL_MS ?? "60000");
+}
+// Overlap window when polling for new mail — enqueue dedup makes re-listing
+// the boundary idempotent.
+const WATCHER_OVERLAP_MS = 60_000;
+
+const CURATOR_SYSTEM_PROMPT = [
+  "You are the CRM curator — a focused worker that maintains the user's people-CRM database from material handed to you in the task.",
+  "You only use database tools (db_query, db_execute, db_schema). You never browse, never run terminal commands, never authenticate anywhere.",
+  "Follow the people-crm skill instructions included in the task message. Read what you are handed, decide which real people it evidences, and fold them into the contacts/relations tables per the skill's rules.",
+  "Finish with a single short line summarizing what changed (or why nothing did).",
+].join("\n");
+
+interface ExtractorHandle {
+  loop?: Promise<void>;
+  stopRequested: boolean;
+  inFlightTurns: number;
+  lastError?: string;
+  lastActivityAt?: number;
+}
+
+const handles = new Map<Instance, ExtractorHandle>();
+
+function handleFor(instance: Instance): ExtractorHandle {
+  let h = handles.get(instance);
+  if (!h) {
+    h = { stopRequested: false, inFlightTurns: 0 };
+    handles.set(instance, h);
+  }
+  return h;
+}
+
+// Test seam: closed-over sources by instance (fixture dirs in tests/dev).
+const sourceOverrides = new Map<Instance, CrmMailSource>();
+export function __setCrmMailSourceForTests(instance: Instance, source: CrmMailSource | undefined): void {
+  if (source) sourceOverrides.set(instance, source);
+  else sourceOverrides.delete(instance);
+}
+
+export interface CrmExtractionStatus {
+  runState: CrmRunState;
+  counts: CrmQueueCounts;
+  backfillSeeded: boolean;
+  mailCursor: number | null;
+  inFlightTurns: number;
+  selfEmail: string | null;
+  selfAddresses: string[];
+  agentId: string | null;
+  subagentId: string | null;
+  source: "gmail" | "fixture" | null;
+  lastError: string | null;
+  lastActivityAt: number | null;
+}
+
+function resolveMailSource(instance: Instance): { source: CrmMailSource; selfEmail: string } | undefined {
+  const override = sourceOverrides.get(instance);
+  const fixtureDir = getCrmMeta(instance, "fixture_dir") ?? process.env.GINI_CRM_FIXTURE_DIR;
+  const metaSelf = getCrmMeta(instance, "self_email");
+  if (override) return { source: override, selfEmail: metaSelf ?? "user@example.com" };
+  if (fixtureDir) return { source: fixtureCrmMailSource(fixtureDir), selfEmail: metaSelf ?? "user@example.com" };
+  const accounts = readGoogleAccounts();
+  if (accounts.length === 0) return undefined;
+  const primaryId = readPrimaryGoogleAccountId();
+  const account = (primaryId ? accounts.find((a) => a.id === primaryId) : undefined) ?? accounts[0]!;
+  if (!account.email) return undefined;
+  return {
+    source: gmailCrmMailSource({ configDir: account.configDir }),
+    selfEmail: account.email.toLowerCase(),
+  };
+}
+
+function selfAddresses(instance: Instance, selfEmail: string): string[] {
+  const extra = getCrmMeta(instance, "self_extra");
+  const parsed = extra ? (JSON.parse(extra) as string[]) : [];
+  return [selfEmail, ...parsed];
+}
+
+// The skill body embedded into every turn (saves the read_skill round trip;
+// measured in the ADR). Bundled path — the skill ships with the runtime.
+let cachedSkillBody: string | undefined;
+function skillBody(): string {
+  if (cachedSkillBody) return cachedSkillBody;
+  const raw = readFileSync(join(projectRoot(), "skills", "personal", "people-crm", "SKILL.md"), "utf8");
+  cachedSkillBody = raw.replace(/^---[\s\S]*?---\n/, "");
+  return cachedSkillBody;
+}
+
+async function ensureCuratorSubagent(config: RuntimeConfig, agentId: string): Promise<SubagentRecord> {
+  const existing = readState(config.instance).subagents.find(
+    (s) => s.name === CRM_CURATOR_SUBAGENT_NAME && s.agentId === agentId,
+  );
+  if (existing) return existing;
+  return mutateState(config.instance, (state) => {
+    const again = state.subagents.find((s) => s.name === CRM_CURATOR_SUBAGENT_NAME && s.agentId === agentId);
+    if (again) return again;
+    return createSubagentRecord(state, {
+      agentId,
+      name: CRM_CURATOR_SUBAGENT_NAME,
+      prompt: "Persistent CRM curator persona for the email-extraction pipeline.",
+      toolsets: [],
+      systemPrompt: CURATOR_SYSTEM_PROMPT,
+      toolsetIds: ["database"],
+      skillNames: ["people-crm"],
+      autoMemory: false,
+    });
+  });
+}
+
+// The reserved contact row for the user. The pipeline only knows the
+// connected address; the curator folds newly-discovered self-aliases into
+// this row per the skill (`You —` marker).
+function seedSelfRow(instance: Instance, agentId: string, selfEmail: string): void {
+  // rowid, not id: the open migrates the retired email-PK shape to the
+  // modern schema, but an agent-recreated custom contacts table may still
+  // lack an id column — rowid exists regardless.
+  const existing = dbQuery(
+    instance,
+    agentId,
+    "SELECT rowid FROM contacts WHERE description LIKE 'You —%' OR email_address = ?",
+    [selfEmail],
+  );
+  if (existing.rows.length > 0) return;
+  dbExecute(
+    instance,
+    agentId,
+    "INSERT INTO contacts (first_name, email_address, description) VALUES (?, ?, ?)",
+    [
+      "You",
+      selfEmail,
+      "You — the user's own reserved row. Newly-discovered self-addresses are recorded here as aliases, never as separate contacts.",
+    ],
+  );
+}
+
+function owningAgentId(config: RuntimeConfig): string {
+  const state = readState(config.instance);
+  return state.agents.find((a) => a.id === "agent_default")?.id ?? state.activeAgentId ?? "agent_default";
+}
+
+async function sleepUnlessStopped(handle: ExtractorHandle, ms: number): Promise<void> {
+  const until = Date.now() + ms;
+  while (Date.now() < until && !handle.stopRequested) {
+    await Bun.sleep(Math.min(1_000, until - Date.now()));
+  }
+}
+
+async function mapPool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const index = next;
+      next += 1;
+      if (index >= items.length) return;
+      await fn(items[index]!);
+    }
+  });
+  await Promise.all(workers);
+}
+
+// One curator turn over one batch of threads; convergent, so a timeout is
+// retried once and a crash simply leaves the rows for the next drain.
+async function runTurn(
+  config: RuntimeConfig,
+  handle: ExtractorHandle,
+  agentId: string,
+  subagentId: string,
+  source: CrmMailSource,
+  selfEmail: string,
+  threadIds: string[],
+): Promise<void> {
+  const batch: { threadId: string; msgs: Awaited<ReturnType<CrmMailSource["fetchThread"]>> }[] = [];
+  for (const threadId of threadIds) {
+    const msgs = await source.fetchThread(threadId);
+    if (msgs.length > 0) batch.push({ threadId, msgs });
+  }
+  if (batch.length === 0) {
+    markCrmThreads(config.instance, threadIds, { status: "skipped", error: "thread vanished from source" });
+    return;
+  }
+  const content = buildTurnMessage(batch, skillBody(), selfEmail);
+  const attempt = async (): Promise<{ ok: boolean; taskId: string; error?: string }> => {
+    const task = await submitTask(config, content, { mode: "chat", agentId, subagentId });
+    const deadline = Date.now() + turnTimeoutMs();
+    while (Date.now() < deadline) {
+      await Bun.sleep(Math.min(2_000, turnTimeoutMs()));
+      const row = readState(config.instance).tasks.find((t) => t.id === task.id);
+      if (!row) return { ok: false, taskId: task.id, error: "task disappeared" };
+      if (row.status === "completed") return { ok: true, taskId: task.id };
+      if (row.status === "failed" || row.status === "cancelled") {
+        return { ok: false, taskId: task.id, error: `${row.status}: ${(row.error ?? row.summary ?? "").slice(0, 120)}` };
+      }
+      if (row.status === "waiting_approval" || row.status === "needs_input") {
+        return { ok: false, taskId: task.id, error: `stuck: ${row.status}` };
+      }
+    }
+    return { ok: false, taskId: task.id, error: "timeout" };
+  };
+  handle.inFlightTurns += 1;
+  try {
+    let result = await attempt();
+    if (!result.ok && result.error === "timeout") result = await attempt();
+    markCrmThreads(config.instance, threadIds, {
+      status: result.ok ? "done" : "error",
+      taskId: result.taskId,
+      error: result.ok ? null : result.error,
+      bumpAttempts: true,
+    });
+    handle.lastActivityAt = Date.now();
+    if (!result.ok) handle.lastError = result.error;
+  } finally {
+    handle.inFlightTurns -= 1;
+  }
+}
+
+async function runLoop(config: RuntimeConfig, handle: ExtractorHandle): Promise<void> {
+  const instance = config.instance;
+  try {
+    while (!handle.stopRequested && getCrmRunState(instance) === "running") {
+      const resolved = resolveMailSource(instance);
+      if (!resolved) {
+        handle.lastError = "no mail source (connect a Google account)";
+        await sleepUnlessStopped(handle, watcherIntervalMs());
+        continue;
+      }
+      const { source, selfEmail } = resolved;
+      const agentId = owningAgentId(config);
+      const isSelf = makeSelfMatcher(selfAddresses(instance, selfEmail));
+
+      // Phase 0 — backfill seeding, exactly once.
+      if (getCrmMeta(instance, "backfill_seeded") !== "1") {
+        const refs = await source.listMessages();
+        const byThread = new Map<string, number>();
+        for (const r of refs) byThread.set(r.threadId, Math.max(byThread.get(r.threadId) ?? 0, r.internalDate));
+        enqueueCrmThreads(
+          instance,
+          [...byThread.entries()].map(([threadId, newestDate]) => ({ threadId, newestDate })),
+        );
+        const cursor = Math.max(0, ...refs.map((r) => r.internalDate));
+        setCrmMeta(instance, "mail_cursor", String(cursor || Date.now()));
+        setCrmMeta(instance, "backfill_seeded", "1");
+        appendLog(instance, "crm.extraction.backfill_seeded", { threads: byThread.size, messages: refs.length });
+        handle.lastActivityAt = Date.now();
+        continue;
+      }
+
+      // Phase 1 — ingest: fetch + analyze pending threads.
+      const pending = listCrmThreads(instance, ["pending"], 200);
+      if (pending.length > 0) {
+        await mapPool(pending, INGEST_CONCURRENCY, async (row) => {
+          if (handle.stopRequested) return;
+          try {
+            const msgs = await source.fetchThread(row.thread_id);
+            if (msgs.length === 0) {
+              markCrmThreads(instance, [row.thread_id], { status: "skipped", error: "thread vanished from source" });
+              return;
+            }
+            const analysis = analyzeThread(msgs, isSelf);
+            markCrmThreadIngested(instance, row.thread_id, analysis);
+          } catch (error) {
+            markCrmThreads(instance, [row.thread_id], {
+              status: "error",
+              error: `ingest: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200),
+              bumpAttempts: true,
+            });
+          }
+        });
+        handle.lastActivityAt = Date.now();
+        continue;
+      }
+
+      // Phase 2 — decide + run curator turns over everything ingested.
+      const ingested = listCrmThreads(instance, ["ingested"]);
+      if (ingested.length > 0 && !handle.stopRequested) {
+        const broadcast = crmBroadcastSenders(instance);
+        const keeps: typeof ingested = [];
+        for (const row of ingested) {
+          const verdict = decideThread(
+            { engaged: row.engaged === 1, primarySender: row.primary_sender, hasHuman: row.primary_sender !== null || row.engaged === 1 },
+            broadcast,
+          );
+          if (verdict.keep) keeps.push(row);
+          else markCrmThreads(instance, [row.thread_id], { status: "skipped", error: verdict.reason });
+        }
+        if (keeps.length > 0) {
+          const subagent = await ensureCuratorSubagent(config, agentId);
+          seedSelfRow(instance, agentId, selfEmail);
+          const batches = batchByPrimary(
+            keeps.map((r) => ({ threadId: r.thread_id, primarySender: r.primary_sender, chars: r.chars })),
+          );
+          appendLog(instance, "crm.extraction.wave", { threads: keeps.length, turns: batches.length });
+          await mapPool(batches, TURN_WORKERS, async (batch) => {
+            if (handle.stopRequested) return;
+            await runTurn(config, handle, agentId, subagent.id, source, selfEmail, batch);
+          });
+        }
+        continue;
+      }
+
+      // Phase 3 — watcher: poll for new mail, then idle.
+      const cursor = Number(getCrmMeta(instance, "mail_cursor") ?? "0");
+      const refs = await source.listMessages(Math.max(0, cursor - WATCHER_OVERLAP_MS));
+      if (refs.length > 0) {
+        const byThread = new Map<string, number>();
+        for (const r of refs) byThread.set(r.threadId, Math.max(byThread.get(r.threadId) ?? 0, r.internalDate));
+        const { added, reopened } = enqueueCrmThreads(
+          instance,
+          [...byThread.entries()].map(([threadId, newestDate]) => ({ threadId, newestDate })),
+        );
+        const newest = Math.max(cursor, ...refs.map((r) => r.internalDate));
+        setCrmMeta(instance, "mail_cursor", String(newest));
+        if (added || reopened) {
+          appendLog(instance, "crm.extraction.watch", { added, reopened });
+          handle.lastActivityAt = Date.now();
+          continue; // ingest the new arrivals immediately
+        }
+      }
+      await sleepUnlessStopped(handle, watcherIntervalMs());
+    }
+  } catch (error) {
+    handle.lastError = error instanceof Error ? error.message : String(error);
+    appendLog(instance, "crm.extraction.loop_error", { error: handle.lastError });
+  } finally {
+    handle.loop = undefined;
+    appendLog(instance, "crm.extraction.loop_exited", { runState: getCrmRunState(instance) });
+  }
+}
+
+export function crmExtractionStatus(config: RuntimeConfig): CrmExtractionStatus {
+  const instance = config.instance;
+  const handle = handleFor(instance);
+  const resolved = resolveMailSource(instance);
+  const cursor = getCrmMeta(instance, "mail_cursor");
+  const state = readState(instance);
+  const agentId = state.agents.find((a) => a.id === "agent_default")?.id ?? state.activeAgentId ?? null;
+  const subagent = state.subagents.find((s) => s.name === CRM_CURATOR_SUBAGENT_NAME);
+  return {
+    runState: getCrmRunState(instance),
+    counts: crmQueueCounts(instance),
+    backfillSeeded: getCrmMeta(instance, "backfill_seeded") === "1",
+    mailCursor: cursor ? Number(cursor) : null,
+    inFlightTurns: handle.inFlightTurns,
+    selfEmail: resolved?.selfEmail ?? getCrmMeta(instance, "self_email") ?? null,
+    selfAddresses: resolved ? selfAddresses(instance, resolved.selfEmail) : [],
+    agentId,
+    subagentId: subagent?.id ?? null,
+    source: resolved?.source.kind ?? null,
+    lastError: handle.lastError ?? null,
+    lastActivityAt: handle.lastActivityAt ?? null,
+  };
+}
+
+// Start (or resume). Idempotent: an already-running loop is left alone.
+// A disabled pipeline refuses to start — the master switch must be flipped
+// back via enableCrmExtraction first.
+export async function startCrmExtraction(config: RuntimeConfig): Promise<CrmExtractionStatus> {
+  const instance = config.instance;
+  if (getCrmRunState(instance) === "disabled") {
+    throw new Error("Invalid input: CRM extraction is disabled — enable it first.");
+  }
+  const resolved = resolveMailSource(instance);
+  if (!resolved) {
+    // "Invalid input" prefix → the gateway maps this to HTTP 400.
+    throw new Error("Invalid input: CRM extraction needs a connected Google account (or a fixture source).");
+  }
+  // Setup first, state flip last: if any setup step throws, the pipeline
+  // stays in its prior state instead of reporting "running" with no loop.
+  const agentId = owningAgentId(config);
+  await ensureCuratorSubagent(config, agentId);
+  seedSelfRow(instance, agentId, resolved.selfEmail);
+  setCrmMeta(instance, "self_email", resolved.selfEmail);
+  requeueCrmErrors(instance);
+  setCrmRunState(instance, "running");
+  const handle = handleFor(instance);
+  handle.stopRequested = false;
+  handle.lastError = undefined;
+  if (!handle.loop) {
+    appendLog(instance, "crm.extraction.started", { source: resolved.source.kind, selfEmail: resolved.selfEmail });
+    handle.loop = runLoop(config, handle);
+  }
+  return crmExtractionStatus(config);
+}
+
+// Pause. In-flight curator turns finish (they are convergent and cheap to
+// let complete); nothing new dispatches, the watcher stops, and the paused
+// state survives restarts. Pausing a disabled pipeline is a no-op — the
+// stronger state wins.
+export async function pauseCrmExtraction(config: RuntimeConfig): Promise<CrmExtractionStatus> {
+  const instance = config.instance;
+  if (getCrmRunState(instance) !== "disabled") {
+    setCrmRunState(instance, "paused");
+    handleFor(instance).stopRequested = true;
+    appendLog(instance, "crm.extraction.paused", {});
+  }
+  return crmExtractionStatus(config);
+}
+
+// Master switch off: stops the loop like pause, and additionally blocks
+// start, the onboarding autostart, and the boot reconcile until enabled.
+export async function disableCrmExtraction(config: RuntimeConfig): Promise<CrmExtractionStatus> {
+  const instance = config.instance;
+  setCrmRunState(instance, "disabled");
+  handleFor(instance).stopRequested = true;
+  appendLog(instance, "crm.extraction.disabled", {});
+  return crmExtractionStatus(config);
+}
+
+// Master switch back on: returns a disabled pipeline to idle (it does NOT
+// start it — POST start, or the next onboarding autostart, does that).
+export async function enableCrmExtraction(config: RuntimeConfig): Promise<CrmExtractionStatus> {
+  const instance = config.instance;
+  if (getCrmRunState(instance) === "disabled") {
+    setCrmRunState(instance, "idle");
+    appendLog(instance, "crm.extraction.enabled", {});
+  }
+  return crmExtractionStatus(config);
+}
+
+// Boot reconcile: a pipeline that was running when the runtime died resumes
+// automatically; a paused one stays paused.
+export function reconcileCrmExtraction(config: RuntimeConfig): void {
+  if (getCrmRunState(config.instance) !== "running") return;
+  void startCrmExtraction(config).catch((error) => {
+    appendLog(config.instance, "crm.extraction.reconcile_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+}
+
+// Onboarding hook: fire-and-forget autostart once the user finishes
+// onboarding with a Google account connected. Never throws into the
+// onboarding path.
+export function autostartCrmExtractionAfterOnboarding(config: RuntimeConfig): void {
+  if (getCrmRunState(config.instance) !== "idle") return;
+  const resolved = resolveMailSource(config.instance);
+  if (!resolved) return;
+  void startCrmExtraction(config).catch((error) => {
+    appendLog(config.instance, "crm.extraction.autostart_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+}
+
+// Test seam: await the current loop's exit after a pause (keeps tests
+// deterministic without exposing the handle).
+export async function __awaitCrmLoopExitForTests(instance: Instance): Promise<void> {
+  const handle = handleFor(instance);
+  while (handle.loop) await Bun.sleep(20);
+  while (handle.inFlightTurns > 0) await Bun.sleep(20);
+}

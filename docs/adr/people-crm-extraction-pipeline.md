@@ -7,19 +7,26 @@
 ## Decision
 
 Bulk source-material extraction into the people-CRM (the OPE-70 mailbox
-backfill, and the future ongoing trigger) runs as **real chat turns against a
-dedicated curator agent**, fully parallel, with correctness owned by the
+backfill and the ongoing watcher) runs as **real chat turns against a
+dedicated curator persona**, fully parallel, with correctness owned by the
 **database schema** rather than any scheduler coordination:
 
-1. **Curator agent.** A purpose-built agent (toolsets `["database"]`,
-   `autoMemory: false`) is the active agent for extraction turns. Toolset
-   scoping is what prevents tool wandering; the ambient Hindsight pipeline is
-   off because the CRM database *is* this agent's durable memory — measured on
-   a 2,139-message mailbox, auto-recall was 44.9% of turn latency (p90 113s
-   under 16-way concurrency) and each auto-retain ran minutes of background
-   embed/model calls while flooding the bank with 17k email-derived units.
-   `AgentRecord.autoMemory` (`POST /api/agents/:id/memory`) exists for exactly
-   this class of high-volume mechanical agent.
+1. **Curator persona.** A persistent `crm-curator` SubagentRecord owned by
+   `agent_default` (systemPrompt override, `toolsetIds: ["database"]`,
+   `skillNames: ["people-crm"]`, `autoMemory: false`) runs every extraction
+   turn, so contacts land in the same agent database the user's assistant
+   queries. Turns are submitted with `submitTask(..., { mode: "chat",
+   agentId, subagentId })`; the chat loop honors the pinned `Task.agentId`
+   (`resolveEffectiveContext` override) so a concurrent active-agent switch
+   cannot re-home a turn. Toolset scoping is what prevents tool wandering;
+   the ambient Hindsight pipeline is off because the CRM database *is* this
+   persona's durable memory — measured on a 2,139-message mailbox,
+   auto-recall was 44.9% of turn latency (p90 113s under 16-way concurrency)
+   and each auto-retain ran minutes of background embed/model calls while
+   flooding the bank with 17k email-derived units. `autoMemory: false` on
+   the subagent suppresses both without touching `agent_default`'s own
+   ambient memory for normal chats (`AgentRecord.autoMemory` remains the
+   per-agent switch).
 
 2. **Convergent seeded schema.** `agent-data-db.ts` seeds `contacts` /
    `relations` so turns can assume them: generated-id primary key (email is
@@ -69,6 +76,50 @@ dedicated curator agent**, fully parallel, with correctness owned by the
    because BD humans send through ESPs (would lose 26/106 contacts). The
    two-tier stack dominated every zero-loss single-pass alternative tested.
 
+## Runtime subsystem
+
+The pipeline ships in the runtime as a per-instance controller
+(`packages/runtime/src/jobs/crm-extractor.ts`) over pure pipeline logic
+(`crm-extraction-pipeline.ts`), a mail-source abstraction
+(`integrations/crm-mail.ts`: Gmail over REST with token mint from the
+registered account's config dir, plus a fixture directory for tests/dev),
+and a dedicated queue store (`state/crm-extraction-db.ts`,
+`<instanceRoot>/crm-extraction.db`) tracking per-thread status
+(`pending → ingested → done | skipped | error`), sender behavior aggregates,
+and the persisted run state + mail cursor.
+
+- **Loop phases.** (0) one-time backfill seed: full mailbox list → thread
+  queue + `mail_cursor`; (1) ingest: fetch+analyze pending threads, 8-way;
+  (2) decide + turns: engaged-only keep/skip with the behavioral broadcast
+  rule, primary-correspondent batching, 16 turn workers, 240s turn timeout
+  retried once; (3) watcher: incremental list from `mail_cursor` minus a 60s
+  overlap (Gmail `q=after:` — never a rescan), then idle. New mail on an
+  already-done thread **reopens** it (`newest_date` grew), so the same
+  convergent turns fold updates in.
+- **Endpoints.** `GET /api/crm/extraction` (status: run state, queue counts,
+  cursor, in-flight turns, self addresses, source, last error);
+  `POST /api/crm/extraction/start|pause|enable|disable`. `paused` is a
+  temporary halt (start resumes); `disabled` is the sticky master switch —
+  start returns 400, autostart and reconcile stay away, `enable` returns it
+  to `idle`. Failed error rows are requeued on every start.
+- **Lifecycle.** Onboarding autostarts extraction when idle with a resolvable
+  mail source (`autostartCrmExtractionAfterOnboarding`); boot reconcile
+  resumes a pipeline that was `running` when the process died. Both are
+  fire-and-forget and never throw into their callers; a failed start leaves
+  the persisted state untouched (setup first, state flip last).
+- **Self row.** Start seeds one reserved contact (`description` starting
+  `You —`) carrying the connected address. The only self-address the runtime
+  knows is the connected account; the skill (v1.5) instructs the curator to
+  fold newly-discovered self-addresses into that row as aliases, never as
+  new contacts (observed organically on the reference mailbox:
+  the model recorded a second address as an alias unprompted).
+- **Legacy databases migrate.** Agent databases now carry a
+  `_gini_migrations` ladder (see ADR agent-database.md): the retired
+  email-PK contacts shape is rebuilt into the modern id-PK schema on first
+  open (values normalized toward the CHECKs, unfixable ones preserved in the
+  profile text, colliding identities merged), so extraction never runs
+  against a shape without the CAS trigger.
+
 ## Cost posture (measured)
 
 Seven full-mailbox runs isolating each lever, same model (GPT-5.5 via the
@@ -84,16 +135,16 @@ split cleanly into fresh-input reducers (quote-strip), re-read reducers
 
 ## Consequences
 
-- Runtime carries: the seeded convergent schema with legacy backfills, the
-  `autoMemory` agent switch and route, and skill `people-crm` v1.4 (schema +
-  dossier format + folding/engagement/cold-outreach rules).
-- The batch runner is a reference implementation outside the repo
-  (`~/gini-crm-scratch/crm-harness2.ts` + `turn-runner.ts`, unit-tested
-  against a mock gateway): resumable per-thread queue, engaged-only intake,
-  batching, hedged turns, audit mode, per-turn cost telemetry. Wiring the
-  ongoing extraction trigger into the runtime is the remaining OPE-70 work
-  and should reuse these shapes via the chat path — the legacy `/api/tasks`
-  path dispatches no tools.
+- Runtime carries: the seeded convergent schema with the migration ladder,
+  the `autoMemory` switches (agent + subagent), the extraction controller +
+  queue store + mail sources + gateway endpoints, and skill `people-crm`
+  v1.5 (schema + dossier format + folding/engagement/cold-outreach/self-row
+  rules).
+- Extraction turns go through the chat path only — the legacy `/api/tasks`
+  path dispatches no tools. Stall-aware hedging remains a harness-side
+  technique (the archived reference runner in `~/gini-crm-scratch/`); the
+  runtime controller uses timeout + one retry, which the convergent schema
+  makes safe.
 - Judgment-based rules (cold-pitch vs. contact) carry run-to-run membership
   variance of a few borderline rows; the constraints guarantee zero
   duplicates and zero malformed fields regardless.
@@ -101,11 +152,22 @@ split cleanly into fresh-input reducers (quote-strip), re-read reducers
 ## Acceptance checks
 
 - `bun test packages/runtime/src/state/agent-data-db.test.ts` — seeded
-  schema, CHECK rejections, CAS/trigger monotonicity, legacy backfills,
-  unique relations edge.
+  schema, CHECK rejections, CAS/trigger monotonicity, the migration ladder
+  (legacy rebuild, dirty-value normalization, identity merges, rollback on
+  failure), unique relations edge.
+- `bun test packages/runtime/src/state/crm-extraction-db.test.ts
+  packages/runtime/src/jobs/crm-extraction-pipeline.test.ts
+  packages/runtime/src/jobs/crm-extractor.test.ts
+  packages/runtime/src/http-crm-extraction.test.ts
+  packages/runtime/src/integrations/crm-mail.test.ts` — queue semantics +
+  reopen-on-new-mail, engagement/broadcast/batching rules, the full
+  controller lifecycle (backfill → turns → watcher → pause/resume →
+  enable/disable → reconcile → autostart, incremental listing pinned), the
+  gateway surface, and both mail sources offline.
 - `bun test packages/runtime/src/capabilities/agents.test.ts
   packages/runtime/src/execution/effective-context.test.ts
   packages/runtime/src/memory/integration.test.ts` — autoMemory storage,
-  resolution, and end-to-end recall/retain skip.
-- A bare chat turn ("who are my important contacts?") against the curator
-  answers from `last_spoke_at IS NOT NULL` without touching profiles.
+  resolution, agent pinning, and end-to-end recall/retain skip.
+- A bare chat turn ("who are my important contacts?") answers from
+  `last_spoke_at IS NOT NULL` without touching profiles; a bare turn naming
+  a watcher-era contact answers from the row the pipeline wrote.

@@ -88,6 +88,7 @@ import { providerCatalogWithStatus, withProviderAuthStatus } from "./provider";
 import { buildModelCatalog } from "./model-routes";
 import { setDefaultModel } from "./runtime/default-model";
 import { archiveAgent, createAgent, deleteAgent, listAgents, renameAgent, setAgentMemory, setAgentProvider, unarchiveAgent, useAgent } from "./capabilities/agents";
+import { crmExtractionStatus, disableCrmExtraction, enableCrmExtraction, pauseCrmExtraction, startCrmExtraction } from "./jobs/crm-extractor";
 import {
   approveSoul,
   approveUserProfile,
@@ -2565,6 +2566,15 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     ["GET", /^\/api\/routines\/templates$/, (request) => json(listRoutineTemplates(config, agentIdFilter(request)))],
     ["POST", /^\/api\/routines\/templates\/([^/]+)\/install$/, async (request, params) => json(await installRoutineTemplate(config, params[0], await body(request)), 201)],
     ["DELETE", /^\/api\/routines\/templates\/([^/]+)$/, async (_request, params) => json(await uninstallRoutineTemplate(config, params[0]))],
+    // CRM extraction pipeline (ADR people-crm-extraction-pipeline.md):
+    // status, start/resume, pause, and the enable/disable master switch.
+    // Start maps a missing mail source (no Google account, no fixture) and
+    // a disabled pipeline to the standard error → 400 path.
+    ["GET", /^\/api\/crm\/extraction$/, () => json(crmExtractionStatus(config))],
+    ["POST", /^\/api\/crm\/extraction\/start$/, async () => json(await startCrmExtraction(config))],
+    ["POST", /^\/api\/crm\/extraction\/pause$/, async () => json(await pauseCrmExtraction(config))],
+    ["POST", /^\/api\/crm\/extraction\/enable$/, async () => json(await enableCrmExtraction(config))],
+    ["POST", /^\/api\/crm\/extraction\/disable$/, async () => json(await disableCrmExtraction(config))],
     ["GET", /^\/api\/agents$/, () => json(listAgents(config))],
     ["POST", /^\/api\/agents$/, async (request) => json(await createAgent(config, await body(request)), 201)],
     ["POST", /^\/api\/agents\/([^/]+)\/use$/, async (_request, params) => json(await useAgent(config, params[0]))],

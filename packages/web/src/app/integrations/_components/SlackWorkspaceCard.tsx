@@ -1,12 +1,13 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { PlusIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useInvalidate } from "@/lib/queries";
 import { api } from "@/lib/api";
+import { SlackConnectDialog } from "@/components/SlackConnectDialog";
 import { SlackLogo } from "./brand-logos";
 import type { SlackBridgeLike } from "../_lib";
 
@@ -15,8 +16,8 @@ import type { SlackBridgeLike } from "../_lib";
 // bridge (workspace name, teamId/slackUserId meta, connected/needs-attention
 // status). Disconnect fully removes the bridge (POST /api/messaging/<id>/remove
 // — disable is the softer state the Settings Messaging card owns). `mode` is the
-// resolved Google auth mode: hosted (edge) has the /auth/slack/install flow;
-// everywhere else the BYO dialog lives in Settings.
+// resolved Google auth mode: hosted (edge) runs the /auth/slack/install OAuth
+// flow; everywhere else Connect opens the BYO Socket-Mode dialog inline.
 export function SlackWorkspaceCard({
   bridges,
   mode
@@ -24,8 +25,8 @@ export function SlackWorkspaceCard({
   bridges: SlackBridgeLike[];
   mode?: "edge" | "loopback";
 }) {
-  const router = useRouter();
   const invalidate = useInvalidate();
+  const [connectOpen, setConnectOpen] = useState(false);
 
   const remove = useMutation({
     mutationFn: (id: string) => api<{ id: string }>(`/messaging/${id}/remove`, { method: "POST" }),
@@ -42,7 +43,10 @@ export function SlackWorkspaceCard({
     if (mode === "edge") {
       window.location.assign(`/auth/slack/install?returnTo=${encodeURIComponent("/integrations")}`);
     } else {
-      router.push("/settings");
+      // Local / self-host: open the BYO Socket-Mode connect dialog inline on
+      // this page — no hop to Settings. On success the messaging query is
+      // invalidated, so the new bridge row appears in the table below.
+      setConnectOpen(true);
     }
   };
 
@@ -111,6 +115,8 @@ export function SlackWorkspaceCard({
           );
         })
       )}
+
+      <SlackConnectDialog open={connectOpen} onOpenChange={setConnectOpen} />
     </div>
   );
 }

@@ -39,6 +39,101 @@ export function agentDataDbPath(instance: Instance, agentId: string): string {
   return join(instanceRoot(instance), "agent-data", `${sanitizeAgentId(agentId)}.db`);
 }
 
+// Baseline tables every agent database starts with. The people-crm skill
+// documents this schema and assumes the tables exist, so its instructions can
+// be pure schema + domain rules with no CREATE TABLE preamble. IF NOT EXISTS
+// keeps this a no-op on databases that already carry them (including ones
+// where the agent widened the schema with extra columns).
+//
+// Identity is a generated id, NOT email: keying contacts by email_address
+// forces the model to fabricate a key ("jane.doe@unknown") for people it
+// meets without an address, which then collides with the real row when the
+// address surfaces later. Email stays UNIQUE (the person's primary address)
+// but nullable — first_name is the only required fact about a person.
+//
+// The CHECKs enforce normalization at the write boundary (deterministic,
+// unlike skill prose): email lowercased/trimmed and address-shaped, url
+// scheme-qualified, phone E.164-shaped (+digits only). A violated CHECK
+// surfaces as a db_execute error the model reads and self-corrects on its
+// next call — the same recovery loop a UNIQUE violation already exercises.
+//
+// Concurrency: `updated_at` (epoch ms) is bumped by trigger on every UPDATE,
+// so concurrent writers can do optimistic locking — UPDATE … WHERE id = ?
+// AND updated_at = <value read>; changes:0 means someone wrote in between,
+// re-read and re-merge. The partial unique index stops two concurrent
+// INSERTs of the same email-LESS person (same name, no address yet) — the
+// email UNIQUE constraint already arbitrates the addressed case.
+const SEED_CONTACTS = `
+CREATE TABLE IF NOT EXISTS contacts (
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+  first_name TEXT NOT NULL CHECK (trim(first_name) <> ''),
+  last_name TEXT,
+  email_address TEXT UNIQUE CHECK (
+    email_address IS NULL
+    OR (email_address = lower(trim(email_address)) AND email_address LIKE '%_@_%._%')
+  ),
+  company TEXT, position TEXT,
+  url TEXT CHECK (url IS NULL OR url LIKE 'http://%' OR url LIKE 'https://%'),
+  phone TEXT CHECK (
+    phone IS NULL
+    OR (phone GLOB '+[0-9]*' AND phone NOT GLOB '+*[^0-9]*' AND length(phone) BETWEEN 8 AND 16)
+  ),
+  description TEXT,
+  profile TEXT,
+  updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
+);
+`;
+
+// Trigger + index reference the new-schema columns, so they only apply to a
+// contacts table that actually carries them (a fresh seed, or a legacy table
+// after the updated_at backfill below). A legacy table that still lacks `id`
+// (the retired email-PK shape) keeps working without them.
+//
+// The bump is MAX(now, old + 1), not bare now: two updates inside the same
+// millisecond would otherwise leave the token unchanged, so a concurrent
+// writer's stale token would still match and the optimistic-lock guard
+// would miss the intervening write. old + 1 guarantees every update moves
+// the token. The trigger is dropped + recreated (not IF NOT EXISTS) so
+// databases seeded with an earlier trigger body pick up the fix on open.
+const SEED_CONTACTS_AUX = `
+CREATE UNIQUE INDEX IF NOT EXISTS contacts_name_no_email
+  ON contacts (lower(first_name), lower(COALESCE(last_name, ''))) WHERE email_address IS NULL;
+DROP TRIGGER IF EXISTS contacts_touch;
+CREATE TRIGGER contacts_touch AFTER UPDATE ON contacts
+  FOR EACH ROW WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+  UPDATE contacts
+    SET updated_at = MAX(CAST(unixepoch('subsec') * 1000 AS INTEGER), OLD.updated_at + 1)
+    WHERE id = NEW.id;
+END;
+`;
+
+function seedBaselineTables(db: Database): void {
+  db.exec(SEED_CONTACTS);
+  db.exec("CREATE TABLE IF NOT EXISTS relations (a TEXT, b TEXT, kind TEXT, note TEXT)");
+  const cols = new Set(
+    db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('contacts')").all().map((c) => c.name)
+  );
+  // Legacy table (pre-updated_at): add the column so optimistic locking works
+  // there too. ALTER ADD COLUMN can't carry a non-constant default, so backfill.
+  if (!cols.has("updated_at")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN updated_at INTEGER");
+    db.exec("UPDATE contacts SET updated_at = CAST(unixepoch('subsec') * 1000 AS INTEGER) WHERE updated_at IS NULL");
+    cols.add("updated_at");
+  }
+  // Legacy table (pre-description): the one-line list handle that lets
+  // roster-style queries skip the multi-KB profile dossiers.
+  if (!cols.has("description")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN description TEXT");
+    cols.add("description");
+  }
+  // The touch trigger needs id + updated_at; the retired email-PK shape has no
+  // id column, so it runs without the trigger rather than failing every open.
+  if (cols.has("id") && cols.has("updated_at")) {
+    db.exec(SEED_CONTACTS_AUX);
+  }
+}
+
 export function getAgentDataDb(instance: Instance, agentId: string): Database {
   const key = `${instance}:${agentId}`;
   const cached = cache.get(key);
@@ -47,6 +142,7 @@ export function getAgentDataDb(instance: Instance, agentId: string): Database {
   const db = new Database(agentDataDbPath(instance, agentId), { create: true });
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA synchronous = NORMAL");
+  seedBaselineTables(db);
   cache.set(key, db);
   return db;
 }

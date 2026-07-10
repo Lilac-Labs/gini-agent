@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RuntimeConfig } from "../types";
-import { closeAllAgentDataDbs, dbQuery, dbListTables } from "../state/agent-data-db";
+import { closeAllAgentDataDbs, dbExecute, dbQuery, dbListTables } from "../state/agent-data-db";
 import { importTableFromFile, parseCsv } from "./import-table";
 
 const ROOT = mkdtempSync(join(tmpdir(), "gini-import-table-"));
@@ -90,5 +90,20 @@ describe("importTableFromFile", () => {
     writeFileSync(join(config.workspaceRoot, "x.csv"), "a,b\n1,2\n");
     const report = await importTableFromFile(config, A, "x.csv", "My Reading List!");
     expect(report.table).toBe("my_reading_list");
+  });
+
+  test("replaces an EMPTY mismatched table (the seeded contacts baseline), refuses a non-empty one", async () => {
+    const config = cfg("imp-seeded");
+    // The seeded `contacts` baseline (email_address PK, …, profile) doesn't
+    // match the LinkedIn header shape; empty → silently replaced (covered by
+    // the LinkedIn tests too). Non-empty with different columns → refuse.
+    writeFileSync(join(config.workspaceRoot, "c.csv"), LINKEDIN);
+    dbExecute(config.instance, A, "INSERT INTO contacts (first_name, email_address, profile) VALUES ('Kept', 'kept@x.com', 'dossier')");
+    await expect(importTableFromFile(config, A, "c.csv", "contacts")).rejects.toThrow(/different columns/);
+    // The existing row survived the refused import.
+    expect(dbQuery(config.instance, A, "SELECT COUNT(*) AS n FROM contacts").rows[0]!.n).toBe(1);
+    // recreate: true is the explicit override.
+    const r = await importTableFromFile(config, A, "c.csv", "contacts", { recreate: true });
+    expect(r.rowsInserted).toBe(3);
   });
 });

@@ -63,8 +63,9 @@ export function agentDataDbPath(instance: Instance, agentId: string): string {
 // re-read and re-merge. The partial unique index stops two concurrent
 // INSERTs of the same email-LESS person (same name, no address yet) — the
 // email UNIQUE constraint already arbitrates the addressed case.
-const SEED_CONTACTS = `
-CREATE TABLE IF NOT EXISTS contacts (
+function contactsDdl(tableName: string, ifNotExists: boolean): string {
+  return `
+CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}"${tableName}" (
   id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
   first_name TEXT NOT NULL CHECK (trim(first_name) <> ''),
   last_name TEXT,
@@ -84,11 +85,17 @@ CREATE TABLE IF NOT EXISTS contacts (
   updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
 );
 `;
+}
+
+const MODERN_CONTACT_COLUMNS = [
+  "id", "first_name", "last_name", "email_address", "company", "position",
+  "url", "phone", "description", "profile", "last_spoke_at", "updated_at",
+] as const;
 
 // Trigger + index reference the new-schema columns, so they only apply to a
 // contacts table that actually carries them (a fresh seed, or a legacy table
-// after the updated_at backfill below). A legacy table that still lacks `id`
-// (the retired email-PK shape) keeps working without them.
+// after the migrations below have rebuilt it). An agent-recreated custom
+// table that lacks `id` keeps working without them.
 //
 // The bump is MAX(now, old + 1), not bare now: two updates inside the same
 // millisecond would otherwise leave the token unchanged, so a concurrent
@@ -109,46 +116,270 @@ BEGIN
 END;
 `;
 
+function contactsCols(db: Database): Set<string> {
+  return new Set(
+    db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('contacts')").all().map((c) => c.name)
+  );
+}
+
+// ---------------------------------------------------------------------------
+// One-time schema migrations, tracked in _gini_migrations (id → applied_at).
+// Each runs at most once per database, inside its own transaction; a failure
+// rolls back and surfaces (the DB is left exactly as it was). Every migration
+// checks its own precondition, so on a fresh database the whole ladder records
+// as applied without touching anything. The table is runtime bookkeeping —
+// dbListTables hides it from the agent's schema view.
+// ---------------------------------------------------------------------------
+
+interface Migration {
+  id: string;
+  up: (db: Database) => void;
+}
+
+function addColumnIfMissing(db: Database, column: string, ddl: string): void {
+  if (!contactsCols(db).has(column)) db.exec(ddl);
+}
+
+// The retired email-PK contacts shape (no id column) is rebuilt into the
+// modern id-PK schema: rows are copied through JS so legacy values that the
+// modern CHECKs would reject are normalized instead of aborting the open —
+// emails lowercased, bare domains scheme-qualified, phones squeezed to
+// E.164. A value that can't be normalized is moved into the profile text
+// (never silently dropped) and the column set NULL. Agent-added extra
+// columns are carried over. Rows that collapse onto the same identity
+// (e.g. two emails differing only in case) merge instead of failing.
+function rebuildLegacyContacts(db: Database): void {
+  const info = db
+    .query<{ name: string; type: string }, []>("SELECT name, type FROM pragma_table_info('contacts')")
+    .all();
+  const names = new Set(info.map((c) => c.name));
+  if (names.has("id")) return; // fresh or already-modern table
+  // Only rebuild what is recognizably the legacy CRM shape. A fully custom
+  // id-less table the agent created is its own design — leave it alone.
+  if (!names.has("email_address") || !names.has("first_name")) return;
+  const modern = new Set<string>(MODERN_CONTACT_COLUMNS);
+  const extras = info.filter((c) => !modern.has(c.name));
+  db.exec(contactsDdl("contacts_migration_new", false));
+  // The copy needs the same identity arbitration the live table gets from
+  // SEED_CONTACTS_AUX (which only lands after migrations): without the
+  // partial name index, two rows whose malformed emails both moved aside
+  // would coexist instead of merging.
+  db.exec(
+    "CREATE UNIQUE INDEX contacts_migration_scratch_name ON contacts_migration_new (lower(first_name), lower(COALESCE(last_name, ''))) WHERE email_address IS NULL"
+  );
+  for (const extra of extras) {
+    db.exec(`ALTER TABLE "contacts_migration_new" ADD COLUMN "${extra.name.replace(/"/g, '""')}" ${extra.type || "TEXT"}`);
+  }
+  const rows = db.query<Record<string, unknown>, []>("SELECT * FROM contacts").all();
+  const targetCols = [
+    ...MODERN_CONTACT_COLUMNS.filter((c) => c !== "id"),
+    ...extras.map((c) => c.name),
+  ];
+  const placeholders = targetCols.map(() => "?").join(", ");
+  const quoted = targetCols.map((c) => `"${c.replace(/"/g, '""')}"`).join(", ");
+  const insert = db.prepare(`INSERT INTO "contacts_migration_new" (${quoted}) VALUES (${placeholders})`);
+  for (const row of rows) {
+    const values = normalizeLegacyContact(row, extras.map((c) => c.name));
+    try {
+      insert.run(...(targetCols.map((c) => values[c] ?? null) as never[]));
+    } catch (error) {
+      if (!/UNIQUE/i.test(error instanceof Error ? error.message : String(error))) throw error;
+      mergeLegacyContact(db, values);
+    }
+  }
+  db.exec("DROP INDEX contacts_migration_scratch_name");
+  db.exec("DROP TABLE contacts");
+  db.exec('ALTER TABLE "contacts_migration_new" RENAME TO contacts');
+}
+
+// Normalize one legacy row toward the modern CHECKs. Unfixable values are
+// preserved as text appended to the profile, so the migration never loses
+// information — it only moves it out of the constrained column.
+function normalizeLegacyContact(
+  row: Record<string, unknown>,
+  extraCols: string[],
+): Record<string, unknown> {
+  const kept: string[] = [];
+  const text = (v: unknown): string | null => {
+    if (v === null || v === undefined) return null;
+    const s = String(v).trim();
+    return s === "" ? null : s;
+  };
+
+  let email = text(row.email_address)?.toLowerCase() ?? null;
+  if (email !== null && !/^.+@.+\..+$/.test(email)) {
+    kept.push(`email_address: ${String(row.email_address)}`);
+    email = null;
+  }
+
+  let firstName = text(row.first_name);
+  if (firstName === null) {
+    // The legacy shape keyed rows by email, so a nameless row still has an
+    // address to derive a handle from.
+    firstName = text(String(row.email_address ?? "").split("@")[0]) ?? "Unknown";
+  }
+
+  let url = text(row.url);
+  if (url !== null && !/^https?:\/\//.test(url)) {
+    if (/^[A-Za-z0-9][A-Za-z0-9./_-]*\.[A-Za-z]{2,}/.test(url)) {
+      url = `https://${url}`;
+    } else {
+      kept.push(`url: ${String(row.url)}`);
+      url = null;
+    }
+  }
+
+  let phone = text(row.phone);
+  if (phone !== null) {
+    const squeezed = phone.replace(/[\s\-().]/g, "");
+    if (/^\+\d{7,15}$/.test(squeezed)) {
+      phone = squeezed;
+    } else {
+      // Digits without a country code stay text: fabricating a +1 (or any
+      // prefix) would corrupt non-US numbers.
+      kept.push(`phone: ${String(row.phone)}`);
+      phone = null;
+    }
+  }
+
+  let profile = text(row.profile);
+  if (kept.length > 0) {
+    const note = `[migrated] values kept from the legacy row: ${kept.join("; ")}`;
+    profile = profile === null ? note : `${profile}\n\n${note}`;
+  }
+
+  const values: Record<string, unknown> = {
+    first_name: firstName,
+    last_name: text(row.last_name),
+    email_address: email,
+    company: text(row.company),
+    position: text(row.position),
+    url,
+    phone,
+    description: text(row.description),
+    profile,
+    last_spoke_at: typeof row.last_spoke_at === "number" ? row.last_spoke_at : null,
+    updated_at: typeof row.updated_at === "number" ? row.updated_at : Date.now(),
+  };
+  for (const c of extraCols) values[c] = row[c] ?? null;
+  return values;
+}
+
+// Two legacy rows can land on the same modern identity (same normalized email,
+// or the same name once both lost their malformed emails). Merge the loser
+// into the winner: fill columns the winner lacks, concatenate profiles, keep
+// the freshest timestamps.
+function mergeLegacyContact(db: Database, values: Record<string, unknown>): void {
+  const existing = (
+    values.email_address !== null
+      ? db
+          .query<Record<string, unknown>, [string]>(
+            'SELECT * FROM "contacts_migration_new" WHERE email_address = ?'
+          )
+          .get(values.email_address as string)
+      : db
+          .query<Record<string, unknown>, [string, string]>(
+            `SELECT * FROM "contacts_migration_new"
+             WHERE email_address IS NULL
+               AND lower(first_name) = lower(?) AND lower(COALESCE(last_name, '')) = lower(COALESCE(?, ''))`
+          )
+          .get(values.first_name as string, (values.last_name as string | null) ?? "")
+  );
+  if (!existing) throw new Error("legacy contacts merge target not found");
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  for (const [col, incoming] of Object.entries(values)) {
+    if (col === "profile" || col === "updated_at" || incoming === null) continue;
+    if (existing[col] === null || existing[col] === undefined) {
+      sets.push(`"${col.replace(/"/g, '""')}" = ?`);
+      params.push(incoming);
+    }
+  }
+  const mergedProfile = [existing.profile, values.profile].filter((p) => p !== null && p !== undefined).join("\n\n---\n\n");
+  if (mergedProfile !== "") {
+    sets.push("profile = ?");
+    params.push(mergedProfile);
+  }
+  sets.push("updated_at = MAX(updated_at, ?)");
+  params.push(values.updated_at);
+  params.push(existing.id);
+  db.run(
+    `UPDATE "contacts_migration_new" SET ${sets.join(", ")} WHERE id = ?`,
+    ...(params as never[])
+  );
+}
+
+const MIGRATIONS: Migration[] = [
+  {
+    // Optimistic-lock token for tables created before it existed. ALTER ADD
+    // COLUMN can't carry a non-constant default, so backfill separately.
+    id: "0001-contacts-updated-at",
+    up(db) {
+      if (contactsCols(db).has("updated_at")) return;
+      db.exec("ALTER TABLE contacts ADD COLUMN updated_at INTEGER");
+      db.exec("UPDATE contacts SET updated_at = CAST(unixepoch('subsec') * 1000 AS INTEGER) WHERE updated_at IS NULL");
+    },
+  },
+  {
+    // One-line list handle so roster queries can skip multi-KB dossiers.
+    id: "0002-contacts-description",
+    up(db) {
+      addColumnIfMissing(db, "description", "ALTER TABLE contacts ADD COLUMN description TEXT");
+    },
+  },
+  {
+    // When the USER last ENGAGED this person (epoch ms; NULL = never):
+    // wrote to them, replied in their thread, or was deliberately cc'd in.
+    // Engagement is the strongest importance signal — most inbound mail is
+    // one-way cold outreach — so "important contacts" queries filter on it.
+    id: "0003-contacts-last-spoke-at",
+    up(db) {
+      addColumnIfMissing(db, "last_spoke_at", "ALTER TABLE contacts ADD COLUMN last_spoke_at INTEGER");
+    },
+  },
+  {
+    id: "0004-contacts-id-pk-rebuild",
+    up: rebuildLegacyContacts,
+  },
+];
+
+function runMigrations(db: Database): void {
+  db.exec("CREATE TABLE IF NOT EXISTS _gini_migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)");
+  const applied = new Set(
+    db.query<{ id: string }, []>("SELECT id FROM _gini_migrations").all().map((r) => r.id)
+  );
+  for (const migration of MIGRATIONS) {
+    if (applied.has(migration.id)) continue;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      migration.up(db);
+      db.run("INSERT INTO _gini_migrations (id, applied_at) VALUES (?, ?)", [migration.id, Date.now()]);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`agent database migration ${migration.id} failed: ${message}`);
+    }
+  }
+}
+
 function seedBaselineTables(db: Database): void {
-  db.exec(SEED_CONTACTS);
+  db.exec(contactsDdl("contacts", true));
   db.exec("CREATE TABLE IF NOT EXISTS relations (a TEXT, b TEXT, kind TEXT, note TEXT)");
+  runMigrations(db);
   // One row per edge. Without this, two convergent writers (a retried or
   // hedged turn racing its twin) can both insert the same relation — the
   // contacts table's UNIQUE constraints arbitrate that race but relations
-  // had no equivalent. Legacy tables may already carry duplicate edges, so
-  // dedupe (keep the oldest row) before the index lands — otherwise index
-  // creation would fail every open.
+  // had no equivalent. The dedupe stays an every-open guard (not a one-time
+  // migration): if the agent drops the index and duplicates creep in, the
+  // next open must still be able to recreate it.
   db.exec("DELETE FROM relations WHERE rowid NOT IN (SELECT MIN(rowid) FROM relations GROUP BY a, b, COALESCE(kind, ''))");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS relations_edge ON relations (a, b, COALESCE(kind, ''))");
-  const cols = new Set(
-    db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('contacts')").all().map((c) => c.name)
-  );
-  // Legacy table (pre-updated_at): add the column so optimistic locking works
-  // there too. ALTER ADD COLUMN can't carry a non-constant default, so backfill.
-  if (!cols.has("updated_at")) {
-    db.exec("ALTER TABLE contacts ADD COLUMN updated_at INTEGER");
-    db.exec("UPDATE contacts SET updated_at = CAST(unixepoch('subsec') * 1000 AS INTEGER) WHERE updated_at IS NULL");
-    cols.add("updated_at");
-  }
-  // Legacy table (pre-description): the one-line list handle that lets
-  // roster-style queries skip the multi-KB profile dossiers.
-  if (!cols.has("description")) {
-    db.exec("ALTER TABLE contacts ADD COLUMN description TEXT");
-    cols.add("description");
-  }
-  // Legacy table (pre-last_spoke_at): when the USER last ENGAGED this
-  // person (epoch ms; NULL = never observed) — wrote to them, replied in
-  // a thread they were part of, or was deliberately cc'd into their
-  // thread. Engagement is the strongest importance signal — most inbound
-  // mail is one-way cold outreach the user never answers — so "important
-  // contacts" queries filter/order on this column instead of guessing
-  // from profile prose.
-  if (!cols.has("last_spoke_at")) {
-    db.exec("ALTER TABLE contacts ADD COLUMN last_spoke_at INTEGER");
-    cols.add("last_spoke_at");
-  }
-  // The touch trigger needs id + updated_at; the retired email-PK shape has no
-  // id column, so it runs without the trigger rather than failing every open.
+  // The touch trigger needs id + updated_at. Migration 0004 rebuilds the
+  // retired email-PK shape, so after it only an agent-recreated custom table
+  // can lack them — that table runs without the trigger rather than failing
+  // every open.
+  const cols = contactsCols(db);
   if (cols.has("id") && cols.has("updated_at")) {
     db.exec(SEED_CONTACTS_AUX);
   }
@@ -162,7 +393,15 @@ export function getAgentDataDb(instance: Instance, agentId: string): Database {
   const db = new Database(agentDataDbPath(instance, agentId), { create: true });
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA synchronous = NORMAL");
-  seedBaselineTables(db);
+  // Migrations run inside transactions on open; if another process (CLI +
+  // runtime on the same file) holds the write lock, wait instead of failing.
+  db.exec("PRAGMA busy_timeout = 5000");
+  try {
+    seedBaselineTables(db);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
   cache.set(key, db);
   return db;
 }
@@ -317,9 +556,10 @@ export function dbExecute(
 // counts, so the agent can recall what it's already tracking.
 export function dbListTables(instance: Instance, agentId: string): TableInfo[] {
   const db = getAgentDataDb(instance, agentId);
+  // _gini_migrations is runtime bookkeeping, not part of the agent's schema.
   const tables = db
     .query<{ name: string }, []>(
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> '_gini_migrations' ORDER BY name"
     )
     .all();
   return tables.map((t) => {

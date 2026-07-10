@@ -98,7 +98,7 @@ describe("agent-data-db", () => {
     expect(dbQuery(inst, A, "SELECT nickname FROM contacts WHERE email_address = 'a@b.c'").rows[0]!.nickname).toBe("Ace");
   });
 
-  test("backfills legacy contacts shapes on open (retired email-PK table)", () => {
+  test("migrates the retired email-PK contacts shape to the modern schema on open", () => {
     // Simulate the retired shape (email PRIMARY KEY, no id/updated_at/
     // description) by creating the file before the runtime ever opens it.
     const inst = "add-legacy";
@@ -113,20 +113,28 @@ describe("agent-data-db", () => {
     raw.run("INSERT INTO relations VALUES ('x', 'y', 'coworker', 'first')");
     raw.run("INSERT INTO relations VALUES ('x', 'y', 'coworker', 'second')");
     raw.close();
-    // First runtime open runs the seed: updated_at + description are added
-    // and backfilled; the id-less shape skips the touch trigger + index
-    // rather than failing the open.
+    // First runtime open runs the migration ladder: the table is rebuilt to
+    // the modern id-PK shape with the data carried over.
     const cols = dbListTables(inst, "agent_legacy").find((t) => t.name === "contacts")!.columns.map((c) => c.name);
-    expect(cols).toContain("updated_at");
-    expect(cols).toContain("description");
-    expect(cols).toContain("last_spoke_at");
+    expect(cols).toEqual([
+      "id", "first_name", "last_name", "email_address", "company", "position", "url", "phone", "description", "profile", "last_spoke_at", "updated_at"
+    ]);
     const row = dbQuery(inst, "agent_legacy", "SELECT * FROM contacts").rows[0]! as Record<string, unknown>;
+    expect(String(row.id).length).toBe(32);
+    expect(row.email_address).toBe("old@x.io");
     expect(row.profile).toBe("kept");
     expect(row.description).toBeNull();
     expect(typeof row.updated_at).toBe("number");
-    // Writes still work without the trigger/index pair.
-    dbExecute(inst, "agent_legacy", "UPDATE contacts SET description = 'one-liner' WHERE email_address = 'old@x.io'");
-    expect(dbQuery(inst, "agent_legacy", "SELECT description FROM contacts").rows[0]!.description).toBe("one-liner");
+    // The rebuilt table has the full modern write contract: CAS trigger…
+    const before = row as { id: string; updated_at: number };
+    dbExecute(inst, "agent_legacy", "UPDATE contacts SET description = 'one-liner' WHERE id = ? AND updated_at = ?", [before.id, before.updated_at]);
+    const after = dbQuery(inst, "agent_legacy", "SELECT description, updated_at FROM contacts WHERE id = ?", [before.id]).rows[0]! as { description: string; updated_at: number };
+    expect(after.description).toBe("one-liner");
+    expect(after.updated_at).toBeGreaterThan(before.updated_at);
+    const stale = dbExecute(inst, "agent_legacy", "UPDATE contacts SET description = 'x' WHERE id = ? AND updated_at = ?", [before.id, before.updated_at]);
+    expect(stale.changes).toBe(0);
+    // …and the modern CHECKs.
+    expect(() => dbExecute(inst, "agent_legacy", "INSERT INTO contacts (first_name, email_address) VALUES ('Up', 'Case@X.io')")).toThrow(/CHECK/i);
     // Duplicate edges collapsed to the oldest row, and the edge index now
     // rejects re-inserting the same (a, b, kind).
     const edges = dbQuery(inst, "agent_legacy", "SELECT note FROM relations");
@@ -134,6 +142,132 @@ describe("agent-data-db", () => {
     expect(() => dbExecute(inst, "agent_legacy", "INSERT INTO relations VALUES ('x', 'y', 'coworker', 'again')")).toThrow(/UNIQUE/i);
     // A different kind between the same pair is a distinct edge.
     dbExecute(inst, "agent_legacy", "INSERT INTO relations VALUES ('x', 'y', 'intro', 'ok')");
+    // Migrations are recorded and run once: a re-open keeps the same row ids
+    // (a second rebuild would have regenerated them).
+    closeAgentDataDb(inst, "agent_legacy");
+    const again = dbQuery(inst, "agent_legacy", "SELECT id FROM contacts WHERE email_address = 'old@x.io'").rows[0]! as { id: string };
+    expect(again.id).toBe(before.id);
+    const applied = dbQuery(inst, "agent_legacy", "SELECT id FROM _gini_migrations ORDER BY id");
+    expect(applied.rows.map((r) => r.id)).toEqual([
+      "0001-contacts-updated-at",
+      "0002-contacts-description",
+      "0003-contacts-last-spoke-at",
+      "0004-contacts-id-pk-rebuild",
+    ]);
+    // Bookkeeping stays out of the agent's schema view.
+    expect(dbListTables(inst, "agent_legacy").map((t) => t.name)).not.toContain("_gini_migrations");
+  });
+
+  test("legacy rebuild normalizes values the modern CHECKs would reject, preserving what it can't", () => {
+    const inst = "add-legacy-dirty";
+    const path = agentDataDbPath(inst, "agent_dirty");
+    mkdirSync(dirname(path), { recursive: true });
+    const raw = new Database(path, { create: true });
+    // updated_at already exists here (mid-generation shape) with a NULL to
+    // exercise the timestamp fallback; nickname is an agent-added column
+    // that must survive the rebuild.
+    raw.exec("CREATE TABLE contacts (email_address TEXT PRIMARY KEY, first_name TEXT, last_name TEXT, company TEXT, position TEXT, url TEXT, phone TEXT, profile TEXT, updated_at INTEGER, nickname TEXT)");
+    const ins = raw.prepare("INSERT INTO contacts (email_address, first_name, url, phone, profile, updated_at, nickname) VALUES (?, ?, ?, ?, ?, ?, ?)");
+    ins.run("Mixed.Case@X.io", "Ada", "x.io/me", "+1 (404) 729-4874", "p1", 1_000, "Ace");
+    ins.run("not-an-email", "Ben", "not a url!", "(404) 729-4874", null, null, null);
+    ins.run("", "", null, null, null, 2_000, null);
+    raw.close();
+    const rows = dbQuery(inst, "agent_dirty", "SELECT * FROM contacts ORDER BY first_name").rows as Array<Record<string, unknown>>;
+    expect(rows.length).toBe(3);
+    const [ada, ben, unknown] = rows as [Record<string, unknown>, Record<string, unknown>, Record<string, unknown>];
+    // Mechanical normalization: email lowercased, bare domain scheme-qualified,
+    // phone squeezed to E.164; agent column carried over; timestamp kept.
+    expect(ada.email_address).toBe("mixed.case@x.io");
+    expect(ada.url).toBe("https://x.io/me");
+    expect(ada.phone).toBe("+14047294874");
+    expect(ada.nickname).toBe("Ace");
+    expect(ada.updated_at).toBe(1_000);
+    expect(ada.profile).toBe("p1");
+    // Unfixable values move into the profile instead of being dropped: a
+    // non-address email, a non-URL, a phone without a country code.
+    expect(ben.email_address).toBeNull();
+    expect(ben.url).toBeNull();
+    expect(ben.phone).toBeNull();
+    expect(String(ben.profile)).toContain("email_address: not-an-email");
+    expect(String(ben.profile)).toContain("url: not a url!");
+    expect(String(ben.profile)).toContain("phone: (404) 729-4874");
+    expect(typeof ben.updated_at).toBe("number"); // NULL timestamp backfilled
+    // A row with neither name nor usable email still lands (NOT NULL CHECK).
+    expect(unknown.first_name).toBe("Unknown");
+    expect(unknown.email_address).toBeNull();
+    expect(unknown.updated_at).toBe(2_000);
+  });
+
+  test("legacy rows that collapse onto one identity merge instead of failing the rebuild", () => {
+    const inst = "add-legacy-merge";
+    const path = agentDataDbPath(inst, "agent_merge");
+    mkdirSync(dirname(path), { recursive: true });
+    const raw = new Database(path, { create: true });
+    raw.exec("CREATE TABLE contacts (email_address TEXT PRIMARY KEY, first_name TEXT, last_name TEXT, company TEXT, profile TEXT)");
+    // Same address in different case → same modern identity (email UNIQUE).
+    raw.run("INSERT INTO contacts VALUES ('dup@x.io', 'Dup', NULL, NULL, 'first profile')");
+    raw.run("INSERT INTO contacts VALUES ('DUP@x.io', 'Dup', NULL, 'Acme', 'second profile')");
+    // Two malformed emails with the same name → same identity once both
+    // emails move aside (partial unique name index).
+    raw.run("INSERT INTO contacts VALUES ('bad-one', 'Sam', 'Lee', NULL, NULL)");
+    raw.run("INSERT INTO contacts VALUES ('bad-two', 'sam', 'lee', 'Corp', NULL)");
+    raw.close();
+    const rows = dbQuery(inst, "agent_merge", "SELECT * FROM contacts ORDER BY first_name").rows as Array<Record<string, unknown>>;
+    expect(rows.length).toBe(2);
+    const dup = rows.find((r) => r.email_address === "dup@x.io")!;
+    // The merge filled the missing company and concatenated both profiles.
+    expect(dup.company).toBe("Acme");
+    expect(String(dup.profile)).toContain("first profile");
+    expect(String(dup.profile)).toContain("second profile");
+    const sam = rows.find((r) => r.email_address === null)!;
+    expect(sam.company).toBe("Corp");
+    expect(String(sam.profile)).toContain("email_address: bad-one");
+    expect(String(sam.profile)).toContain("email_address: bad-two");
+  });
+
+  test("an id-less table that is not the legacy CRM shape is left alone", () => {
+    const inst = "add-legacy-custom";
+    const path = agentDataDbPath(inst, "agent_custom");
+    mkdirSync(dirname(path), { recursive: true });
+    const raw = new Database(path, { create: true });
+    raw.exec("CREATE TABLE contacts (handle TEXT, score INTEGER)");
+    raw.run("INSERT INTO contacts VALUES ('ada', 7)");
+    raw.close();
+    // The rebuild only recognizes the retired email-PK shape; a custom table
+    // the agent designed keeps its own schema (plus the additive columns).
+    const row = dbQuery(inst, "agent_custom", "SELECT * FROM contacts").rows[0]! as Record<string, unknown>;
+    expect(row.handle).toBe("ada");
+    expect(row.score).toBe(7);
+    const cols = dbListTables(inst, "agent_custom").find((t) => t.name === "contacts")!.columns.map((c) => c.name);
+    expect(cols).not.toContain("id");
+    expect(cols).toContain("updated_at"); // additive migrations still apply
+  });
+
+  test("a failing migration rolls back and surfaces instead of half-applying", () => {
+    const inst = "add-legacy-fail";
+    const path = agentDataDbPath(inst, "agent_fail");
+    mkdirSync(dirname(path), { recursive: true });
+    const raw = new Database(path, { create: true });
+    raw.exec("CREATE TABLE contacts (email_address TEXT PRIMARY KEY, first_name TEXT, profile TEXT)");
+    raw.run("INSERT INTO contacts VALUES ('a@x.io', 'Ada', NULL)");
+    // The rebuild's scratch table already exists → CREATE TABLE fails inside
+    // the migration transaction.
+    raw.exec("CREATE TABLE contacts_migration_new (blocker TEXT)");
+    raw.close();
+    expect(() => dbQuery(inst, "agent_fail", "SELECT 1")).toThrow(/migration 0004-contacts-id-pk-rebuild failed/);
+    // Nothing half-applied: the legacy table is intact and the failed
+    // migration is not recorded, so removing the blocker lets it complete.
+    const check = new Database(path, { readonly: true });
+    expect(check.query("SELECT COUNT(*) AS n FROM contacts").get()).toEqual({ n: 1 });
+    const recorded = check.query<{ id: string }, []>("SELECT id FROM _gini_migrations").all().map((r) => r.id);
+    expect(recorded).not.toContain("0004-contacts-id-pk-rebuild");
+    check.close();
+    const fix = new Database(path);
+    fix.exec("DROP TABLE contacts_migration_new");
+    fix.close();
+    const healed = dbQuery(inst, "agent_fail", "SELECT id, email_address FROM contacts").rows[0]! as Record<string, unknown>;
+    expect(healed.email_address).toBe("a@x.io");
+    expect(String(healed.id).length).toBe(32);
   });
 
   test("each agent has an isolated database file", () => {
@@ -163,6 +297,10 @@ describe("agent-data-db", () => {
     expect(() => dbQuery(inst, A, "SELECT load_extension('evil')")).toThrow(/not allowed/i);
     // A trailing semicolon on a single statement is fine.
     expect(dbQuery(inst, A, "SELECT 1 AS one;").rows[0]!.one).toBe(1);
+    // Quote-awareness both ways: a `;` inside a single-quoted literal or a
+    // double-quoted identifier (with escaped quotes) is NOT a separator.
+    expect(dbQuery(inst, A, "SELECT ';' AS v").rows[0]!.v).toBe(";");
+    expect(dbQuery(inst, A, 'SELECT 1 AS "a;""b"').columns).toEqual(['a;"b']);
   });
 
   test("a write smuggled behind a CTE (WITH … INSERT) is rejected by the read-only connection", () => {

@@ -127,8 +127,9 @@ describe("gmailMessageToCrmMail", () => {
 });
 
 describe("gmailCrmMailSource", () => {
-  test("mints once, pages the list, fetches dates, tolerates a failed date fetch, maps threads", async () => {
+  test("mints once, pages the list, retries a flaky date fetch, maps threads", async () => {
     let tokenMints = 0;
+    let m2DateFailures = 1; // fails once, succeeds on the in-flight retry
     const urls: string[] = [];
     const fetchImpl: FetchImpl = async (url, init) => {
       urls.push(url);
@@ -145,7 +146,13 @@ describe("gmailCrmMailSource", () => {
         return jsonResponse({ messages: [{ id: "m3", threadId: "t1" }, { id: 7 }] });
       }
       if (url.includes("/messages/m1?")) return jsonResponse({ internalDate: "1000" });
-      if (url.includes("/messages/m2?")) return jsonResponse(null, 500); // date fetch fails → 0
+      if (url.includes("/messages/m2?")) {
+        if (m2DateFailures > 0) {
+          m2DateFailures -= 1;
+          return jsonResponse(null, 500);
+        }
+        return jsonResponse({ internalDate: "2000" });
+      }
       if (url.includes("/messages/m3?")) return jsonResponse({ internalDate: "3000" });
       if (url.includes("/threads/t1?")) {
         return jsonResponse({
@@ -159,7 +166,7 @@ describe("gmailCrmMailSource", () => {
     const refs = await source.listMessages();
     expect(refs).toEqual([
       { id: "m1", threadId: "t1", internalDate: 1000 },
-      { id: "m2", threadId: "m2", internalDate: 0 },
+      { id: "m2", threadId: "m2", internalDate: 2000 }, // real date via retry — never 0
       { id: "m3", threadId: "t1", internalDate: 3000 },
     ]);
     const thread = await source.fetchThread("t1");
@@ -169,6 +176,19 @@ describe("gmailCrmMailSource", () => {
     await source.listMessages(2_000);
     expect(urls.some((u) => u.includes(`q=${encodeURIComponent("after:2")}`))).toBe(true);
     expect(tokenMints).toBe(1);
+  });
+
+  test("a persistently failing date fetch fails the poll instead of degrading to date 0", async () => {
+    // internalDate 0 can never satisfy the reopen predicate and lets the
+    // cursor advance past the real message — the poll must fail (and be
+    // retried next interval) rather than silently drop mail.
+    const fetchImpl: FetchImpl = async (url) => {
+      if (url === TOKEN_URL) return jsonResponse({ access_token: "tok" });
+      if (url.includes("/messages?")) return jsonResponse({ messages: [{ id: "m1", threadId: "t1" }] });
+      return jsonResponse(null, 503); // every date fetch fails
+    };
+    const source = gmailCrmMailSource({ configDir: credsDir("gmail-date-dead"), fetchImpl });
+    expect(source.listMessages()).rejects.toThrow(/HTTP 503/);
   });
 
   test("a non-ok Gmail response surfaces as an error (never silently empty)", async () => {

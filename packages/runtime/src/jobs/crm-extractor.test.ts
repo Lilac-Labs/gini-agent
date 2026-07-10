@@ -296,6 +296,34 @@ describe("crm-extractor", () => {
     }
   }, 30_000);
 
+  test("engaged threads with no human (user replying to a machine) skip without a turn", async () => {
+    // Regression: the decide phase must read the PERSISTED hasHuman, not
+    // approximate it from engagement — a user replying to a no-reply bot is
+    // engaged yet human-less, and burning a curator turn on it is waste.
+    const instance = "crmx-no-human";
+    const config = makeConfig(instance);
+    await install(config);
+    setEchoToolCallingResponse({ provider: normalizeProvider(config.provider), text: "ok", toolCalls: [], finishReason: "stop" });
+    setCrmMeta(instance, "self_email", SELF);
+    __setCrmMailSourceForTests(
+      instance,
+      mutableSource([
+        mail({ id: "n1", threadId: "T-bot", date: 1_000, from: { address: "no-reply@robot.com" }, to: [{ address: SELF }] }),
+        mail({ id: "n2", threadId: "T-bot", date: 2_000, from: { address: SELF }, to: [{ address: "no-reply@robot.com" }] }),
+      ]),
+    );
+    await startCrmExtraction(config);
+    await until("bot thread settles", () => crmQueueCounts(instance).skipped === 1);
+    const [row] = listCrmThreads(instance, ["skipped"]);
+    expect(row!.thread_id).toBe("T-bot");
+    expect(row!.engaged).toBe(1);
+    expect(row!.has_human).toBe(0);
+    expect(row!.error).toBe("all senders automated/self");
+    expect(row!.task_id).toBeNull(); // no curator turn ran
+    await pauseCrmExtraction(config);
+    await __awaitCrmLoopExitForTests(instance);
+  }, 30_000);
+
   test("resolves the connected Google account from the machine registry", async () => {
     const instance = "crmx-gmail-resolve";
     const config = makeConfig(instance);
@@ -333,25 +361,110 @@ describe("crm-extractor", () => {
     }
   });
 
-  test("a mail-source crash surfaces as lastError and exits the loop", async () => {
+  test("a transient mail-source crash parks the loop and it recovers on its own", async () => {
+    // The always-on contract: a Gmail 429/network blip must never leave a
+    // dead loop behind a persisted "running" state — the iteration fence
+    // records the error, sleeps one interval, and retries.
     const instance = "crmx-loop-error";
     const config = makeConfig(instance);
     await install(config);
+    setEchoToolCallingResponse({ provider: normalizeProvider(config.provider), text: "ok", toolCalls: [], finishReason: "stop" });
     setCrmMeta(instance, "self_email", SELF);
+    const inner = mutableSource([
+      mail({ id: "e1", threadId: "T-heal", date: 1_000, from: { address: SELF }, to: [{ address: "pal@z.com" }] }),
+    ]);
+    let failures = 2;
     __setCrmMailSourceForTests(instance, {
       kind: "fixture",
-      async listMessages() {
-        throw new Error("mailbox exploded");
+      async listMessages(afterMs?: number) {
+        if (failures > 0) {
+          failures -= 1;
+          throw new Error("mailbox exploded");
+        }
+        return inner.listMessages(afterMs);
       },
-      async fetchThread() {
-        return [];
+      fetchThread: inner.fetchThread,
+    });
+    await startCrmExtraction(config);
+    await until("outage recorded", () => crmExtractionStatus(config).lastError === "mailbox exploded");
+    expect(getCrmRunState(instance)).toBe("running");
+    // The source heals → the same loop (no restart) drains the backfill.
+    await until("loop recovered and processed the thread", () => crmQueueCounts(instance).done === 1);
+    await pauseCrmExtraction(config);
+    await __awaitCrmLoopExitForTests(instance);
+    __setCrmMailSourceForTests(instance, undefined);
+  }, 30_000);
+
+  test("a turn-time fetch failure costs one batch, not the loop", async () => {
+    // Phase-2 prefetch errors mark the batch error and the loop stays alive
+    // — a thrown turn would strand the other workers headless.
+    const instance = "crmx-turn-fetch-fail";
+    const config = makeConfig(instance);
+    await install(config);
+    setEchoToolCallingResponse({ provider: normalizeProvider(config.provider), text: "ok", toolCalls: [], finishReason: "stop" });
+    setCrmMeta(instance, "self_email", SELF);
+    const good = mail({ id: "g1", threadId: "T-good", date: 1_000, from: { address: SELF }, to: [{ address: "pal@z.com" }] });
+    const doomed = mail({ id: "x1", threadId: "T-doomed", date: 2_000, from: { address: SELF }, to: [{ address: "other@z.com" }] });
+    const fetches = new Map<string, number>();
+    __setCrmMailSourceForTests(instance, {
+      kind: "fixture",
+      async listMessages(afterMs?: number) {
+        return [good, doomed]
+          .filter((m) => !afterMs || m.date > afterMs)
+          .map((m) => ({ id: m.id, threadId: m.threadId, internalDate: m.date }));
+      },
+      async fetchThread(threadId: string) {
+        fetches.set(threadId, (fetches.get(threadId) ?? 0) + 1);
+        // T-doomed ingests fine, then explodes at turn time (second fetch).
+        if (threadId === "T-doomed" && fetches.get(threadId)! > 1) throw new Error("fetch died mid-turn");
+        return [good, doomed].filter((m) => m.threadId === threadId);
       },
     });
     await startCrmExtraction(config);
-    await until("loop error recorded", () => crmExtractionStatus(config).lastError === "mailbox exploded");
-    await __awaitCrmLoopExitForTests(instance);
+    await until("good thread done, doomed thread errored", () => {
+      const c = crmQueueCounts(instance);
+      return c.done === 1 && c.error === 1;
+    });
+    const [errRow] = listCrmThreads(instance, ["error"]);
+    expect(errRow!.thread_id).toBe("T-doomed");
+    expect(errRow!.error).toContain("turn: fetch died mid-turn");
+    // The loop survived the throw: it is still watching (pause exits cleanly).
+    expect(getCrmRunState(instance)).toBe("running");
     await pauseCrmExtraction(config);
-    __setCrmMailSourceForTests(instance, undefined);
+    await __awaitCrmLoopExitForTests(instance);
+  }, 30_000);
+
+  test("a timeout is not retried after pause — nothing new dispatches post-stop", async () => {
+    const instance = "crmx-no-retry-after-pause";
+    const config = makeConfig(instance);
+    await install(config);
+    clearEchoToolCallingResponses();
+    // Two delayed stubs: if the post-pause retry were still dispatched, it
+    // would consume the second one and a second task row would exist.
+    for (let i = 0; i < 2; i++) {
+      setEchoToolCallingResponse(
+        { provider: normalizeProvider(config.provider), text: "ok", toolCalls: [], finishReason: "stop" },
+        undefined,
+        { delayMs: 10_000 },
+      );
+    }
+    process.env.GINI_CRM_TURN_TIMEOUT_MS = "3000";
+    setCrmMeta(instance, "self_email", SELF);
+    __setCrmMailSourceForTests(
+      instance,
+      mutableSource([mail({ id: "p1", threadId: "T-p", date: 1_000, from: { address: SELF }, to: [{ address: "pal@z.com" }] })]),
+    );
+    try {
+      await startCrmExtraction(config);
+      await until("turn in flight", () => crmExtractionStatus(config).inFlightTurns === 1);
+      await pauseCrmExtraction(config); // stop requested while attempt 1 polls
+      await until("thread errored as timeout", () => crmQueueCounts(instance).error === 1, 30_000);
+      const curatorTasks = readState(instance).tasks.filter((t) => t.subagentId);
+      expect(curatorTasks.length).toBe(1); // no post-pause retry dispatch
+      await __awaitCrmLoopExitForTests(instance);
+    } finally {
+      delete process.env.GINI_CRM_TURN_TIMEOUT_MS;
+    }
   }, 30_000);
 
   test("losing the mail source mid-run parks the loop with a clear error", async () => {
@@ -568,6 +681,55 @@ describe("crm-extractor", () => {
     await Bun.sleep(300);
     expect(getCrmRunState(d.instance)).toBe("idle"); // failed start left no state behind
     __setCrmMailSourceForTests(d.instance, undefined);
+  }, 30_000);
+
+  test("start is idempotent: a second start joins the running loop instead of duplicating it", async () => {
+    const instance = "crmx-double-start";
+    const config = makeConfig(instance);
+    await install(config);
+    setEchoToolCallingResponse({ provider: normalizeProvider(config.provider), text: "ok", toolCalls: [], finishReason: "stop" });
+    setCrmMeta(instance, "self_email", SELF);
+    __setCrmMailSourceForTests(
+      instance,
+      mutableSource([mail({ id: "ds1", threadId: "T-ds", date: 1_000, from: { address: SELF }, to: [{ address: "pal@z.com" }] })]),
+    );
+    const [first, second] = await Promise.all([startCrmExtraction(config), startCrmExtraction(config)]);
+    expect(first.runState).toBe("running");
+    expect(second.runState).toBe("running");
+    await until("thread drains once", () => crmQueueCounts(instance).done === 1);
+    await Bun.sleep(300); // give a hypothetical second loop time to double-process
+    const [row] = listCrmThreads(instance, ["done"]);
+    expect(row!.attempts).toBe(1); // one loop, one turn
+    await pauseCrmExtraction(config);
+    await __awaitCrmLoopExitForTests(instance);
+  }, 30_000);
+
+  test("disable during an in-flight turn lets the turn finish, then stops everything", async () => {
+    const instance = "crmx-disable-midturn";
+    const config = makeConfig(instance);
+    await install(config);
+    clearEchoToolCallingResponses();
+    setEchoToolCallingResponse(
+      { provider: normalizeProvider(config.provider), text: "ok", toolCalls: [], finishReason: "stop" },
+      undefined,
+      { delayMs: 1_500 },
+    );
+    setCrmMeta(instance, "self_email", SELF);
+    const messages = [mail({ id: "dm1", threadId: "T-dm", date: 1_000, from: { address: SELF }, to: [{ address: "pal@z.com" }] })];
+    __setCrmMailSourceForTests(instance, mutableSource(messages));
+    await startCrmExtraction(config);
+    await until("turn in flight", () => crmExtractionStatus(config).inFlightTurns === 1);
+    const disabled = await disableCrmExtraction(config);
+    expect(disabled.runState).toBe("disabled");
+    // The in-flight turn completes and is recorded (convergent turns are
+    // cheap to let finish); nothing new is processed afterward.
+    await until("in-flight turn recorded", () => crmQueueCounts(instance).done === 1);
+    await __awaitCrmLoopExitForTests(instance);
+    messages.push(mail({ id: "dm2", threadId: "T-dm2", date: Date.now(), from: { address: SELF }, to: [{ address: "x@z.com" }] }));
+    await Bun.sleep(300);
+    expect(crmQueueCounts(instance).done).toBe(1);
+    expect(getCrmRunState(instance)).toBe("disabled");
+    await enableCrmExtraction(config);
   }, 30_000);
 
   test("disable is a sticky master switch; enable returns to idle", async () => {

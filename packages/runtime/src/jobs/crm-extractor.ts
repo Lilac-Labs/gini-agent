@@ -163,13 +163,14 @@ async function ensureCuratorSubagent(config: RuntimeConfig, agentId: string): Pr
 // connected address; the curator folds newly-discovered self-aliases into
 // this row per the skill (`You —` marker).
 function seedSelfRow(instance: Instance, agentId: string, selfEmail: string): void {
-  // rowid, not id: the open migrates the retired email-PK shape to the
-  // modern schema, but an agent-recreated custom contacts table may still
-  // lack an id column — rowid exists regardless.
+  // SELECT 1, not id or rowid: the open migrates the retired email-PK shape
+  // to the modern schema, but an agent-recreated custom contacts table may
+  // lack an id column — and a WITHOUT ROWID one lacks rowid too. A bare
+  // existence probe works against any shape that has the two columns.
   const existing = dbQuery(
     instance,
     agentId,
-    "SELECT rowid FROM contacts WHERE description LIKE 'You —%' OR email_address = ?",
+    "SELECT 1 FROM contacts WHERE description LIKE 'You —%' OR email_address = ? LIMIT 1",
     [selfEmail],
   );
   if (existing.rows.length > 0) return;
@@ -211,7 +212,10 @@ async function mapPool<T>(items: T[], limit: number, fn: (item: T) => Promise<vo
 }
 
 // One curator turn over one batch of threads; convergent, so a timeout is
-// retried once and a crash simply leaves the rows for the next drain.
+// retried once and a crash simply leaves the rows for the next drain. Never
+// rejects: any failure (including the pre-turn thread fetches) marks the
+// batch's rows error — a thrown turn would take down the whole mapPool wave
+// and with it the loop, stranding the other workers headless.
 async function runTurn(
   config: RuntimeConfig,
   handle: ExtractorHandle,
@@ -221,37 +225,39 @@ async function runTurn(
   selfEmail: string,
   threadIds: string[],
 ): Promise<void> {
-  const batch: { threadId: string; msgs: Awaited<ReturnType<CrmMailSource["fetchThread"]>> }[] = [];
-  for (const threadId of threadIds) {
-    const msgs = await source.fetchThread(threadId);
-    if (msgs.length > 0) batch.push({ threadId, msgs });
-  }
-  if (batch.length === 0) {
-    markCrmThreads(config.instance, threadIds, { status: "skipped", error: "thread vanished from source" });
-    return;
-  }
-  const content = buildTurnMessage(batch, skillBody(), selfEmail);
-  const attempt = async (): Promise<{ ok: boolean; taskId: string; error?: string }> => {
-    const task = await submitTask(config, content, { mode: "chat", agentId, subagentId });
-    const deadline = Date.now() + turnTimeoutMs();
-    while (Date.now() < deadline) {
-      await Bun.sleep(Math.min(2_000, turnTimeoutMs()));
-      const row = readState(config.instance).tasks.find((t) => t.id === task.id);
-      if (!row) return { ok: false, taskId: task.id, error: "task disappeared" };
-      if (row.status === "completed") return { ok: true, taskId: task.id };
-      if (row.status === "failed" || row.status === "cancelled") {
-        return { ok: false, taskId: task.id, error: `${row.status}: ${(row.error ?? row.summary ?? "").slice(0, 120)}` };
-      }
-      if (row.status === "waiting_approval" || row.status === "needs_input") {
-        return { ok: false, taskId: task.id, error: `stuck: ${row.status}` };
-      }
-    }
-    return { ok: false, taskId: task.id, error: "timeout" };
-  };
   handle.inFlightTurns += 1;
   try {
+    const batch: { threadId: string; msgs: Awaited<ReturnType<CrmMailSource["fetchThread"]>> }[] = [];
+    for (const threadId of threadIds) {
+      const msgs = await source.fetchThread(threadId);
+      if (msgs.length > 0) batch.push({ threadId, msgs });
+    }
+    if (batch.length === 0) {
+      markCrmThreads(config.instance, threadIds, { status: "skipped", error: "thread vanished from source" });
+      return;
+    }
+    const content = buildTurnMessage(batch, skillBody(), selfEmail);
+    const attempt = async (): Promise<{ ok: boolean; taskId: string; error?: string }> => {
+      const task = await submitTask(config, content, { mode: "chat", agentId, subagentId });
+      const deadline = Date.now() + turnTimeoutMs();
+      while (Date.now() < deadline) {
+        await Bun.sleep(Math.min(2_000, turnTimeoutMs()));
+        const row = readState(config.instance).tasks.find((t) => t.id === task.id);
+        if (!row) return { ok: false, taskId: task.id, error: "task disappeared" };
+        if (row.status === "completed") return { ok: true, taskId: task.id };
+        if (row.status === "failed" || row.status === "cancelled") {
+          return { ok: false, taskId: task.id, error: `${row.status}: ${(row.error ?? row.summary ?? "").slice(0, 120)}` };
+        }
+        if (row.status === "waiting_approval" || row.status === "needs_input") {
+          return { ok: false, taskId: task.id, error: `stuck: ${row.status}` };
+        }
+      }
+      return { ok: false, taskId: task.id, error: "timeout" };
+    };
     let result = await attempt();
-    if (!result.ok && result.error === "timeout") result = await attempt();
+    // Retry a timeout once — but never after a pause/disable: the retry is a
+    // brand-new model turn, and the stop contract is "nothing new dispatches".
+    if (!result.ok && result.error === "timeout" && !handle.stopRequested) result = await attempt();
     markCrmThreads(config.instance, threadIds, {
       status: result.ok ? "done" : "error",
       taskId: result.taskId,
@@ -260,6 +266,14 @@ async function runTurn(
     });
     handle.lastActivityAt = Date.now();
     if (!result.ok) handle.lastError = result.error;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    markCrmThreads(config.instance, threadIds, {
+      status: "error",
+      error: `turn: ${message}`.slice(0, 200),
+      bumpAttempts: true,
+    });
+    handle.lastError = message;
   } finally {
     handle.inFlightTurns -= 1;
   }
@@ -269,113 +283,129 @@ async function runLoop(config: RuntimeConfig, handle: ExtractorHandle): Promise<
   const instance = config.instance;
   try {
     while (!handle.stopRequested && getCrmRunState(instance) === "running") {
-      const resolved = resolveMailSource(instance);
-      if (!resolved) {
-        handle.lastError = "no mail source (connect a Google account)";
+      // Each iteration is fenced: a transient failure (Gmail 429/5xx, a
+      // failed token re-mint, a network blip) parks the loop for one watcher
+      // interval and retries, exactly like the missing-source case — it must
+      // never kill the always-on pipeline while the persisted state still
+      // says "running". Every phase is idempotent, so re-running one is safe.
+      try {
+        await runLoopIteration(config, handle);
+      } catch (error) {
+        handle.lastError = error instanceof Error ? error.message : String(error);
+        appendLog(instance, "crm.extraction.iteration_error", { error: handle.lastError });
         await sleepUnlessStopped(handle, watcherIntervalMs());
-        continue;
       }
-      const { source, selfEmail } = resolved;
-      const agentId = owningAgentId(config);
-      const isSelf = makeSelfMatcher(selfAddresses(instance, selfEmail));
-
-      // Phase 0 — backfill seeding, exactly once.
-      if (getCrmMeta(instance, "backfill_seeded") !== "1") {
-        const refs = await source.listMessages();
-        const byThread = new Map<string, number>();
-        for (const r of refs) byThread.set(r.threadId, Math.max(byThread.get(r.threadId) ?? 0, r.internalDate));
-        enqueueCrmThreads(
-          instance,
-          [...byThread.entries()].map(([threadId, newestDate]) => ({ threadId, newestDate })),
-        );
-        const cursor = Math.max(0, ...refs.map((r) => r.internalDate));
-        setCrmMeta(instance, "mail_cursor", String(cursor || Date.now()));
-        setCrmMeta(instance, "backfill_seeded", "1");
-        appendLog(instance, "crm.extraction.backfill_seeded", { threads: byThread.size, messages: refs.length });
-        handle.lastActivityAt = Date.now();
-        continue;
-      }
-
-      // Phase 1 — ingest: fetch + analyze pending threads.
-      const pending = listCrmThreads(instance, ["pending"], 200);
-      if (pending.length > 0) {
-        await mapPool(pending, INGEST_CONCURRENCY, async (row) => {
-          if (handle.stopRequested) return;
-          try {
-            const msgs = await source.fetchThread(row.thread_id);
-            if (msgs.length === 0) {
-              markCrmThreads(instance, [row.thread_id], { status: "skipped", error: "thread vanished from source" });
-              return;
-            }
-            const analysis = analyzeThread(msgs, isSelf);
-            markCrmThreadIngested(instance, row.thread_id, analysis);
-          } catch (error) {
-            markCrmThreads(instance, [row.thread_id], {
-              status: "error",
-              error: `ingest: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200),
-              bumpAttempts: true,
-            });
-          }
-        });
-        handle.lastActivityAt = Date.now();
-        continue;
-      }
-
-      // Phase 2 — decide + run curator turns over everything ingested.
-      const ingested = listCrmThreads(instance, ["ingested"]);
-      if (ingested.length > 0 && !handle.stopRequested) {
-        const broadcast = crmBroadcastSenders(instance);
-        const keeps: typeof ingested = [];
-        for (const row of ingested) {
-          const verdict = decideThread(
-            { engaged: row.engaged === 1, primarySender: row.primary_sender, hasHuman: row.primary_sender !== null || row.engaged === 1 },
-            broadcast,
-          );
-          if (verdict.keep) keeps.push(row);
-          else markCrmThreads(instance, [row.thread_id], { status: "skipped", error: verdict.reason });
-        }
-        if (keeps.length > 0) {
-          const subagent = await ensureCuratorSubagent(config, agentId);
-          seedSelfRow(instance, agentId, selfEmail);
-          const batches = batchByPrimary(
-            keeps.map((r) => ({ threadId: r.thread_id, primarySender: r.primary_sender, chars: r.chars })),
-          );
-          appendLog(instance, "crm.extraction.wave", { threads: keeps.length, turns: batches.length });
-          await mapPool(batches, TURN_WORKERS, async (batch) => {
-            if (handle.stopRequested) return;
-            await runTurn(config, handle, agentId, subagent.id, source, selfEmail, batch);
-          });
-        }
-        continue;
-      }
-
-      // Phase 3 — watcher: poll for new mail, then idle.
-      const cursor = Number(getCrmMeta(instance, "mail_cursor") ?? "0");
-      const refs = await source.listMessages(Math.max(0, cursor - WATCHER_OVERLAP_MS));
-      if (refs.length > 0) {
-        const byThread = new Map<string, number>();
-        for (const r of refs) byThread.set(r.threadId, Math.max(byThread.get(r.threadId) ?? 0, r.internalDate));
-        const { added, reopened } = enqueueCrmThreads(
-          instance,
-          [...byThread.entries()].map(([threadId, newestDate]) => ({ threadId, newestDate })),
-        );
-        const newest = Math.max(cursor, ...refs.map((r) => r.internalDate));
-        setCrmMeta(instance, "mail_cursor", String(newest));
-        if (added || reopened) {
-          appendLog(instance, "crm.extraction.watch", { added, reopened });
-          handle.lastActivityAt = Date.now();
-          continue; // ingest the new arrivals immediately
-        }
-      }
-      await sleepUnlessStopped(handle, watcherIntervalMs());
     }
-  } catch (error) {
-    handle.lastError = error instanceof Error ? error.message : String(error);
-    appendLog(instance, "crm.extraction.loop_error", { error: handle.lastError });
   } finally {
     handle.loop = undefined;
     appendLog(instance, "crm.extraction.loop_exited", { runState: getCrmRunState(instance) });
   }
+}
+
+// One pass of the phase machine. Returning (rather than looping internally)
+// keeps the stop/run-state checks and the crash fence in runLoop as the
+// single control point.
+async function runLoopIteration(config: RuntimeConfig, handle: ExtractorHandle): Promise<void> {
+  const instance = config.instance;
+  const resolved = resolveMailSource(instance);
+  if (!resolved) {
+    handle.lastError = "no mail source (connect a Google account)";
+    await sleepUnlessStopped(handle, watcherIntervalMs());
+    return;
+  }
+  const { source, selfEmail } = resolved;
+  const agentId = owningAgentId(config);
+  const isSelf = makeSelfMatcher(selfAddresses(instance, selfEmail));
+
+  // Phase 0 — backfill seeding, exactly once.
+  if (getCrmMeta(instance, "backfill_seeded") !== "1") {
+    const refs = await source.listMessages();
+    const byThread = new Map<string, number>();
+    for (const r of refs) byThread.set(r.threadId, Math.max(byThread.get(r.threadId) ?? 0, r.internalDate));
+    enqueueCrmThreads(
+      instance,
+      [...byThread.entries()].map(([threadId, newestDate]) => ({ threadId, newestDate })),
+    );
+    const cursor = Math.max(0, ...refs.map((r) => r.internalDate));
+    setCrmMeta(instance, "mail_cursor", String(cursor || Date.now()));
+    setCrmMeta(instance, "backfill_seeded", "1");
+    appendLog(instance, "crm.extraction.backfill_seeded", { threads: byThread.size, messages: refs.length });
+    handle.lastActivityAt = Date.now();
+    return;
+  }
+
+  // Phase 1 — ingest: fetch + analyze pending threads.
+  const pending = listCrmThreads(instance, ["pending"], 200);
+  if (pending.length > 0) {
+    await mapPool(pending, INGEST_CONCURRENCY, async (row) => {
+      if (handle.stopRequested) return;
+      try {
+        const msgs = await source.fetchThread(row.thread_id);
+        if (msgs.length === 0) {
+          markCrmThreads(instance, [row.thread_id], { status: "skipped", error: "thread vanished from source" });
+          return;
+        }
+        const analysis = analyzeThread(msgs, isSelf);
+        markCrmThreadIngested(instance, row.thread_id, analysis);
+      } catch (error) {
+        markCrmThreads(instance, [row.thread_id], {
+          status: "error",
+          error: `ingest: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200),
+          bumpAttempts: true,
+        });
+      }
+    });
+    handle.lastActivityAt = Date.now();
+    return;
+  }
+
+  // Phase 2 — decide + run curator turns over everything ingested.
+  const ingested = listCrmThreads(instance, ["ingested"]);
+  if (ingested.length > 0 && !handle.stopRequested) {
+    const broadcast = crmBroadcastSenders(instance);
+    const keeps: typeof ingested = [];
+    for (const row of ingested) {
+      const verdict = decideThread(
+        { engaged: row.engaged === 1, primarySender: row.primary_sender, hasHuman: row.has_human === 1 },
+        broadcast,
+      );
+      if (verdict.keep) keeps.push(row);
+      else markCrmThreads(instance, [row.thread_id], { status: "skipped", error: verdict.reason });
+    }
+    if (keeps.length > 0) {
+      const subagent = await ensureCuratorSubagent(config, agentId);
+      seedSelfRow(instance, agentId, selfEmail);
+      const batches = batchByPrimary(
+        keeps.map((r) => ({ threadId: r.thread_id, primarySender: r.primary_sender, chars: r.chars })),
+      );
+      appendLog(instance, "crm.extraction.wave", { threads: keeps.length, turns: batches.length });
+      await mapPool(batches, TURN_WORKERS, async (batch) => {
+        if (handle.stopRequested) return;
+        await runTurn(config, handle, agentId, subagent.id, source, selfEmail, batch);
+      });
+    }
+    return;
+  }
+
+  // Phase 3 — watcher: poll for new mail, then idle.
+  const cursor = Number(getCrmMeta(instance, "mail_cursor") ?? "0");
+  const refs = await source.listMessages(Math.max(0, cursor - WATCHER_OVERLAP_MS));
+  if (refs.length > 0) {
+    const byThread = new Map<string, number>();
+    for (const r of refs) byThread.set(r.threadId, Math.max(byThread.get(r.threadId) ?? 0, r.internalDate));
+    const { added, reopened } = enqueueCrmThreads(
+      instance,
+      [...byThread.entries()].map(([threadId, newestDate]) => ({ threadId, newestDate })),
+    );
+    const newest = Math.max(cursor, ...refs.map((r) => r.internalDate));
+    setCrmMeta(instance, "mail_cursor", String(newest));
+    if (added || reopened) {
+      appendLog(instance, "crm.extraction.watch", { added, reopened });
+      handle.lastActivityAt = Date.now();
+      return; // ingest the new arrivals immediately
+    }
+  }
+  await sleepUnlessStopped(handle, watcherIntervalMs());
 }
 
 export function crmExtractionStatus(config: RuntimeConfig): CrmExtractionStatus {

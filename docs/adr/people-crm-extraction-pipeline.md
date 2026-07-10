@@ -92,10 +92,23 @@ and the persisted run state + mail cursor.
   queue + `mail_cursor`; (1) ingest: fetch+analyze pending threads, 8-way;
   (2) decide + turns: engaged-only keep/skip with the behavioral broadcast
   rule, primary-correspondent batching, 16 turn workers, 240s turn timeout
-  retried once; (3) watcher: incremental list from `mail_cursor` minus a 60s
-  overlap (Gmail `q=after:` — never a rescan), then idle. New mail on an
-  already-done thread **reopens** it (`newest_date` grew), so the same
+  retried once (never after a pause/disable — "nothing new dispatches" is
+  the stop contract); (3) watcher: incremental list from `mail_cursor` minus
+  a 60s overlap (Gmail `q=after:` — never a rescan), then idle. New mail on
+  an already-done thread **reopens** it (`newest_date` grew), so the same
   convergent turns fold updates in.
+- **Failure containment.** Each loop iteration is fenced: a transient source
+  failure (Gmail 429/5xx, a failed token re-mint, a network blip) parks the
+  loop one watcher interval and retries — it never leaves a dead loop behind
+  a persisted "running" state. A turn-time failure marks only its batch
+  (error + attempts bump, requeued on the next start), mirroring the
+  per-thread ingest fence. A failed per-message date fetch retries once then
+  fails the whole poll, so the cursor never advances past mail whose real
+  date is unknown (a zero date could never satisfy the reopen predicate).
+  Sender aggregates count each thread exactly once via the row's own
+  `senders_counted` flag — status alone can't distinguish a first ingest
+  from a reopen/requeue re-ingest, and a status-based guard would inflate
+  `threads` past the broadcast threshold for legitimate correspondents.
 - **Endpoints.** `GET /api/crm/extraction` (status: run state, queue counts,
   cursor, in-flight turns, self addresses, source, last error);
   `POST /api/crm/extraction/start|pause|enable|disable`. `paused` is a

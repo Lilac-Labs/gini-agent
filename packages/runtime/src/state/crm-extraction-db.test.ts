@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { rmSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { mkdirSync, rmSync } from "node:fs";
+import { dirname } from "node:path";
 import {
   closeAllCrmExtractionDbs,
   closeCrmExtractionDb,
@@ -78,6 +80,7 @@ describe("crm-extraction-db", () => {
         messageCount: 1,
         newestDate: 10,
         engaged: false,
+        hasHuman: false,
         primarySender: "drip@vendor.com",
         chars: 500,
         senders: [{ sender: "drip@vendor.com", multiMessage: false, selfWrote: false }],
@@ -93,6 +96,7 @@ describe("crm-extraction-db", () => {
       messageCount: 4,
       newestDate: 40,
       engaged: true,
+      hasHuman: true,
       primarySender: "friend@x.com",
       chars: 4000,
       senders: [{ sender: "friend@x.com", multiMessage: true, selfWrote: true }],
@@ -100,16 +104,50 @@ describe("crm-extraction-db", () => {
     expect(crmBroadcastSenders(inst).has("friend@x.com")).toBe(false);
     const [d] = listCrmThreads(inst, ["ingested"]).filter((r) => r.thread_id === "d");
     expect(d!.engaged).toBe(1);
+    expect(d!.has_human).toBe(1);
     expect(d!.primary_sender).toBe("friend@x.com");
     expect(d!.chars).toBe(4000);
+    // hasHuman persists independently of engagement: the self-to-machine
+    // shape (engaged, no human) must survive to the decide phase.
+    const [a] = listCrmThreads(inst, ["ingested"]).filter((r) => r.thread_id === "a");
+    expect(a!.has_human).toBe(0);
 
-    // Re-ingesting a reopened thread must not double-count sender stats.
+    // Re-ingesting must not double-count sender stats — reopens and error
+    // requeues both reset status to 'pending', so the exactly-once guard has
+    // to come from the row's own counted flag, not its status. Assert the
+    // RAW aggregates: broadcast membership alone is insensitive to drift.
+    const rawStats = (sender: string): { threads: number; multi_threads: number; self_wrote_threads: number } => {
+      const raw = new Database(crmExtractionDbPath(inst), { readonly: true });
+      const row = raw
+        .query<{ threads: number; multi_threads: number; self_wrote_threads: number }, [string]>(
+          "SELECT threads, multi_threads, self_wrote_threads FROM sender_stats WHERE sender = ?",
+        )
+        .get(sender)!;
+      raw.close();
+      return row;
+    };
+    // Watcher reopen: newer mail grows the thread to 2 messages — a recount
+    // would inflate BOTH threads and multi_threads, ejecting the drip sender
+    // from the broadcast set (multi_threads must stay 0).
     markCrmThreads(inst, ["a"], { status: "done" });
     enqueueCrmThreads(inst, [{ threadId: "a", newestDate: 99 }]); // reopened → pending
-    drip("a");
-    const db = crmBroadcastSenders(inst);
-    expect(db.has("drip@vendor.com")).toBe(true);
-    // threads count stayed 3 (not 4): still qualifies, and d's sender is untouched.
+    markCrmThreadIngested(inst, "a", {
+      messageCount: 2,
+      newestDate: 99,
+      engaged: false,
+      hasHuman: false,
+      primarySender: "drip@vendor.com",
+      chars: 900,
+      senders: [{ sender: "drip@vendor.com", multiMessage: true, selfWrote: false }],
+    });
+    expect(rawStats("drip@vendor.com")).toEqual({ threads: 3, multi_threads: 0, self_wrote_threads: 0 });
+    expect(crmBroadcastSenders(inst).has("drip@vendor.com")).toBe(true);
+    // Error requeue: same content re-ingested — a recount would inflate
+    // threads past the ≥3 broadcast threshold for a legitimate human.
+    markCrmThreads(inst, ["b"], { status: "error", error: "boom" });
+    expect(requeueCrmErrors(inst)).toBe(1);
+    drip("b");
+    expect(rawStats("drip@vendor.com")).toEqual({ threads: 3, multi_threads: 0, self_wrote_threads: 0 });
   });
 
   test("marking updates status/error/attempts; counts add up; errors requeue", () => {
@@ -137,5 +175,30 @@ describe("crm-extraction-db", () => {
     enqueueCrmThreads("crm-iso-1", [{ threadId: "only-here", newestDate: 1 }]);
     expect(crmQueueCounts("crm-iso-2").pending).toBe(0);
     expect(crmExtractionDbPath("crm-iso-1")).not.toBe(crmExtractionDbPath("crm-iso-2"));
+  });
+
+  test("a queue created before the additive columns gains them with sound approximations", () => {
+    const inst = "crm-prehuman";
+    const path = crmExtractionDbPath(inst);
+    mkdirSync(dirname(path), { recursive: true });
+    const raw = new Database(path, { create: true });
+    raw.exec(`CREATE TABLE thread_queue (
+      thread_id TEXT PRIMARY KEY, message_count INTEGER NOT NULL DEFAULT 0,
+      newest_date INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending',
+      engaged INTEGER NOT NULL DEFAULT 0, primary_sender TEXT,
+      chars INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
+      task_id TEXT, error TEXT, processed_at INTEGER
+    )`);
+    raw.run("INSERT INTO thread_queue (thread_id, status, engaged, primary_sender) VALUES ('h1', 'ingested', 0, 'human@x.com')");
+    raw.run("INSERT INTO thread_queue (thread_id, status, engaged, primary_sender) VALUES ('h2', 'ingested', 1, NULL)");
+    raw.run("INSERT INTO thread_queue (thread_id, status, engaged, primary_sender) VALUES ('h3', 'ingested', 0, NULL)");
+    raw.close();
+    const rows = listCrmThreads(inst, ["ingested"]);
+    const byId = new Map(rows.map((r) => [r.thread_id, r]));
+    expect(byId.get("h1")!.has_human).toBe(1); // human sender → human
+    expect(byId.get("h2")!.has_human).toBe(1); // engaged (old proxy) → human
+    expect(byId.get("h3")!.has_human).toBe(0);
+    // Rows that ever left 'pending' already contributed to sender_stats.
+    for (const id of ["h1", "h2", "h3"]) expect(byId.get(id)!.senders_counted).toBe(1);
   });
 });

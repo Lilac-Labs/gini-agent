@@ -27,6 +27,8 @@ export interface CrmQueueRow {
   newest_date: number;
   status: CrmThreadStatus;
   engaged: number; // 0/1, meaningful once ingested
+  has_human: number; // 0/1, meaningful once ingested — any non-self non-machine participant
+  senders_counted: number; // 0/1 — this thread already contributed to sender_stats
   primary_sender: string | null;
   chars: number;
   attempts: number;
@@ -54,6 +56,8 @@ export function getCrmExtractionDb(instance: Instance): Database {
     newest_date INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
     engaged INTEGER NOT NULL DEFAULT 0,
+    has_human INTEGER NOT NULL DEFAULT 0,
+    senders_counted INTEGER NOT NULL DEFAULT 0,
     primary_sender TEXT,
     chars INTEGER NOT NULL DEFAULT 0,
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -61,6 +65,21 @@ export function getCrmExtractionDb(instance: Instance): Database {
     error TEXT,
     processed_at INTEGER
   )`);
+  // Queues created before these columns existed: add them and approximate.
+  // has_human: a human primary sender, or engagement, was the old
+  // decide-phase proxy (re-ingest refines it on reopen). senders_counted:
+  // any row that was ever ingested (message_count > 0) already contributed.
+  const queueCols = new Set(
+    db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('thread_queue')").all().map((c) => c.name)
+  );
+  if (!queueCols.has("has_human")) {
+    db.exec("ALTER TABLE thread_queue ADD COLUMN has_human INTEGER NOT NULL DEFAULT 0");
+    db.exec("UPDATE thread_queue SET has_human = CASE WHEN primary_sender IS NOT NULL OR engaged = 1 THEN 1 ELSE 0 END");
+  }
+  if (!queueCols.has("senders_counted")) {
+    db.exec("ALTER TABLE thread_queue ADD COLUMN senders_counted INTEGER NOT NULL DEFAULT 0");
+    db.exec("UPDATE thread_queue SET senders_counted = CASE WHEN message_count > 0 OR status <> 'pending' THEN 1 ELSE 0 END");
+  }
   // Sender behavior accumulated at ingest time; the behavioral broadcast
   // filter (≥3 threads, all single-message, user never wrote) reads these
   // aggregates so watcher increments keep the filter current without
@@ -167,8 +186,11 @@ export function listCrmThreads(instance: Instance, statuses: CrmThreadStatus[], 
 
 // Ingest outcome for one thread: content fetched, engagement + batching key
 // recorded. Also folds the thread's senders into sender_stats exactly once
-// per thread generation (re-ingesting after a reopen updates, not
-// double-counts, because stats are recomputed from per-thread deltas).
+// per thread, tracked by the row's senders_counted flag — reopens and error
+// requeues reset status back to 'pending', so status alone cannot tell a
+// first ingest from a re-ingest (an earlier status-based guard silently
+// double-counted, inflating `threads` past the broadcast threshold for
+// legitimate correspondents).
 export function markCrmThreadIngested(
   instance: Instance,
   threadId: string,
@@ -176,6 +198,7 @@ export function markCrmThreadIngested(
     messageCount: number;
     newestDate: number;
     engaged: boolean;
+    hasHuman: boolean;
     primarySender: string | null;
     chars: number;
     senders: { sender: string; multiMessage: boolean; selfWrote: boolean }[];
@@ -183,19 +206,18 @@ export function markCrmThreadIngested(
 ): void {
   const db = getCrmExtractionDb(instance);
   const wasCounted = db
-    .query<{ status: CrmThreadStatus }, [string]>("SELECT status FROM thread_queue WHERE thread_id = ?")
+    .query<{ senders_counted: number }, [string]>("SELECT senders_counted FROM thread_queue WHERE thread_id = ?")
     .get(threadId);
   const tx = db.transaction(() => {
     db.run(
       `UPDATE thread_queue SET status = 'ingested', message_count = ?, newest_date = ?, engaged = ?,
-        primary_sender = ?, chars = ? WHERE thread_id = ?`,
-      [info.messageCount, info.newestDate, info.engaged ? 1 : 0, info.primarySender, info.chars, threadId],
+        has_human = ?, senders_counted = 1, primary_sender = ?, chars = ? WHERE thread_id = ?`,
+      [info.messageCount, info.newestDate, info.engaged ? 1 : 0, info.hasHuman ? 1 : 0, info.primarySender, info.chars, threadId],
     );
     // Sender aggregates: only the first ingest of a thread contributes —
-    // reopened threads were already counted, and refining their counts is
-    // not worth the bookkeeping (the broadcast filter needs shape, not
-    // precision).
-    if (wasCounted?.status === "pending") {
+    // refining a reopened thread's counts is not worth the bookkeeping (the
+    // broadcast filter needs shape, not precision).
+    if (wasCounted?.senders_counted === 0) {
       for (const s of info.senders) {
         db.run(
           `INSERT INTO sender_stats (sender, threads, multi_threads, self_wrote_threads) VALUES (?, 1, ?, ?)

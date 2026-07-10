@@ -277,13 +277,20 @@ export function gmailCrmMailSource(options: { configDir?: string; fetchImpl?: Fe
         pageToken = typeof page?.nextPageToken === "string" ? page.nextPageToken : undefined;
       } while (pageToken);
       // The list surface carries no dates; fetch minimal per message for
-      // internalDate (cheap — no payload).
+      // internalDate (cheap — no payload). A failed date fetch retries once
+      // and then THROWS rather than degrading to internalDate 0: a zero date
+      // can never satisfy the queue's grew-since-done reopen predicate, and
+      // the cursor would advance past the real message via its poll-mates —
+      // silently dropping that mail forever. Failing the whole poll leaves
+      // the cursor untouched, so the next interval retries everything.
       const refs = await mapWithConcurrency(ids, FETCH_CONCURRENCY, async (m) => {
-        try {
-          const doc = await gmailGet(fetchImpl, t, `messages/${m.id}?format=minimal`);
-          return { id: m.id, threadId: m.threadId, internalDate: Number(doc?.internalDate ?? 0) };
-        } catch {
-          return { id: m.id, threadId: m.threadId, internalDate: 0 };
+        for (let attempt = 0; ; attempt++) {
+          try {
+            const doc = await gmailGet(fetchImpl, t, `messages/${m.id}?format=minimal`);
+            return { id: m.id, threadId: m.threadId, internalDate: Number(doc?.internalDate ?? 0) };
+          } catch (error) {
+            if (attempt >= 1) throw error;
+          }
         }
       });
       return refs;

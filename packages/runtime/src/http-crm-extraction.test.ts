@@ -66,6 +66,21 @@ async function call(
 }
 
 describe("/api/crm/extraction", () => {
+  test("all extraction routes require the bearer token", async () => {
+    const config = buildConfig("crm-http-auth");
+    const handler = createHandler(config);
+    for (const [method, path] of [
+      ["GET", "/api/crm/extraction"],
+      ["POST", "/api/crm/extraction/start"],
+      ["POST", "/api/crm/extraction/pause"],
+      ["POST", "/api/crm/extraction/enable"],
+      ["POST", "/api/crm/extraction/disable"],
+    ] as const) {
+      const response = await handler(new Request(`http://127.0.0.1:${config.port}${path}`, { method }));
+      expect(response.status).toBe(401);
+    }
+  });
+
   test("status is idle before any start", async () => {
     const config = buildConfig("crm-http-idle");
     const handler = createHandler(config);

@@ -111,6 +111,14 @@ END;
 function seedBaselineTables(db: Database): void {
   db.exec(SEED_CONTACTS);
   db.exec("CREATE TABLE IF NOT EXISTS relations (a TEXT, b TEXT, kind TEXT, note TEXT)");
+  // One row per edge. Without this, two convergent writers (a retried or
+  // hedged turn racing its twin) can both insert the same relation — the
+  // contacts table's UNIQUE constraints arbitrate that race but relations
+  // had no equivalent. Legacy tables may already carry duplicate edges, so
+  // dedupe (keep the oldest row) before the index lands — otherwise index
+  // creation would fail every open.
+  db.exec("DELETE FROM relations WHERE rowid NOT IN (SELECT MIN(rowid) FROM relations GROUP BY a, b, COALESCE(kind, ''))");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS relations_edge ON relations (a, b, COALESCE(kind, ''))");
   const cols = new Set(
     db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('contacts')").all().map((c) => c.name)
   );

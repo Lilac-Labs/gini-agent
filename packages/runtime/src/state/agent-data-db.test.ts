@@ -107,6 +107,11 @@ describe("agent-data-db", () => {
     const raw = new Database(path, { create: true });
     raw.exec("CREATE TABLE contacts (email_address TEXT PRIMARY KEY, first_name TEXT, profile TEXT)");
     raw.run("INSERT INTO contacts VALUES ('old@x.io', 'Old', 'kept')");
+    // Legacy relations with a duplicate edge: the seed must dedupe (keeping
+    // the oldest row) so the unique edge index can land.
+    raw.exec("CREATE TABLE relations (a TEXT, b TEXT, kind TEXT, note TEXT)");
+    raw.run("INSERT INTO relations VALUES ('x', 'y', 'coworker', 'first')");
+    raw.run("INSERT INTO relations VALUES ('x', 'y', 'coworker', 'second')");
     raw.close();
     // First runtime open runs the seed: updated_at + description are added
     // and backfilled; the id-less shape skips the touch trigger + index
@@ -121,6 +126,13 @@ describe("agent-data-db", () => {
     // Writes still work without the trigger/index pair.
     dbExecute(inst, "agent_legacy", "UPDATE contacts SET description = 'one-liner' WHERE email_address = 'old@x.io'");
     expect(dbQuery(inst, "agent_legacy", "SELECT description FROM contacts").rows[0]!.description).toBe("one-liner");
+    // Duplicate edges collapsed to the oldest row, and the edge index now
+    // rejects re-inserting the same (a, b, kind).
+    const edges = dbQuery(inst, "agent_legacy", "SELECT note FROM relations");
+    expect(edges.rows.map((r) => r.note)).toEqual(["first"]);
+    expect(() => dbExecute(inst, "agent_legacy", "INSERT INTO relations VALUES ('x', 'y', 'coworker', 'again')")).toThrow(/UNIQUE/i);
+    // A different kind between the same pair is a distinct edge.
+    dbExecute(inst, "agent_legacy", "INSERT INTO relations VALUES ('x', 'y', 'intro', 'ok')");
   });
 
   test("each agent has an isolated database file", () => {

@@ -58,7 +58,7 @@ describe("agent-data-db", () => {
     const contacts = tables.find((t) => t.name === "contacts")!;
     expect(contacts.rowCount).toBe(0);
     expect(contacts.columns.map((c) => c.name)).toEqual([
-      "id", "first_name", "last_name", "email_address", "company", "position", "url", "phone", "description", "profile", "last_spoke_at", "updated_at"
+      "id", "first_name", "last_name", "email_address", "company", "position", "category", "url", "phone", "description", "profile", "last_spoke_at", "updated_at"
     ]);
     expect(tables.find((t) => t.name === "relations")!.columns.map((c) => c.name)).toEqual(["a", "b", "kind", "note"]);
     // Identity: id auto-generates, email is optional but unique when present.
@@ -117,7 +117,7 @@ describe("agent-data-db", () => {
     // the modern id-PK shape with the data carried over.
     const cols = dbListTables(inst, "agent_legacy").find((t) => t.name === "contacts")!.columns.map((c) => c.name);
     expect(cols).toEqual([
-      "id", "first_name", "last_name", "email_address", "company", "position", "url", "phone", "description", "profile", "last_spoke_at", "updated_at"
+      "id", "first_name", "last_name", "email_address", "company", "position", "category", "url", "phone", "description", "profile", "last_spoke_at", "updated_at"
     ]);
     const row = dbQuery(inst, "agent_legacy", "SELECT * FROM contacts").rows[0]! as Record<string, unknown>;
     expect(String(row.id).length).toBe(32);
@@ -153,6 +153,7 @@ describe("agent-data-db", () => {
       "0002-contacts-description",
       "0003-contacts-last-spoke-at",
       "0004-contacts-id-pk-rebuild",
+      "0005-contacts-category",
     ]);
     // Bookkeeping stays out of the agent's schema view.
     expect(dbListTables(inst, "agent_legacy").map((t) => t.name)).not.toContain("_gini_migrations");

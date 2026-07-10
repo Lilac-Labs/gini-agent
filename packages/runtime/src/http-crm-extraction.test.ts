@@ -10,7 +10,7 @@ import {
   __setCrmMailSourceForTests,
 } from "./jobs/crm-extractor";
 import { closeAllCrmExtractionDbs, setCrmMeta } from "./state/crm-extraction-db";
-import { closeAllAgentDataDbs } from "./state/agent-data-db";
+import { closeAllAgentDataDbs, dbExecute } from "./state/agent-data-db";
 import { clearEchoToolCallingResponses, normalizeProvider, setEchoToolCallingResponse } from "./provider";
 import { install } from "./runtime";
 import type { RuntimeConfig } from "./types";
@@ -157,4 +157,50 @@ describe("/api/crm/extraction", () => {
     expect(((await enabled.json()) as { runState: string }).runState).toBe("idle");
     __setCrmMailSourceForTests(instance, undefined);
   }, 30_000);
+
+  test("contacts list is profile-less; the detail carries the dossier; unknown id 404s", async () => {
+    const instance = "crm-http-contacts";
+    const config = buildConfig(instance);
+    await install(config);
+    const handler = createHandler(config);
+    dbExecute(
+      instance,
+      "agent_default",
+      "INSERT INTO contacts (first_name, last_name, email_address, company, category, description, profile, last_spoke_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ["Ada", "Lovelace", "ada@x.io", "Analytical Engines", "Work", "First programmer", "# Ada\n\n## Who They Are\n- Mathematician", 1_700_000_000_000],
+    );
+    dbExecute(
+      instance,
+      "agent_default",
+      "INSERT INTO contacts (first_name, email_address, description) VALUES (?, ?, ?)",
+      ["You", "me@corp.io", "You — the user's own reserved row."],
+    );
+
+    const listResponse = await call(handler, config, "/api/crm/contacts");
+    expect(listResponse.status).toBe(200);
+    const { contacts } = (await listResponse.json()) as { contacts: Array<Record<string, unknown>> };
+    expect(contacts.length).toBe(2);
+    const ada = contacts.find((c) => c.email === "ada@x.io")!;
+    expect(ada.firstName).toBe("Ada");
+    expect(ada.lastName).toBe("Lovelace");
+    expect(ada.company).toBe("Analytical Engines");
+    expect(ada.category).toBe("Work");
+    expect(ada.description).toBe("First programmer");
+    expect(ada.lastSpokeAt).toBe(1_700_000_000_000);
+    expect(ada.isSelf).toBe(false);
+    expect("profile" in ada).toBe(false); // list never ships the dossier
+    const you = contacts.find((c) => c.email === "me@corp.io")!;
+    expect(you.isSelf).toBe(true);
+
+    const detailResponse = await call(handler, config, `/api/crm/contacts/${ada.id}`);
+    expect(detailResponse.status).toBe(200);
+    const detail = (await detailResponse.json()) as Record<string, unknown>;
+    expect(detail.profile).toContain("## Who They Are");
+
+    const missing = await call(handler, config, "/api/crm/contacts/nope");
+    expect(missing.status).toBe(404);
+    // And the routes are token-gated like the rest of the surface.
+    const anon = await handler(new Request(`http://127.0.0.1:${config.port}/api/crm/contacts`));
+    expect(anon.status).toBe(401);
+  });
 });

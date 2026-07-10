@@ -74,6 +74,7 @@ CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}"${tableName}" (
     OR (email_address = lower(trim(email_address)) AND email_address LIKE '%_@_%._%')
   ),
   company TEXT, position TEXT,
+  category TEXT,
   url TEXT CHECK (url IS NULL OR url LIKE 'http://%' OR url LIKE 'https://%'),
   phone TEXT CHECK (
     phone IS NULL
@@ -89,7 +90,7 @@ CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}"${tableName}" (
 
 const MODERN_CONTACT_COLUMNS = [
   "id", "first_name", "last_name", "email_address", "company", "position",
-  "url", "phone", "description", "profile", "last_spoke_at", "updated_at",
+  "category", "url", "phone", "description", "profile", "last_spoke_at", "updated_at",
 ] as const;
 
 // Trigger + index reference the new-schema columns, so they only apply to a
@@ -254,6 +255,7 @@ function normalizeLegacyContact(
     email_address: email,
     company: text(row.company),
     position: text(row.position),
+    category: text(row.category),
     url,
     phone,
     description: text(row.description),
@@ -340,6 +342,14 @@ const MIGRATIONS: Migration[] = [
   {
     id: "0004-contacts-id-pk-rebuild",
     up: rebuildLegacyContacts,
+  },
+  {
+    // Relationship bucket ("Work" / "Personal") for the People directory's
+    // category filter; the skill assigns and maintains it.
+    id: "0005-contacts-category",
+    up(db) {
+      addColumnIfMissing(db, "category", "ALTER TABLE contacts ADD COLUMN category TEXT");
+    },
   },
 ];
 

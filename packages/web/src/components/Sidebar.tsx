@@ -21,6 +21,7 @@ import {
   Settings,
   Sun,
   Trash2,
+  Users,
   WandSparkles
 } from "lucide-react";
 import { useTheme } from "next-themes";
@@ -489,8 +490,14 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
             </>
           ) : null}
 
-          {/* Nav: Routines, Skills, Logs, Settings */}
+          {/* Nav: People, Routines, Skills, Logs, Settings */}
           <ul className="flex flex-col gap-0.5">
+            <li>
+              <Link href="/people" onClick={onNavigate} className={navItem(pathname === "/people")}>
+                <Users className="size-3.5 text-sidebar-foreground/70" />
+                People
+              </Link>
+            </li>
             <li>
               <Link href="/routines" onClick={onNavigate} className={navItem(pathname === "/routines")}>
                 <Repeat className="size-3.5 text-sidebar-foreground/70" />

@@ -89,6 +89,7 @@ import { buildModelCatalog } from "./model-routes";
 import { setDefaultModel } from "./runtime/default-model";
 import { archiveAgent, createAgent, deleteAgent, listAgents, renameAgent, setAgentMemory, setAgentProvider, unarchiveAgent, useAgent } from "./capabilities/agents";
 import { crmExtractionStatus, disableCrmExtraction, enableCrmExtraction, pauseCrmExtraction, startCrmExtraction } from "./jobs/crm-extractor";
+import { getCrmContact, listCrmContacts } from "./capabilities/crm-contacts";
 import {
   approveSoul,
   approveUserProfile,
@@ -2575,6 +2576,13 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     ["POST", /^\/api\/crm\/extraction\/pause$/, async () => json(await pauseCrmExtraction(config))],
     ["POST", /^\/api\/crm\/extraction\/enable$/, async () => json(await enableCrmExtraction(config))],
     ["POST", /^\/api\/crm\/extraction\/disable$/, async () => json(await disableCrmExtraction(config))],
+    // People directory: list is profile-less (the dossier is multi-KB), the
+    // detail fetch carries it for the panel.
+    ["GET", /^\/api\/crm\/contacts$/, () => json(listCrmContacts(config))],
+    ["GET", /^\/api\/crm\/contacts\/([^/]+)$/, (_request, params) => {
+      const contact = getCrmContact(config, params[0]);
+      return contact ? json(contact) : json({ error: "Contact not found" }, 404);
+    }],
     ["GET", /^\/api\/agents$/, () => json(listAgents(config))],
     ["POST", /^\/api\/agents$/, async (request) => json(await createAgent(config, await body(request)), 201)],
     ["POST", /^\/api\/agents\/([^/]+)\/use$/, async (_request, params) => json(await useAgent(config, params[0]))],

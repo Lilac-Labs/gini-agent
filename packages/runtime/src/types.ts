@@ -1359,6 +1359,11 @@ export interface SubagentRecord {
   // enabled skill the parent could see. When set, the "Available skills:"
   // block in the system prompt is filtered down to this subset.
   skillNames?: string[];
+  // Ambient-memory switch for this persona's turns: `false` skips
+  // auto-recall and auto-retain (mirrors AgentRecord.autoMemory). Meant for
+  // high-volume mechanical workers (e.g. the CRM curator) whose durable
+  // memory is their own database.
+  autoMemory?: boolean;
   // Convenience mirror of the populated child task's summary/error so the
   // parent (or UI) can read terminal results off the subagent record without
   // joining against the task table.

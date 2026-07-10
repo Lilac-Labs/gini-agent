@@ -111,7 +111,7 @@ import {
   releaseApproval
 } from "./execution/approval-execution";
 import { abortTurnForTask } from "./execution/turn-abort";
-import { syncSubagentFromTask } from "./capabilities/subagents";
+import { getSubagentForTask, syncSubagentFromTask } from "./capabilities/subagents";
 import { sendMessagingOutput } from "./integrations/messaging";
 // Imported from a leaf module (not src/jobs/index.ts) so we don't close
 // the cycle that runs through submitTask. The finalizer flips the linked
@@ -1003,11 +1003,22 @@ function shouldAutoRetain(task: Task): boolean {
 
 export function scheduleAutoRetain(config: RuntimeConfig, task: Task): void {
   if (!shouldAutoRetain(task)) return;
-  // Phase C — resolve the active agent at retain time so the new units
-  // land in the right pool. If no agent is active (degenerate state), skip
-  // retain rather than leaking into the default bank.
+  // Phase C — resolve the task's OWNING agent at retain time so the new
+  // units land in the right pool even if the user switched the active agent
+  // mid-task. If no agent resolves (degenerate state), skip retain rather
+  // than leaking into the default bank.
   const state = readState(config.instance);
-  const effective = resolveEffectiveContext(state, config);
+  const effective = resolveEffectiveContext(state, config, task.agentId);
+  // Subagent personas can opt their turns out of ambient memory entirely.
+  const subagentForTask = getSubagentForTask(state, task);
+  if (subagentForTask?.autoMemory === false) {
+    appendTrace(config.instance, task.id, {
+      type: "memory",
+      message: "auto-retain skipped: agent autoMemory off",
+      data: { agentId: effective.agentId, subagentId: subagentForTask.id }
+    });
+    return;
+  }
   if (!effective.agentId) {
     appendTrace(config.instance, task.id, {
       type: "memory",

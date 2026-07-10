@@ -753,29 +753,36 @@ export async function runChatTask(config: RuntimeConfig, taskId: string): Promis
   });
   appendLog(config.instance, "task.started", { taskId, mode: "chat" });
 
-  // Resolve the active agent up-front so memory recall and pinned-memory
-  // filtering both use the same isolation key (Phase C). Without an active
-  // agent we skip auto-recall — Hindsight requires a namespace.
+  // Resolve the task's OWNING agent up-front (Task.agentId, stamped at
+  // submission; falls back to the active agent) so memory recall and
+  // pinned-memory filtering both use the same isolation key (Phase C) even
+  // when the user switches the active agent while this task runs. Without
+  // an agent we skip auto-recall — Hindsight requires a namespace.
   const stateForAgent = readState(config.instance);
-  const effectiveForAgent = resolveEffectiveContext(stateForAgent, config);
+  const effectiveForAgent = resolveEffectiveContext(stateForAgent, config, task.agentId);
   const agentIdForMemory = effectiveForAgent.agentId;
+  // Subagent personas can opt their turns out of the ambient memory
+  // pipeline (autoMemory: false) — high-volume mechanical workers pay
+  // recall as pure latency and would flood the bank with retained inputs.
+  const subagentForMemory = getSubagentForTask(stateForAgent, task);
+  const ambientMemoryOn = effectiveForAgent.autoMemory && subagentForMemory?.autoMemory !== false;
 
   // Auto-recall: queries the Hindsight bank for relevant context. If
   // recall fails we continue without it — the model can still answer
-  // off USER.md / SOUL.md and the task input. Agents with
-  // `autoMemory: false` skip the query entirely — recall embeds the full
-  // task input and scans the bank in-process, which is pure latency for
-  // an agent that never needs ambient memory.
+  // off USER.md / SOUL.md and the task input. Agents (or subagent
+  // personas) with `autoMemory: false` skip the query entirely — recall
+  // embeds the full task input and scans the bank in-process, which is
+  // pure latency for a worker that never needs ambient memory.
   let recalledContext: string | undefined;
   let hindsightUnitsRecalled = 0;
-  if (agentIdForMemory && !effectiveForAgent.autoMemory) {
+  if (agentIdForMemory && !ambientMemoryOn) {
     appendTrace(config.instance, taskId, {
       type: "memory",
       message: "auto-recall skipped: agent autoMemory off",
       data: { agentId: agentIdForMemory }
     });
   }
-  if (agentIdForMemory && effectiveForAgent.autoMemory) {
+  if (agentIdForMemory && ambientMemoryOn) {
     try {
       const recalled = await recall(config, {
         agentId: agentIdForMemory,
@@ -1990,8 +1997,9 @@ async function runLoop(
   // toolset filter narrows buildToolCatalog before the subagent filter
   // narrows further (state → agent → subagent composition). On fresh
   // entry runChatTask hands us the already-resolved EffectiveContext;
-  // resumeChatTask omits it so the resume picks up any agent change.
-  const effective = inheritedEffective ?? resolveEffectiveContext(state0, config);
+  // resumeChatTask omits it so the resume picks up any agent change (still
+  // pinned to the task's owning agent when one is stamped).
+  const effective = inheritedEffective ?? resolveEffectiveContext(state0, config, taskRow?.agentId);
   // Usage-ledger attribution for every model call in this turn. The source
   // distinguishes a subagent child / scheduled job / ordinary chat by the
   // task's own provenance; compaction/aux calls override source to "aux".

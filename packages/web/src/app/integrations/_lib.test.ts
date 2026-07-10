@@ -155,7 +155,7 @@ describe("buildTiles", () => {
 });
 
 function slackBridge(overrides: Partial<SlackBridgeLike>): SlackBridgeLike {
-  return { kind: "slack", status: "configured", ...overrides };
+  return { id: "bridge_test", kind: "slack", status: "configured", ...overrides };
 }
 
 describe("slackTile", () => {
@@ -202,7 +202,7 @@ describe("slackTile", () => {
     expect(tile.status).toBeNull();
     expect(tile.provider.description).toBe("DM Gini in your Slack workspace.");
     // Non-slack bridges are ignored.
-    expect(slackTile([{ kind: "telegram", status: "configured" }]).state).toBe("available");
+    expect(slackTile([{ id: "b_tg", kind: "telegram", status: "configured" }]).state).toBe("available");
   });
 
   test("flows through filterTiles / tileCounts like any tile", () => {

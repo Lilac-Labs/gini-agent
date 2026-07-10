@@ -134,13 +134,17 @@ export function buildTiles(
 export const SLACK_PROVIDER_ID = "slack";
 const SLACK_TILE_COLOR = "#4A154B";
 
-// The messaging bridge fields the tile needs — a minimal view of
-// MessagingBridgeRecord (@runtime/types).
+// The messaging bridge fields the tile and drilldown card need — a minimal
+// view of MessagingBridgeRecord (@runtime/types). `id` keys the drilldown rows
+// and drives the remove call; `name` is the workspace-name fallback when the
+// bridge carries no teamName.
 export interface SlackBridgeLike {
+  id: string;
   kind: string;
+  name?: string;
   status: string;
   message?: string;
-  metadata?: { teamName?: string };
+  metadata?: { teamName?: string; teamId?: string; slackUserId?: string };
 }
 
 // Synthetic ProviderDescriptor for the Slack tile — Slack has no connector

@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ChevronLeft, Search, SearchX } from "lucide-react";
@@ -22,7 +21,8 @@ import { useConnectors, useGoogleAccounts, useInvalidate, useProviders, type Pro
 import { AddConnectorDialog, type CreateConnectorBody } from "@/components/AddConnectorDialog";
 import { ManualCredentialDialog } from "@/components/ManualCredentialDialog";
 import { GoogleAccountsCard, GoogleLogo } from "./_components/GoogleAccountsCard";
-import { BRAND_LOGOS } from "./_components/brand-logos";
+import { SlackWorkspaceCard } from "./_components/SlackWorkspaceCard";
+import { BRAND_LOGOS, SlackLogo } from "./_components/brand-logos";
 import {
   GOOGLE_PROVIDER_ID,
   SLACK_PROVIDER_ID,
@@ -73,12 +73,11 @@ export default function IntegrationsPage() {
     queryKey: ["messaging"],
     queryFn: () => api<SlackBridgeLike[]>("/messaging")
   });
-  const router = useRouter();
   const invalidate = useInvalidate();
 
-  // The Google drilldown is in-page view state (matching the design), not a
-  // nested route.
-  const [view, setView] = useState<"list" | "google">("list");
+  // The Google and Slack drilldowns are in-page view state (matching the
+  // design), not nested routes.
+  const [view, setView] = useState<"list" | "google" | "slack">("list");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<TileFilter>("all");
   const [dialog, setDialog] = useState<ConnectorDialogState>(CLOSED_DIALOG);
@@ -163,9 +162,8 @@ export default function IntegrationsPage() {
       return;
     }
     if (p.id === SLACK_PROVIDER_ID) {
-      // The local Messaging card owns Socket Mode credentials and bridge
-      // management until the inline drilldown is opened here.
-      router.push("/settings");
+      // Every state opens the local Socket Mode workspace drilldown.
+      setView("slack");
       return;
     }
     if (tile.connected) {
@@ -225,6 +223,25 @@ export default function IntegrationsPage() {
                 </div>
               </div>
               <GoogleAccountsCard accounts={googleAccounts.data ?? []} />
+            </div>
+          ) : view === "slack" ? (
+            <div className="flex flex-col gap-3">
+              <Button variant="outline" size="sm" className="self-start" onClick={() => setView("list")}>
+                <ChevronLeft className="size-4" />
+                All integrations
+              </Button>
+              <div className="mt-1.5 flex items-center gap-3">
+                <span className="flex size-10 shrink-0 items-center justify-center rounded-[11px] border border-border bg-white">
+                  <SlackLogo className="size-6" />
+                </span>
+                <div>
+                  <div className="text-[17px] font-bold">Slack</div>
+                  <div className="text-[13px] text-muted-foreground">
+                    DM Gini in your Slack workspace.
+                  </div>
+                </div>
+              </div>
+              <SlackWorkspaceCard bridges={messaging.data ?? []} />
             </div>
           ) : (
             <>

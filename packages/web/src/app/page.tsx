@@ -17,22 +17,32 @@ import { RecentsList } from "@/components/home/RecentsList";
 // Clicking a task row opens that container's thread in the right-side
 // TopicPanel drawer (the chat page's forwarded-topic pattern) instead of
 // navigating away. Unlike the chat page's state-backed TopicPanelProvider,
-// the open panel here lives in the URL (`/?panel=<sessionId>`) via shallow
+// the open panel here lives in the URL (`/?panel=<sessionId>`, or
+// `/?panel=routine:<jobId>` for the routine details variant) via shallow
 // history.replaceState (the `?compose=` idiom — no router navigation), so a
 // reload restores the panel and closing it cleans the URL.
 export default function HomePage() {
   const params = useSearchParams();
-  const panelSessionId = params?.get("panel") || null;
+  const panelParam = params?.get("panel") || null;
+  // The `routine:` prefix selects the routine variant of the panel slot; any
+  // other value keeps the pre-existing raw-session-id shape.
+  const panelJobId = panelParam?.startsWith("routine:")
+    ? panelParam.slice("routine:".length)
+    : null;
+  const panelSessionId = panelParam && !panelJobId ? panelParam : null;
 
   const openTopic = useCallback((topicId: string) => {
     window.history.replaceState(null, "", `/?panel=${encodeURIComponent(topicId)}`);
+  }, []);
+  const openRoutine = useCallback((jobId: string) => {
+    window.history.replaceState(null, "", `/?panel=routine:${encodeURIComponent(jobId)}`);
   }, []);
   const closeTopic = useCallback(() => {
     window.history.replaceState(null, "", "/");
   }, []);
   const panel = useMemo(
-    () => ({ openTopicId: panelSessionId, openTopic, closeTopic }),
-    [panelSessionId, openTopic, closeTopic]
+    () => ({ openTopicId: panelSessionId, openTopic, openRoutineJobId: panelJobId, openRoutine, closeTopic }),
+    [panelSessionId, panelJobId, openTopic, openRoutine, closeTopic]
   );
 
   return (

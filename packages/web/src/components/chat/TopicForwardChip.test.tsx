@@ -29,7 +29,9 @@ describe("TopicForwardChip", () => {
   test("opens the topic panel via the context instead of navigating", () => {
     const openTopic = mock(() => {});
     render(
-      <TopicPanelContext.Provider value={{ openTopicId: null, openTopic, closeTopic: () => {} }}>
+      <TopicPanelContext.Provider
+        value={{ openTopicId: null, openTopic, openRoutineJobId: null, openRoutine: () => {}, closeTopic: () => {} }}
+      >
         <TopicForwardChip topicId="topic-789" topicTitle="Trip" />
       </TopicPanelContext.Provider>
     );

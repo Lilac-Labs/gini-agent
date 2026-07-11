@@ -45,6 +45,7 @@ mock.module("./onboarding-scan", () => ({
 import { createHandler } from "../http";
 import * as jobsModule from "../jobs";
 import { createJob, mutateState, readState, upsertTask, createChatSession } from "../state";
+import { attachGoogleAccountToInstance } from "../state/google-account-bindings";
 import { writeGoogleAccounts } from "../state/google-accounts";
 import { onboardingPath, readOnboarding, writeOnboarding } from "../state/onboarding";
 import { validateScanProfile, validateScanTasks } from "./onboarding";
@@ -57,6 +58,18 @@ const jobsOriginals = { ...jobsModule };
 
 function tag(): string {
   return `${process.pid}-${Math.floor(Math.random() * 1_000_000)}`;
+}
+
+function bindTestGoogleAccount(instance: string): void {
+  const account = {
+    id: "gacct_test",
+    tag: "personal",
+    email: "user@example.com",
+    configDir: "/tmp/none",
+    addedAt: new Date().toISOString()
+  };
+  writeGoogleAccounts([account]);
+  attachGoogleAccountToInstance(instance, account, { primary: true });
 }
 
 describe("web onboarding api", () => {
@@ -232,8 +245,9 @@ describe("web onboarding api", () => {
     expect(denied.scan.status).toBe("no_account");
     expect(scanCalls).toBe(0);
 
-    // A registered account flips the retry to a real background run.
-    writeGoogleAccounts([{ id: "gacct_test", tag: "personal", email: "user@example.com", configDir: "/tmp/none", addedAt: new Date().toISOString() }]);
+    // A registered account explicitly bound to this instance flips the retry
+    // to a real background run.
+    bindTestGoogleAccount(config.instance);
     const started = await call(handler, config, "/api/onboarding/scan", { method: "POST" });
     // Returns immediately as running (no taskId — no agent task) while the
     // pipeline runs in the background.
@@ -254,7 +268,7 @@ describe("web onboarding api", () => {
   test("a failed pipeline finalizes the scan as failed", async () => {
     const config = testConfig(root, "scan-pipeline-failed");
     const handler = createHandler(config);
-    writeGoogleAccounts([{ id: "gacct_test", tag: "personal", email: "user@example.com", configDir: "/tmp/none", addedAt: new Date().toISOString() }]);
+    bindTestGoogleAccount(config.instance);
     scanOutcome = { status: "failed", error: "No signed-in Google session — connect an account and try again." };
 
     const started = await call(handler, config, "/api/onboarding/scan", { method: "POST" });
@@ -287,7 +301,7 @@ describe("web onboarding api", () => {
   test("a failed scan resubmits as a fresh run on the next POST", async () => {
     const config = testConfig(root, "scan-retry");
     const handler = createHandler(config);
-    writeGoogleAccounts([{ id: "gacct_test", tag: "personal", email: "user@example.com", configDir: "/tmp/none", addedAt: new Date().toISOString() }]);
+    bindTestGoogleAccount(config.instance);
     // The web's step-3 "Try again" hits POST /onboarding/scan on exactly this
     // shape: a failed scan must flip back to running with a cleared error and
     // kick a fresh pipeline, while running/ready stay idempotent (pinned above).
@@ -314,7 +328,7 @@ describe("web onboarding api", () => {
     // this would submit a real task. The hazard: a completed user mounts
     // /onboarding briefly before the gate redirects home, and the page fires
     // POST /onboarding/scan on mount.
-    writeGoogleAccounts([{ id: "gacct_test", tag: "personal", email: "user@example.com", configDir: "/tmp/none", addedAt: new Date().toISOString() }]);
+    bindTestGoogleAccount(config.instance);
     writeOnboarding(config.instance, {
       version: 1,
       completed: true,

@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 import { EmptyState } from "@/components/PageHeader";
 import { api } from "@/lib/api";
 import { formatRelativeTime } from "@/components/chat/relative-time";
-import { useInvalidate, useJobRuns, useJobs } from "@/lib/queries";
+import { useAllJobs, useInvalidate, useJobRuns } from "@/lib/queries";
 import type { JobRecord } from "@runtime/types";
 import { scheduleLabel } from "@/components/jobs/schedule-label";
 import { EditJobDialog } from "@/components/jobs/EditJobDialog";
@@ -32,7 +32,11 @@ import { jobDescription, jobDisplayName } from "../../custom-jobs";
 export default function JobRoutineDetailPage({ params }: { params: Promise<{ jobId: string }> }) {
   const { jobId } = use(params);
   const router = useRouter();
-  const jobs = useJobs();
+  // The UNSCOPED jobs list: this page is the canonical per-job URL for ANY
+  // job id, so the agent-scoped list would 404 a job owned by another agent —
+  // and its slower refetch can 404 a job created moments ago from chat (the
+  // routine panel's "Open Settings" deep link) before the cache catches up.
+  const jobs = useAllJobs();
 
   const all = jobs.data;
   const job = all?.find((candidate) => candidate.id === jobId);

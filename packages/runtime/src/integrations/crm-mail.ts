@@ -130,14 +130,41 @@ async function mintAccessToken(fetchImpl: FetchImpl, credentials: ExportedCreden
   }
 }
 
+// Injectable backoff base so tests exercise the retry ladder in
+// milliseconds instead of minutes.
+function gmailBackoffBaseMs(): number {
+  return Number(process.env.GINI_GMAIL_BACKOFF_MS ?? "1000");
+}
+const GMAIL_MAX_ATTEMPTS = 6;
+
+// Gmail throttles bursts with 403 (rate limit) as well as 429 — a full
+// mailbox ingest at 8-way reliably trips it. Retry those, transient 5xx,
+// and transport failures (network rejections, the 30s request timeout)
+// with exponential backoff before surfacing; a definitive HTTP status
+// (401, 404) throws immediately.
 async function gmailGet(fetchImpl: FetchImpl, accessToken: string, path: string): Promise<Record<string, unknown> | undefined> {
-  const response = await fetchImpl(`${GMAIL_BASE}/${path}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  if (!response.ok) throw new Error(`Gmail request failed (HTTP ${response.status}).`);
-  const doc = (await response.json()) as unknown;
-  return doc && typeof doc === "object" ? (doc as Record<string, unknown>) : undefined;
+  for (let attempt = 0; ; attempt++) {
+    let response: Response;
+    try {
+      response = await fetchImpl(`${GMAIL_BASE}/${path}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      if (attempt >= GMAIL_MAX_ATTEMPTS - 1) throw error;
+      await Bun.sleep(gmailBackoffBaseMs() * 2 ** attempt);
+      continue;
+    }
+    if (response.ok) {
+      const doc = (await response.json()) as unknown;
+      return doc && typeof doc === "object" ? (doc as Record<string, unknown>) : undefined;
+    }
+    const retryable = response.status === 403 || response.status === 429 || response.status >= 500;
+    if (!retryable || attempt >= GMAIL_MAX_ATTEMPTS - 1) {
+      throw new Error(`Gmail request failed (HTTP ${response.status}).`);
+    }
+    await Bun.sleep(gmailBackoffBaseMs() * 2 ** attempt);
+  }
 }
 
 function decodeBodyData(data: unknown): string {
@@ -277,21 +304,16 @@ export function gmailCrmMailSource(options: { configDir?: string; fetchImpl?: Fe
         pageToken = typeof page?.nextPageToken === "string" ? page.nextPageToken : undefined;
       } while (pageToken);
       // The list surface carries no dates; fetch minimal per message for
-      // internalDate (cheap — no payload). A failed date fetch retries once
-      // and then THROWS rather than degrading to internalDate 0: a zero date
-      // can never satisfy the queue's grew-since-done reopen predicate, and
-      // the cursor would advance past the real message via its poll-mates —
-      // silently dropping that mail forever. Failing the whole poll leaves
-      // the cursor untouched, so the next interval retries everything.
+      // internalDate (cheap — no payload). A failed date fetch (after
+      // gmailGet's own backoff ladder) THROWS rather than degrading to
+      // internalDate 0: a zero date can never satisfy the queue's
+      // grew-since-done reopen predicate, and the cursor would advance past
+      // the real message via its poll-mates — silently dropping that mail
+      // forever. Failing the whole poll leaves the cursor untouched, so the
+      // next interval retries everything.
       const refs = await mapWithConcurrency(ids, FETCH_CONCURRENCY, async (m) => {
-        for (let attempt = 0; ; attempt++) {
-          try {
-            const doc = await gmailGet(fetchImpl, t, `messages/${m.id}?format=minimal`);
-            return { id: m.id, threadId: m.threadId, internalDate: Number(doc?.internalDate ?? 0) };
-          } catch (error) {
-            if (attempt >= 1) throw error;
-          }
-        }
+        const doc = await gmailGet(fetchImpl, t, `messages/${m.id}?format=minimal`);
+        return { id: m.id, threadId: m.threadId, internalDate: Number(doc?.internalDate ?? 0) };
       });
       return refs;
     },

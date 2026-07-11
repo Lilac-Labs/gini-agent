@@ -19,8 +19,10 @@ const TOKEN_URL = "https://oauth2.googleapis.com/token";
 beforeAll(() => {
   rmSync(ROOT, { recursive: true, force: true });
   mkdirSync(ROOT, { recursive: true });
+  process.env.GINI_GMAIL_BACKOFF_MS = "1"; // instant retry ladder in tests
 });
 afterAll(() => {
+  delete process.env.GINI_GMAIL_BACKOFF_MS;
   rmSync(ROOT, { recursive: true, force: true });
 });
 afterEach(() => {
@@ -191,11 +193,68 @@ describe("gmailCrmMailSource", () => {
     expect(source.listMessages()).rejects.toThrow(/HTTP 503/);
   });
 
-  test("a non-ok Gmail response surfaces as an error (never silently empty)", async () => {
-    const fetchImpl: FetchImpl = async (url) =>
-      url === TOKEN_URL ? jsonResponse({ access_token: "tok" }) : jsonResponse({}, 403);
+  test("a persistently throttled Gmail call retries the ladder, then surfaces the error", async () => {
+    let calls = 0;
+    const fetchImpl: FetchImpl = async (url) => {
+      if (url === TOKEN_URL) return jsonResponse({ access_token: "tok" });
+      calls += 1;
+      return jsonResponse({}, 403);
+    };
     const source = gmailCrmMailSource({ configDir: credsDir("gmail-403"), fetchImpl });
-    expect(source.listMessages()).rejects.toThrow(/HTTP 403/);
+    await expect(source.listMessages()).rejects.toThrow(/HTTP 403/);
+    expect(calls).toBe(6); // full backoff ladder before giving up
+  });
+
+  test("rate-limit bursts and transport blips recover mid-ladder", async () => {
+    let threadFailures = 2; // two 403s, then success
+    let listNetworkFailures = 1; // one rejected fetch, then success
+    const fetchImpl: FetchImpl = async (url) => {
+      if (url === TOKEN_URL) return jsonResponse({ access_token: "tok" });
+      if (url.includes("/messages?")) {
+        if (listNetworkFailures > 0) {
+          listNetworkFailures -= 1;
+          throw new Error("socket hang up");
+        }
+        return jsonResponse({ messages: [] });
+      }
+      if (url.includes("/threads/")) {
+        if (threadFailures > 0) {
+          threadFailures -= 1;
+          return jsonResponse({}, 403);
+        }
+        return jsonResponse({ messages: [{ id: "m1", threadId: "t1", internalDate: "1000" }] });
+      }
+      throw new Error(`unexpected url: ${url}`);
+    };
+    const source = gmailCrmMailSource({ configDir: credsDir("gmail-burst"), fetchImpl });
+    expect(await source.listMessages()).toEqual([]); // transport blip absorbed
+    const thread = await source.fetchThread("t1"); // two 403s absorbed
+    expect(thread.length).toBe(1);
+    expect(threadFailures).toBe(0);
+  });
+
+  test("a persistently dead transport exhausts the ladder and surfaces the original error", async () => {
+    let calls = 0;
+    const fetchImpl: FetchImpl = async (url) => {
+      if (url === TOKEN_URL) return jsonResponse({ access_token: "tok" });
+      calls += 1;
+      throw new Error("connection refused");
+    };
+    const source = gmailCrmMailSource({ configDir: credsDir("gmail-dead"), fetchImpl });
+    await expect(source.fetchThread("t1")).rejects.toThrow(/connection refused/);
+    expect(calls).toBe(6);
+  });
+
+  test("a definitive Gmail status fails immediately without retries", async () => {
+    let calls = 0;
+    const fetchImpl: FetchImpl = async (url) => {
+      if (url === TOKEN_URL) return jsonResponse({ access_token: "tok" });
+      calls += 1;
+      return jsonResponse({}, 404);
+    };
+    const source = gmailCrmMailSource({ configDir: credsDir("gmail-404"), fetchImpl });
+    await expect(source.fetchThread("gone")).rejects.toThrow(/HTTP 404/);
+    expect(calls).toBe(1);
   });
 
   test("token mint failures: HTTP error, missing token, transport error", async () => {

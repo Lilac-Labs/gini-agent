@@ -537,10 +537,14 @@ describe("cron lifecycle", () => {
 
     // Confirmation string contains the new job id, cadence, and the bound
     // session id so the model can reference both in its reply to the user.
+    // The id ALSO rides as the structured `jobId` field — the chat-task loop
+    // stamps it onto the tool_call block (the routine card's click target)
+    // instead of parsing it back out of the result string.
     if (result.kind === "sync") {
       expect(result.result).toContain(jobs[0]!.id);
       expect(result.result).toContain("one-shot");
       expect(result.result).toContain(sessionId);
+      expect(result.jobId).toBe(jobs[0]!.id);
     }
     // Audit row with actor:"agent" action:"job.created".
     const audit = stateAfter.audit.find(

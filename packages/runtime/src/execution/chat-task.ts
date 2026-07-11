@@ -3306,8 +3306,10 @@ async function runLoop(
           // block carrying a truncated preview of the dispatch result. An
           // agent-produced attachment reaches the user via a markdown ref the
           // model pastes into its reply (see ADR outbound-chat-attachments.md),
-          // so the tool_result block itself stays text-only.
-          emitToolCallStatus(emitCtx, { callId: call.id, status: "ok" });
+          // so the tool_result block itself stays text-only. `jobId` (set only
+          // by a create_job that created a job) rides onto the block so the
+          // routine card has a structured click target.
+          emitToolCallStatus(emitCtx, { callId: call.id, status: "ok", jobId: dispatch.jobId });
           emitToolResult(emitCtx, { callId: call.id, result: dispatch.result });
           // Mirror onto the legacy Task.recentToolCalls display payload so
           // clients still reading the task record (rather than the block

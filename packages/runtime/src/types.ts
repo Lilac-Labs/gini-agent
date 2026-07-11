@@ -438,6 +438,12 @@ export interface ToolCallBlock extends ChatBlockBase {
   // `running`, so resolution/error/cancellation collapse the block back
   // to its default render.
   runningHint?: string;
+  // Id of the scheduled job a successful `create_job` call created,
+  // stamped when the dispatch settles `ok`. Structured so clients can
+  // render the routine card and open its details panel without parsing
+  // the 80-char-truncated tool_result preview. Absent on failed calls,
+  // on every other tool, and on blocks predating the field.
+  jobId?: string;
 }
 
 export interface ToolResultBlock extends ChatBlockBase {

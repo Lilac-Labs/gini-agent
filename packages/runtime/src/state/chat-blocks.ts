@@ -195,6 +195,7 @@ function rowToBlock(row: ChatBlockRow): ChatBlock {
         errorSeverity: payload.errorSeverity === "info" || payload.errorSeverity === "error" ? payload.errorSeverity : undefined,
         callId: String(payload.callId ?? ""),
         runningHint: typeof payload.runningHint === "string" ? payload.runningHint : undefined,
+        jobId: typeof payload.jobId === "string" ? payload.jobId : undefined,
         ...(typeof payload.forwardedFromTopicId === "string"
           ? { forwardedFromTopicId: payload.forwardedFromTopicId }
           : {}),
@@ -349,6 +350,7 @@ function payloadFor(block: ChatBlock): string {
         errorSeverity: block.errorSeverity,
         callId: block.callId,
         runningHint: block.runningHint,
+        jobId: block.jobId,
         ...(block.forwardedFromTopicId ? { forwardedFromTopicId: block.forwardedFromTopicId } : {}),
         ...(block.forwardedFromTopicTitle ? { forwardedFromTopicTitle: block.forwardedFromTopicTitle } : {})
       });
@@ -473,6 +475,7 @@ export function insertChatBlock(
             errorSeverity: input.errorSeverity,
             callId: input.callId,
             runningHint: input.runningHint,
+            jobId: input.jobId,
             ...(input.forwardedFromTopicId ? { forwardedFromTopicId: input.forwardedFromTopicId } : {}),
             ...(input.forwardedFromTopicTitle ? { forwardedFromTopicTitle: input.forwardedFromTopicTitle } : {})
           };
@@ -882,6 +885,7 @@ export function updateToolCallBlock(
     errorMessage?: string;
     errorSeverity?: "info" | "error";
     runningHint?: string;
+    jobId?: string;
   },
   taskId?: string
 ): ChatBlock | null {
@@ -917,6 +921,7 @@ export function updateToolCallBlock(
   if (patch.status !== undefined) payload.status = patch.status;
   if (patch.errorMessage !== undefined) payload.errorMessage = patch.errorMessage;
   if (patch.errorSeverity !== undefined) payload.errorSeverity = patch.errorSeverity;
+  if (patch.jobId !== undefined) payload.jobId = patch.jobId;
   // Clear the running hint when the tool leaves the running state — the
   // amber waiting-card is only meaningful while we're still waiting.
   if (patch.runningHint !== undefined) payload.runningHint = patch.runningHint;

@@ -108,7 +108,12 @@ export type DispatchResult =
   // embedded IN `result` (`gini-upload://<id>`) that the model drops into its
   // reply where the picture belongs — there is no separate image channel. See
   // ADR outbound-chat-attachments.md.
-  | { kind: "sync"; result: string }
+  //
+  // `jobId` is set only by a create_job call that actually created a job: a
+  // structured copy of the new job's id so the chat-task loop can stamp it
+  // onto the tool_call block (the routine card's click target) without
+  // parsing it back out of `result`.
+  | { kind: "sync"; result: string; jobId?: string }
   | { kind: "pending"; approvalId: string };
 
 // Universal ceiling on a single tool result, mirroring Codex's per-call
@@ -179,8 +184,10 @@ export async function dispatchToolCall(
   messageHistory?: readonly unknown[]
 ): Promise<DispatchResult> {
   const result = await dispatchToolCallInner(config, taskId, toolName, toolCallId, rawArgs, messageHistory);
+  // Spread so structured side-channel fields (create_job's `jobId`) survive
+  // the cap rewrap.
   return result.kind === "sync"
-    ? { kind: "sync", result: capToolResultText(result.result, toolName) }
+    ? { ...result, result: capToolResultText(result.result, toolName) }
     : result;
 }
 
@@ -236,8 +243,10 @@ async function dispatchToolCallInner(
       return { kind: "sync", result: await spawnSubagentTool(config, taskId, args) };
     case "spawn_task":
       return { kind: "sync", result: await spawnTaskTool(config, taskId, args) };
-    case "create_job":
-      return { kind: "sync", result: await createJobTool(config, taskId, args) };
+    case "create_job": {
+      const created = await createJobTool(config, taskId, args);
+      return { kind: "sync", result: created.result, jobId: created.jobId };
+    }
     case "list_jobs":
       return { kind: "sync", result: await listJobsTool(config, taskId, args) };
     case "update_job":
@@ -1839,11 +1848,14 @@ function parseDeliveryTargets(config: RuntimeConfig, raw: unknown): string[] | u
 // when it fires. Low-risk: no approval gate, since reminders should not
 // pop a modal — the user can pause/delete the job at any time via /jobs.
 // We discover the originating session by walking task → run → conversation.
+// Returns the model-facing confirmation string plus, when a job was actually
+// created, its id as a structured field (see DispatchResult.jobId). The
+// race-skip early returns below carry no jobId — nothing was created.
 async function createJobTool(
   config: RuntimeConfig,
   taskId: string,
   args: Record<string, unknown>
-): Promise<string> {
+): Promise<{ result: string; jobId?: string }> {
   const name = requireString(args, "name");
   const prompt = requireString(args, "prompt");
   // Exactly one of (intervalSeconds, cronExpression) must drive the
@@ -1988,7 +2000,7 @@ async function createJobTool(
   // `createScheduledJob`'s `mutateState` is the authoritative
   // guard; this early-exit just avoids touching the lock.
   if (task && isTerminalTaskStatus(task.status)) {
-    return `Error: create_job skipped because task is already ${task.status}.`;
+    return { result: `Error: create_job skipped because task is already ${task.status}.` };
   }
   // The agent's caller is "chat-bound" when its task is attached to a run
   // whose conversation still exists. That originating conversation is the
@@ -2056,10 +2068,10 @@ async function createJobTool(
     });
   } catch (err) {
     if (err instanceof Error && err.message.startsWith("Cannot create scheduled job: parent task ")) {
-      return `Error: create_job skipped because parent task was cancelled between pre-check and job creation.`;
+      return { result: `Error: create_job skipped because parent task was cancelled between pre-check and job creation.` };
     }
     if (err instanceof Error && err.message.startsWith("Cannot create scheduled job: chat session ")) {
-      return `Error: create_job skipped because the originating chat session was deleted between pre-check and job creation.`;
+      return { result: `Error: create_job skipped because the originating chat session was deleted between pre-check and job creation.` };
     }
     throw err;
   }
@@ -2138,7 +2150,10 @@ async function createJobTool(
   // job id and the conversation each fire delivers into. Imperative/CLI
   // invocations skip this suffix — there's no chat to point at.
   const sessionSuffix = chatSessionId ? ` into ${chatSessionId}` : "";
-  return `Created job ${job.id} (\"${name}\"): ${cadence}, fires at ${job.nextRunAt}${sessionSuffix}.`;
+  return {
+    result: `Created job ${job.id} (\"${name}\"): ${cadence}, fires at ${job.nextRunAt}${sessionSuffix}.`,
+    jobId: job.id
+  };
 }
 
 // Read-only listing of scheduled jobs. Cheap, low-risk: just walks

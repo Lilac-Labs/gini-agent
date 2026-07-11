@@ -377,18 +377,24 @@ export function emitToolCallStatus(
     status: ToolCallStatus;
     errorMessage?: string;
     errorSeverity?: "info" | "error";
+    // Structured id of the job a successful create_job call created
+    // (DispatchResult.jobId) — stamped onto the block so the routine card
+    // never has to parse the truncated tool_result preview.
+    jobId?: string;
   }
 ): ChatBlock | undefined {
   if (!ctx) return undefined;
   const updated = updateToolCallBlock(ctx.instance, params.callId, ctx.sessionId, {
     status: params.status,
     errorMessage: params.errorMessage,
-    errorSeverity: params.errorSeverity
+    errorSeverity: params.errorSeverity,
+    jobId: params.jobId
   }, ctx.taskId);
   mirrorToolCallUpdate(ctx, params.callId, {
     status: params.status,
     errorMessage: params.errorMessage,
-    errorSeverity: params.errorSeverity
+    errorSeverity: params.errorSeverity,
+    jobId: params.jobId
   });
   return updated ?? undefined;
 }
@@ -516,6 +522,7 @@ function mirrorToolCallUpdate(
     errorMessage?: string;
     errorSeverity?: "info" | "error";
     runningHint?: string;
+    jobId?: string;
   }
 ): void {
   if (!ctx.forward) return;

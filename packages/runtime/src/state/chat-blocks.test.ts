@@ -184,6 +184,45 @@ describe("chat-blocks persistence", () => {
     }
   });
 
+  test("updateToolCallBlock stamps jobId on the ok flip and it survives rehydrate", () => {
+    const instance = "chat-blocks-toolcall-jobid";
+    // A create_job call that succeeded: the loop flips it `ok` with the new
+    // job's structured id (the routine card's click target). A second call
+    // that failed flips `error` with no jobId — the field must stay absent.
+    insertChatBlock(instance, {
+      kind: "tool_call",
+      sessionId: "chat_j",
+      toolName: "create_job",
+      displayLabel: "Create scheduled job",
+      argsPreview: "morning-brief",
+      argsFull: { name: "morning-brief" },
+      status: "running",
+      callId: "call_job_ok"
+    });
+    insertChatBlock(instance, {
+      kind: "tool_call",
+      sessionId: "chat_j",
+      toolName: "create_job",
+      displayLabel: "Create scheduled job",
+      argsPreview: "broken-brief",
+      argsFull: { name: "broken-brief" },
+      status: "running",
+      callId: "call_job_err"
+    });
+
+    const ok = updateToolCallBlock(instance, "call_job_ok", "chat_j", { status: "ok", jobId: "job_abc123" });
+    expect(ok?.kind === "tool_call" && ok.jobId).toBe("job_abc123");
+    updateToolCallBlock(instance, "call_job_err", "chat_j", { status: "error", errorMessage: "boom" });
+
+    // Rehydrated from the SQLite rows, not the in-memory return values.
+    const listed = listChatBlocks(instance, "chat_j");
+    const okRow = listed.find((b) => b.kind === "tool_call" && b.callId === "call_job_ok");
+    const errRow = listed.find((b) => b.kind === "tool_call" && b.callId === "call_job_err");
+    expect(okRow?.kind === "tool_call" && okRow.jobId).toBe("job_abc123");
+    expect(okRow?.kind === "tool_call" && okRow.status).toBe("ok");
+    expect(errRow?.kind === "tool_call" && errRow.jobId).toBeUndefined();
+  });
+
   test("updateToolCallBlock with taskId scopes to the owning turn — a stale settle can't hit a newer same-callId row", () => {
     const instance = "chat-blocks-toolcall-taskscope";
     // callId is NOT unique across turns: the codex text-backstop synthesizes a

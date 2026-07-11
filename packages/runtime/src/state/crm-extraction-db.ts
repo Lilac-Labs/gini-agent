@@ -23,6 +23,7 @@ export type CrmRunState = "idle" | "running" | "paused" | "disabled";
 
 export interface CrmQueueRow {
   thread_id: string;
+  account: string; // registry account id the thread belongs to; '' = legacy rows (primary account)
   message_count: number;
   newest_date: number;
   status: CrmThreadStatus;
@@ -52,6 +53,7 @@ export function getCrmExtractionDb(instance: Instance): Database {
   db.exec("PRAGMA synchronous = NORMAL");
   db.exec(`CREATE TABLE IF NOT EXISTS thread_queue (
     thread_id TEXT PRIMARY KEY,
+    account TEXT NOT NULL DEFAULT '',
     message_count INTEGER NOT NULL DEFAULT 0,
     newest_date INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
@@ -69,6 +71,8 @@ export function getCrmExtractionDb(instance: Instance): Database {
   // has_human: a human primary sender, or engagement, was the old
   // decide-phase proxy (re-ingest refines it on reopen). senders_counted:
   // any row that was ever ingested (message_count > 0) already contributed.
+  // account: '' = rows from the single-account era; the controller reads
+  // those as belonging to the primary account.
   const queueCols = new Set(
     db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('thread_queue')").all().map((c) => c.name)
   );
@@ -79,6 +83,9 @@ export function getCrmExtractionDb(instance: Instance): Database {
   if (!queueCols.has("senders_counted")) {
     db.exec("ALTER TABLE thread_queue ADD COLUMN senders_counted INTEGER NOT NULL DEFAULT 0");
     db.exec("UPDATE thread_queue SET senders_counted = CASE WHEN message_count > 0 OR status <> 'pending' THEN 1 ELSE 0 END");
+  }
+  if (!queueCols.has("account")) {
+    db.exec("ALTER TABLE thread_queue ADD COLUMN account TEXT NOT NULL DEFAULT ''");
   }
   // Sender behavior accumulated at ingest time; the behavioral broadcast
   // filter (≥3 threads, all single-message, user never wrote) reads these
@@ -145,29 +152,32 @@ export function setCrmRunState(instance: Instance, state: CrmRunState): void {
 
 // Idempotent enqueue: known threads keep their status; a finished thread
 // that GREW (a newer message arrived) is reopened as pending so the watcher
-// folds the new mail in.
+// folds the new mail in. `account` tags which mailbox the thread came from
+// (routing key for multi-account fetches); a reopen adopts the tag so
+// legacy '' rows heal on their first new mail.
 export function enqueueCrmThreads(
   instance: Instance,
   threads: { threadId: string; newestDate: number }[],
+  account = "",
 ): { added: number; reopened: number } {
   const db = getCrmExtractionDb(instance);
   const insert = db.prepare(
-    "INSERT OR IGNORE INTO thread_queue (thread_id, newest_date) VALUES (?, ?)",
+    "INSERT OR IGNORE INTO thread_queue (thread_id, account, newest_date) VALUES (?, ?, ?)",
   );
   const reopen = db.prepare(
-    `UPDATE thread_queue SET status = 'pending', newest_date = ?, error = NULL
+    `UPDATE thread_queue SET status = 'pending', account = ?, newest_date = ?, error = NULL
      WHERE thread_id = ? AND status IN ('done', 'skipped', 'error') AND newest_date < ?`,
   );
   let added = 0;
   let reopened = 0;
   const tx = db.transaction(() => {
     for (const t of threads) {
-      const r = insert.run(t.threadId, t.newestDate);
+      const r = insert.run(t.threadId, account, t.newestDate);
       if (r.changes > 0) {
         added += 1;
         continue;
       }
-      const u = reopen.run(t.newestDate, t.threadId, t.newestDate);
+      const u = reopen.run(account, t.newestDate, t.threadId, t.newestDate);
       if (u.changes > 0) reopened += 1;
     }
   });

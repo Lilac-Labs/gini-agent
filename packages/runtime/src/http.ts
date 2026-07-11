@@ -88,7 +88,7 @@ import { providerCatalogWithStatus, withProviderAuthStatus } from "./provider";
 import { buildModelCatalog } from "./model-routes";
 import { setDefaultModel } from "./runtime/default-model";
 import { archiveAgent, createAgent, deleteAgent, listAgents, renameAgent, setAgentMemory, setAgentProvider, unarchiveAgent, useAgent } from "./capabilities/agents";
-import { crmExtractionStatus, disableCrmExtraction, enableCrmExtraction, pauseCrmExtraction, startCrmExtraction } from "./jobs/crm-extractor";
+import { autostartCrmExtractionAfterOnboarding, crmExtractionStatus, disableCrmExtraction, enableCrmExtraction, pauseCrmExtraction, startCrmExtraction } from "./jobs/crm-extractor";
 import { createCrmContact, getCrmContact, listCrmContacts } from "./capabilities/crm-contacts";
 import {
   approveSoul,
@@ -2154,7 +2154,13 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       }
       const adopt = payload.adopt === true;
       try {
-        return json(await registerAccount({ tag, configDir, adopt }), 201);
+        const account = await registerAccount({ tag, configDir, adopt });
+        // A first mailbox just became reachable: kick the CRM extraction
+        // pipeline exactly like onboarding does. Self-guarding no-op when
+        // the pipeline has ever run (or is disabled), so re-registration
+        // and additional accounts never restart anything.
+        autostartCrmExtractionAfterOnboarding(config);
+        return json(account, 201);
       } catch (err) {
         return json({ error: err instanceof Error ? err.message : "Failed to register account" }, 400);
       }
@@ -2177,24 +2183,25 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       if (!clientId || !clientSecret || !refreshToken) {
         return json({ error: "Invalid input: clientId, clientSecret, and refreshToken are required" }, 400);
       }
-      return json(
-        await provisionAccount({
-          clientId,
-          clientSecret,
-          refreshToken,
-          email: optional(payload.email),
-          principal: optional(payload.principal),
-          tag: optional(payload.tag),
-          // A returning-primary sign-in re-auth (vs an add-account): heals the
-          // guest's baked credential rather than minting a duplicate.
-          primary: payload.primary === true,
-          // A sign-in-intent OAuth: the provisioned account becomes the
-          // persisted primary (distinct from `primary`, which only routes
-          // where the credential lands).
-          makePrimary: payload.makePrimary === true
-        }),
-        201
-      );
+      const provisioned = await provisionAccount({
+        clientId,
+        clientSecret,
+        refreshToken,
+        email: optional(payload.email),
+        principal: optional(payload.principal),
+        tag: optional(payload.tag),
+        // A returning-primary sign-in re-auth (vs an add-account): heals the
+        // guest's baked credential rather than minting a duplicate.
+        primary: payload.primary === true,
+        // A sign-in-intent OAuth: the provisioned account becomes the
+        // persisted primary (distinct from `primary`, which only routes
+        // where the credential lands).
+        makePrimary: payload.makePrimary === true
+      });
+      // Same kick as the manual-registration route: a never-run pipeline
+      // starts once a mailbox is reachable (no-op otherwise).
+      autostartCrmExtractionAfterOnboarding(config);
+      return json(provisioned, 201);
     }],
     // Runtime-owned same-tab Google login (loopback deployments; ADR
     // google-multi-account.md). Both routes are browser top-level navigations

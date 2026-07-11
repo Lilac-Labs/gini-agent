@@ -84,10 +84,22 @@ function handleFor(instance: Instance): ExtractorHandle {
 }
 
 // Test seam: closed-over sources by instance (fixture dirs in tests/dev).
-const sourceOverrides = new Map<Instance, CrmMailSource>();
+// The single-source form models one account ("fixture"); the plural form
+// models a multi-account registry.
+const sourceOverrides = new Map<Instance, CrmMailAccount[]>();
 export function __setCrmMailSourceForTests(instance: Instance, source: CrmMailSource | undefined): void {
-  if (source) sourceOverrides.set(instance, source);
+  if (source) sourceOverrides.set(instance, [{ accountId: "", email: getCrmMeta(instance, "self_email") ?? "user@example.com", source }]);
   else sourceOverrides.delete(instance);
+}
+export function __setCrmMailSourcesForTests(instance: Instance, accounts: CrmMailAccount[] | undefined): void {
+  if (accounts) sourceOverrides.set(instance, accounts);
+  else sourceOverrides.delete(instance);
+}
+
+export interface CrmMailAccount {
+  accountId: string; // '' = the legacy/single-source account (rows tagged '' route here)
+  email: string;
+  source: CrmMailSource;
 }
 
 export interface CrmExtractionStatus {
@@ -98,6 +110,7 @@ export interface CrmExtractionStatus {
   inFlightTurns: number;
   selfEmail: string | null;
   selfAddresses: string[];
+  accounts: Array<{ accountId: string; email: string; backfillSeeded: boolean; mailCursor: number | null }>;
   agentId: string | null;
   subagentId: string | null;
   source: "gmail" | "fixture" | null;
@@ -105,27 +118,50 @@ export interface CrmExtractionStatus {
   lastActivityAt: number | null;
 }
 
-function resolveMailSource(instance: Instance): { source: CrmMailSource; selfEmail: string } | undefined {
+// Every mailbox the user connected, deduped by email (two registry rows
+// carrying the same address must not double-process one mailbox). The first
+// entry is the PRIMARY (its email seeds the self row); extraction spans all
+// of them — the directory covers everything the user is reachable at.
+function resolveMailAccounts(instance: Instance): CrmMailAccount[] {
   const override = sourceOverrides.get(instance);
+  if (override) return override;
   const fixtureDir = getCrmMeta(instance, "fixture_dir") ?? process.env.GINI_CRM_FIXTURE_DIR;
-  const metaSelf = getCrmMeta(instance, "self_email");
-  if (override) return { source: override, selfEmail: metaSelf ?? "user@example.com" };
-  if (fixtureDir) return { source: fixtureCrmMailSource(fixtureDir), selfEmail: metaSelf ?? "user@example.com" };
-  const accounts = readGoogleAccounts();
-  if (accounts.length === 0) return undefined;
+  if (fixtureDir) {
+    return [{ accountId: "", email: getCrmMeta(instance, "self_email") ?? "user@example.com", source: fixtureCrmMailSource(fixtureDir) }];
+  }
+  const accounts = readGoogleAccounts().filter((a) => a.email);
+  if (accounts.length === 0) return [];
   const primaryId = readPrimaryGoogleAccountId();
-  const account = (primaryId ? accounts.find((a) => a.id === primaryId) : undefined) ?? accounts[0]!;
-  if (!account.email) return undefined;
-  return {
-    source: gmailCrmMailSource({ configDir: account.configDir }),
-    selfEmail: account.email.toLowerCase(),
-  };
+  const ordered = [...accounts].sort((a, b) => Number(b.id === primaryId) - Number(a.id === primaryId));
+  const seen = new Set<string>();
+  const out: CrmMailAccount[] = [];
+  for (const account of ordered) {
+    const email = account.email.toLowerCase();
+    if (seen.has(email)) continue;
+    seen.add(email);
+    out.push({ accountId: account.id, email, source: gmailCrmMailSource({ configDir: account.configDir }) });
+  }
+  return out;
 }
 
-function selfAddresses(instance: Instance, selfEmail: string): string[] {
+// The self set spans every connected address (speaking from ANY of the
+// user's accounts is the user speaking) plus operator-supplied extras.
+function selfAddresses(instance: Instance, accounts: CrmMailAccount[]): string[] {
   const extra = getCrmMeta(instance, "self_extra");
   const parsed = extra ? (JSON.parse(extra) as string[]) : [];
-  return [selfEmail, ...parsed];
+  const set = new Set<string>([...accounts.map((a) => a.email.toLowerCase()), ...parsed.map((e) => e.toLowerCase())]);
+  return [...set];
+}
+
+// Per-account seed flag + cursor. The single-account era used bare keys —
+// the '' accountId maps onto them, so an existing pipeline neither reseeds
+// nor loses its cursor when this code arrives (its rows and meta simply
+// belong to the '' pseudo-account until reopens re-tag them).
+function seededKey(accountId: string): string {
+  return accountId ? `backfill_seeded:${accountId}` : "backfill_seeded";
+}
+function cursorKey(accountId: string): string {
+  return accountId ? `mail_cursor:${accountId}` : "mail_cursor";
 }
 
 // The skill body embedded into every turn (saves the read_skill round trip;
@@ -221,7 +257,8 @@ async function runTurn(
   handle: ExtractorHandle,
   agentId: string,
   subagentId: string,
-  source: CrmMailSource,
+  accounts: CrmMailAccount[],
+  accountByThread: Map<string, string>,
   selfEmail: string,
   threadIds: string[],
 ): Promise<void> {
@@ -229,7 +266,8 @@ async function runTurn(
   try {
     const batch: { threadId: string; msgs: Awaited<ReturnType<CrmMailSource["fetchThread"]>> }[] = [];
     for (const threadId of threadIds) {
-      const msgs = await source.fetchThread(threadId);
+      const account = accountFor(accounts, accountByThread.get(threadId) ?? "");
+      const msgs = await account.source.fetchThread(threadId);
       if (msgs.length > 0) batch.push({ threadId, msgs });
     }
     if (batch.length === 0) {
@@ -302,45 +340,73 @@ async function runLoop(config: RuntimeConfig, handle: ExtractorHandle): Promise<
   }
 }
 
+// Route a queue row to the mailbox it came from. Rows tagged '' predate
+// multi-account (or came from the fixture) and belong to the primary.
+function accountFor(accounts: CrmMailAccount[], rowAccount: string): CrmMailAccount {
+  return accounts.find((a) => a.accountId === rowAccount) ?? accounts[0]!;
+}
+
+// A single-account pipeline that predates the per-account meta keys carries
+// bare backfill_seeded/mail_cursor entries; adopt them for the account so
+// its mailbox is not re-backfilled (a full re-run of curator turns).
+function adoptLegacyMeta(instance: Instance, account: CrmMailAccount): void {
+  if (!account.accountId) return; // '' IS the legacy key space
+  if (getCrmMeta(instance, seededKey(account.accountId)) !== undefined) return;
+  const legacySeeded = getCrmMeta(instance, "backfill_seeded");
+  if (legacySeeded === undefined) return;
+  setCrmMeta(instance, seededKey(account.accountId), legacySeeded);
+  const legacyCursor = getCrmMeta(instance, "mail_cursor");
+  if (legacyCursor !== undefined) setCrmMeta(instance, cursorKey(account.accountId), legacyCursor);
+  appendLog(instance, "crm.extraction.meta_adopted", { accountId: account.accountId });
+}
+
 // One pass of the phase machine. Returning (rather than looping internally)
 // keeps the stop/run-state checks and the crash fence in runLoop as the
-// single control point.
+// single control point. Sources are re-resolved every pass, so an account
+// connected while the pipeline runs gets its own backfill on the next
+// iteration — extraction always spans ALL of the user's mailboxes.
 async function runLoopIteration(config: RuntimeConfig, handle: ExtractorHandle): Promise<void> {
   const instance = config.instance;
-  const resolved = resolveMailSource(instance);
-  if (!resolved) {
+  const accounts = resolveMailAccounts(instance);
+  if (accounts.length === 0) {
     handle.lastError = "no mail source (connect a Google account)";
     await sleepUnlessStopped(handle, watcherIntervalMs());
     return;
   }
-  const { source, selfEmail } = resolved;
+  const primary = accounts[0]!;
+  adoptLegacyMeta(instance, primary);
   const agentId = owningAgentId(config);
-  const isSelf = makeSelfMatcher(selfAddresses(instance, selfEmail));
+  const isSelf = makeSelfMatcher(selfAddresses(instance, accounts));
 
-  // Phase 0 — backfill seeding, exactly once.
-  if (getCrmMeta(instance, "backfill_seeded") !== "1") {
-    const refs = await source.listMessages();
+  // Phase 0 — backfill seeding, exactly once per account.
+  for (const account of accounts) {
+    if (handle.stopRequested) return;
+    if (getCrmMeta(instance, seededKey(account.accountId)) === "1") continue;
+    const refs = await account.source.listMessages();
     const byThread = new Map<string, number>();
     for (const r of refs) byThread.set(r.threadId, Math.max(byThread.get(r.threadId) ?? 0, r.internalDate));
     enqueueCrmThreads(
       instance,
       [...byThread.entries()].map(([threadId, newestDate]) => ({ threadId, newestDate })),
+      account.accountId,
     );
     const cursor = Math.max(0, ...refs.map((r) => r.internalDate));
-    setCrmMeta(instance, "mail_cursor", String(cursor || Date.now()));
-    setCrmMeta(instance, "backfill_seeded", "1");
-    appendLog(instance, "crm.extraction.backfill_seeded", { threads: byThread.size, messages: refs.length });
+    setCrmMeta(instance, cursorKey(account.accountId), String(cursor || Date.now()));
+    setCrmMeta(instance, seededKey(account.accountId), "1");
+    appendLog(instance, "crm.extraction.backfill_seeded", {
+      accountId: account.accountId, email: account.email, threads: byThread.size, messages: refs.length,
+    });
     handle.lastActivityAt = Date.now();
     return;
   }
 
-  // Phase 1 — ingest: fetch + analyze pending threads.
+  // Phase 1 — ingest: fetch + analyze pending threads (routed per account).
   const pending = listCrmThreads(instance, ["pending"], 200);
   if (pending.length > 0) {
     await mapPool(pending, INGEST_CONCURRENCY, async (row) => {
       if (handle.stopRequested) return;
       try {
-        const msgs = await source.fetchThread(row.thread_id);
+        const msgs = await accountFor(accounts, row.account).source.fetchThread(row.thread_id);
         if (msgs.length === 0) {
           markCrmThreads(instance, [row.thread_id], { status: "skipped", error: "thread vanished from source" });
           return;
@@ -374,59 +440,81 @@ async function runLoopIteration(config: RuntimeConfig, handle: ExtractorHandle):
     }
     if (keeps.length > 0) {
       const subagent = await ensureCuratorSubagent(config, agentId);
-      seedSelfRow(instance, agentId, selfEmail);
+      seedSelfRow(instance, agentId, primary.email);
+      const accountByThread = new Map(keeps.map((r) => [r.thread_id, r.account]));
       const batches = batchByPrimary(
         keeps.map((r) => ({ threadId: r.thread_id, primarySender: r.primary_sender, chars: r.chars })),
       );
       appendLog(instance, "crm.extraction.wave", { threads: keeps.length, turns: batches.length });
       await mapPool(batches, TURN_WORKERS, async (batch) => {
         if (handle.stopRequested) return;
-        await runTurn(config, handle, agentId, subagent.id, source, selfEmail, batch);
+        await runTurn(config, handle, agentId, subagent.id, accounts, accountByThread, primary.email, batch);
       });
     }
     return;
   }
 
-  // Phase 3 — watcher: poll for new mail, then idle.
-  const cursor = Number(getCrmMeta(instance, "mail_cursor") ?? "0");
-  const refs = await source.listMessages(Math.max(0, cursor - WATCHER_OVERLAP_MS));
-  if (refs.length > 0) {
+  // Phase 3 — watcher: poll every mailbox for new mail, then idle.
+  let sawNew = false;
+  for (const account of accounts) {
+    if (handle.stopRequested) return;
+    const cursor = Number(getCrmMeta(instance, cursorKey(account.accountId)) ?? "0");
+    const refs = await account.source.listMessages(Math.max(0, cursor - WATCHER_OVERLAP_MS));
+    if (refs.length === 0) continue;
     const byThread = new Map<string, number>();
     for (const r of refs) byThread.set(r.threadId, Math.max(byThread.get(r.threadId) ?? 0, r.internalDate));
     const { added, reopened } = enqueueCrmThreads(
       instance,
       [...byThread.entries()].map(([threadId, newestDate]) => ({ threadId, newestDate })),
+      account.accountId,
     );
     const newest = Math.max(cursor, ...refs.map((r) => r.internalDate));
-    setCrmMeta(instance, "mail_cursor", String(newest));
+    setCrmMeta(instance, cursorKey(account.accountId), String(newest));
     if (added || reopened) {
-      appendLog(instance, "crm.extraction.watch", { added, reopened });
+      appendLog(instance, "crm.extraction.watch", { accountId: account.accountId, added, reopened });
       handle.lastActivityAt = Date.now();
-      return; // ingest the new arrivals immediately
+      sawNew = true;
     }
   }
+  if (sawNew) return; // ingest the new arrivals immediately
   await sleepUnlessStopped(handle, watcherIntervalMs());
 }
 
 export function crmExtractionStatus(config: RuntimeConfig): CrmExtractionStatus {
   const instance = config.instance;
   const handle = handleFor(instance);
-  const resolved = resolveMailSource(instance);
-  const cursor = getCrmMeta(instance, "mail_cursor");
+  const accounts = resolveMailAccounts(instance);
+  const primary = accounts[0];
+  const accountRows = accounts.map((a) => {
+    const cursor = getCrmMeta(instance, cursorKey(a.accountId));
+    return {
+      accountId: a.accountId,
+      email: a.email,
+      backfillSeeded: getCrmMeta(instance, seededKey(a.accountId)) === "1",
+      mailCursor: cursor ? Number(cursor) : null,
+    };
+  });
   const state = readState(instance);
   const agentId = state.agents.find((a) => a.id === "agent_default")?.id ?? state.activeAgentId ?? null;
   const subagent = state.subagents.find((s) => s.name === CRM_CURATOR_SUBAGENT_NAME);
+  const legacyCursor = getCrmMeta(instance, "mail_cursor");
   return {
     runState: getCrmRunState(instance),
     counts: crmQueueCounts(instance),
-    backfillSeeded: getCrmMeta(instance, "backfill_seeded") === "1",
-    mailCursor: cursor ? Number(cursor) : null,
+    // Aggregates keep their single-account meaning: seeded = every mailbox
+    // seeded; cursor = the oldest per-account cursor (the frontier the
+    // watcher is guaranteed to have covered everywhere).
+    backfillSeeded: accountRows.length > 0 && accountRows.every((a) => a.backfillSeeded),
+    mailCursor: accountRows.length > 0
+      ? Math.min(...accountRows.map((a) => a.mailCursor ?? 0)) || (legacyCursor ? Number(legacyCursor) : null)
+      : legacyCursor ? Number(legacyCursor) : null,
     inFlightTurns: handle.inFlightTurns,
-    selfEmail: resolved?.selfEmail ?? getCrmMeta(instance, "self_email") ?? null,
-    selfAddresses: resolved ? selfAddresses(instance, resolved.selfEmail) : [],
+    selfEmail: primary?.email ?? getCrmMeta(instance, "self_email") ?? null,
+    selfAddresses: accounts.length > 0 ? selfAddresses(instance, accounts) : [],
+    accounts: accountRows,
     agentId,
     subagentId: subagent?.id ?? null,
-    source: resolved?.source.kind ?? null,
+    source: primary?.source.kind ?? null,
     lastError: handle.lastError ?? null,
     lastActivityAt: handle.lastActivityAt ?? null,
   };
@@ -440,24 +528,28 @@ export async function startCrmExtraction(config: RuntimeConfig): Promise<CrmExtr
   if (getCrmRunState(instance) === "disabled") {
     throw new Error("Invalid input: CRM extraction is disabled — enable it first.");
   }
-  const resolved = resolveMailSource(instance);
-  if (!resolved) {
+  const accounts = resolveMailAccounts(instance);
+  if (accounts.length === 0) {
     // "Invalid input" prefix → the gateway maps this to HTTP 400.
     throw new Error("Invalid input: CRM extraction needs a connected Google account (or a fixture source).");
   }
+  const primary = accounts[0]!;
   // Setup first, state flip last: if any setup step throws, the pipeline
   // stays in its prior state instead of reporting "running" with no loop.
   const agentId = owningAgentId(config);
   await ensureCuratorSubagent(config, agentId);
-  seedSelfRow(instance, agentId, resolved.selfEmail);
-  setCrmMeta(instance, "self_email", resolved.selfEmail);
+  seedSelfRow(instance, agentId, primary.email);
+  setCrmMeta(instance, "self_email", primary.email);
   requeueCrmErrors(instance);
   setCrmRunState(instance, "running");
   const handle = handleFor(instance);
   handle.stopRequested = false;
   handle.lastError = undefined;
   if (!handle.loop) {
-    appendLog(instance, "crm.extraction.started", { source: resolved.source.kind, selfEmail: resolved.selfEmail });
+    appendLog(instance, "crm.extraction.started", {
+      source: primary.source.kind,
+      accounts: accounts.map((a) => a.email),
+    });
     handle.loop = runLoop(config, handle);
   }
   return crmExtractionStatus(config);
@@ -514,8 +606,7 @@ export function reconcileCrmExtraction(config: RuntimeConfig): void {
 // onboarding path.
 export function autostartCrmExtractionAfterOnboarding(config: RuntimeConfig): void {
   if (getCrmRunState(config.instance) !== "idle") return;
-  const resolved = resolveMailSource(config.instance);
-  if (!resolved) return;
+  if (resolveMailAccounts(config.instance).length === 0) return;
   void startCrmExtraction(config).catch((error) => {
     appendLog(config.instance, "crm.extraction.autostart_failed", {
       error: error instanceof Error ? error.message : String(error),

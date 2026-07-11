@@ -88,8 +88,19 @@ and a dedicated queue store (`state/crm-extraction-db.ts`,
 (`pending → ingested → done | skipped | error`), sender behavior aggregates,
 and the persisted run state + mail cursor.
 
-- **Loop phases.** (0) one-time backfill seed: full mailbox list → thread
-  queue + `mail_cursor`; (1) ingest: fetch+analyze pending threads, 8-way;
+- **Multi-account.** Extraction spans EVERY connected Google account
+  (deduped by email; primary first). Each mailbox has its own backfill flag
+  and watcher cursor (`backfill_seeded:<accountId>` / `mail_cursor:<id>`;
+  the single-account era's bare keys are adopted by the primary so existing
+  pipelines never re-backfill), queue rows carry the owning account for
+  fetch routing ('' = legacy → primary), and the self set spans all account
+  emails — the user speaking from any of their addresses is engagement.
+  Sources are re-resolved every loop pass, so an account connected while
+  the pipeline runs gets its own backfill on the next iteration; account
+  registration/provisioning also kick the onboarding autostart for
+  never-run pipelines.
+- **Loop phases.** (0) one-time backfill seed per account: full mailbox
+  list → thread queue + cursor; (1) ingest: fetch+analyze pending threads, 8-way;
   (2) decide + turns: engaged-only keep/skip with the behavioral broadcast
   rule, primary-correspondent batching, 16 turn workers, 240s turn timeout
   retried once (never after a pause/disable — "nothing new dispatches" is

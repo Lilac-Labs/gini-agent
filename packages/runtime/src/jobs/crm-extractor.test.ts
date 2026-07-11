@@ -7,6 +7,7 @@ import { rmSync } from "node:fs";
 import {
   __awaitCrmLoopExitForTests,
   __setCrmMailSourceForTests,
+  __setCrmMailSourcesForTests,
   CRM_CURATOR_SUBAGENT_NAME,
   autostartCrmExtractionAfterOnboarding,
   crmExtractionStatus,
@@ -18,7 +19,7 @@ import {
 } from "./crm-extractor";
 import type { CrmMail } from "./crm-extraction-pipeline";
 import type { CrmMailSource } from "../integrations/crm-mail";
-import { crmQueueCounts, listCrmThreads, setCrmMeta, setCrmRunState, closeAllCrmExtractionDbs, getCrmRunState } from "../state/crm-extraction-db";
+import { crmQueueCounts, enqueueCrmThreads, listCrmThreads, markCrmThreads, setCrmMeta, setCrmRunState, closeAllCrmExtractionDbs, getCrmRunState } from "../state/crm-extraction-db";
 import { closeAllAgentDataDbs, dbExecute, dbQuery } from "../state/agent-data-db";
 import { closeAllMemoryDbs, mutateState, readState, readTrace } from "../state";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -323,6 +324,166 @@ describe("crm-extractor", () => {
     await pauseCrmExtraction(config);
     await __awaitCrmLoopExitForTests(instance);
   }, 30_000);
+
+  test("multi-account: every mailbox is backfilled, engagement spans all self addresses, and a mid-run account joins", async () => {
+    const instance = "crmx-multi";
+    const config = makeConfig(instance);
+    await install(config);
+    setEchoToolCallingResponse({ provider: normalizeProvider(config.provider), text: "ok", toolCalls: [], finishReason: "stop" });
+    const WORK = "me@corp.io";
+    const SIDE = "me@side.dev";
+    // Mailbox A (work): a friend thread the user answered FROM THE SIDE
+    // ADDRESS — only a multi-account self set counts that as engaged.
+    const workMail = [
+      mail({ id: "w1", threadId: "T-work", date: 1_000, from: { address: "friend@x.com" }, to: [{ address: WORK }] }),
+      mail({ id: "w2", threadId: "T-work", date: 2_000, from: { address: SIDE }, to: [{ address: "friend@x.com" }] }),
+    ];
+    // Mailbox B (side): its own engaged thread.
+    const sideMail = [
+      mail({ id: "s1", threadId: "T-side", date: 3_000, from: { address: SIDE }, to: [{ address: "pal@z.com" }] }),
+    ];
+    const workSource = mutableSource(workMail);
+    const sideSource = mutableSource(sideMail);
+    __setCrmMailSourcesForTests(instance, [
+      { accountId: "gacct_work", email: WORK, source: workSource },
+      { accountId: "gacct_side", email: SIDE, source: sideSource },
+    ]);
+
+    const started = await startCrmExtraction(config);
+    expect(started.selfEmail).toBe(WORK); // first account is primary
+    expect(started.selfAddresses.sort()).toEqual([WORK, SIDE].sort());
+    expect(started.accounts.map((a) => a.accountId)).toEqual(["gacct_work", "gacct_side"]);
+
+    await until("both mailboxes drain", () => crmQueueCounts(instance).done === 2);
+    const rows = listCrmThreads(instance, ["done"]);
+    expect(rows.find((r) => r.thread_id === "T-work")!.account).toBe("gacct_work");
+    expect(rows.find((r) => r.thread_id === "T-side")!.account).toBe("gacct_side");
+    // Cross-account engagement: T-work was kept (user replied from SIDE).
+    expect(rows.find((r) => r.thread_id === "T-work")!.engaged).toBe(1);
+    // Per-account seed flags + cursors.
+    const status = crmExtractionStatus(config);
+    expect(status.backfillSeeded).toBe(true);
+    expect(status.accounts.every((a) => a.backfillSeeded)).toBe(true);
+
+    // A third account connects while the pipeline runs: the loop discovers
+    // it on the next pass and backfills ONLY that mailbox.
+    const NEW = "me@new.org";
+    const newSource = mutableSource([
+      mail({ id: "n1", threadId: "T-new-acct", date: Date.now(), from: { address: NEW }, to: [{ address: "fresh@q.com" }] }),
+    ]);
+    __setCrmMailSourcesForTests(instance, [
+      { accountId: "gacct_work", email: WORK, source: workSource },
+      { accountId: "gacct_side", email: SIDE, source: sideSource },
+      { accountId: "gacct_new", email: NEW, source: newSource },
+    ]);
+    await until("new account's mailbox processed by the running loop", () => crmQueueCounts(instance).done === 3);
+    expect(listCrmThreads(instance, ["done"]).find((r) => r.thread_id === "T-new-acct")!.account).toBe("gacct_new");
+
+    // Watcher: new mail lands in mailbox B only — its cursor advances and
+    // the thread reopens; mailbox A is untouched.
+    sideMail.push(mail({ id: "s2", threadId: "T-side", date: Date.now() + 1_000, from: { address: "pal@z.com" }, to: [{ address: SIDE }] }));
+    await until("side thread reopened and reprocessed", () => {
+      const row = listCrmThreads(instance, ["done"]).find((r) => r.thread_id === "T-side");
+      return !!row && row.attempts >= 2;
+    });
+
+    await pauseCrmExtraction(config);
+    await __awaitCrmLoopExitForTests(instance);
+    __setCrmMailSourcesForTests(instance, undefined);
+  }, 60_000);
+
+  test("multi-account: duplicate registry emails collapse to one mailbox", async () => {
+    const instance = "crmx-multi-dup";
+    const config = makeConfig(instance);
+    await install(config);
+    const source = mutableSource([]);
+    __setCrmMailSourcesForTests(instance, [
+      { accountId: "gacct_a", email: "same@x.io", source },
+      { accountId: "gacct_b", email: "SAME@x.io", source },
+    ]);
+    // The override seam bypasses registry dedup, so exercise the status
+    // surface via the real resolver path instead: registry rows with the
+    // same email (different case) yield ONE account.
+    __setCrmMailSourcesForTests(instance, undefined);
+    const prevHome = process.env.HOME;
+    const home = `${ROOT}/dup-home`;
+    const registryDir = join(home, ".gini", "google-accounts");
+    mkdirSync(registryDir, { recursive: true });
+    writeFileSync(
+      join(registryDir, "accounts.json"),
+      JSON.stringify({
+        version: 1,
+        accounts: [
+          { id: "gacct_a", tag: "a", email: "same@x.io", configDir: `${home}/a`, addedAt: "2026-01-01T00:00:00Z" },
+          { id: "gacct_b", tag: "b", email: "SAME@x.io", configDir: `${home}/b`, addedAt: "2026-01-02T00:00:00Z" },
+          { id: "gacct_c", tag: "c", email: "other@y.io", configDir: `${home}/c`, addedAt: "2026-01-03T00:00:00Z" },
+        ],
+        primaryAccountId: "gacct_b",
+      }),
+    );
+    process.env.HOME = home;
+    try {
+      const status = crmExtractionStatus(config);
+      // Primary-first ordering, case-insensitive email dedup: gacct_b wins
+      // its email, gacct_a is dropped, gacct_c remains.
+      expect(status.accounts.map((a) => a.accountId)).toEqual(["gacct_b", "gacct_c"]);
+      expect(status.selfEmail).toBe("same@x.io");
+      expect(status.selfAddresses.sort()).toEqual(["other@y.io", "same@x.io"]);
+    } finally {
+      process.env.HOME = prevHome;
+    }
+  });
+
+  test("a single-account-era pipeline adopts its bare meta instead of re-backfilling", async () => {
+    const instance = "crmx-legacy-meta";
+    const config = makeConfig(instance);
+    await install(config);
+    setEchoToolCallingResponse({ provider: normalizeProvider(config.provider), text: "ok", toolCalls: [], finishReason: "stop" });
+    // Single-account era state: bare keys, '' rows, everything done.
+    setCrmMeta(instance, "self_email", SELF);
+    setCrmMeta(instance, "backfill_seeded", "1");
+    setCrmMeta(instance, "mail_cursor", String(Date.now()));
+    enqueueCrmThreads(instance, [{ threadId: "T-old", newestDate: 1_000 }]);
+    markCrmThreads(instance, ["T-old"], { status: "done", taskId: "task_old" });
+    let fullLists = 0;
+    __setCrmMailSourcesForTests(instance, [{
+      accountId: "gacct_now",
+      email: SELF,
+      source: {
+        kind: "gmail",
+        async listMessages(afterMs?: number) {
+          if (afterMs === undefined) fullLists += 1;
+          return [];
+        },
+        async fetchThread() {
+          return [];
+        },
+      },
+    }]);
+    await startCrmExtraction(config);
+    await until("meta adopted for the account", () => crmExtractionStatus(config).accounts[0]?.backfillSeeded === true);
+    await Bun.sleep(300); // several loop passes
+    expect(fullLists).toBe(0); // never re-listed the whole mailbox
+    expect(crmQueueCounts(instance).done).toBe(1); // done work untouched
+    await pauseCrmExtraction(config);
+    await __awaitCrmLoopExitForTests(instance);
+    __setCrmMailSourcesForTests(instance, undefined);
+  }, 30_000);
+
+  test("a fixture_dir meta entry resolves as the single fixture account", async () => {
+    const instance = "crmx-fixture-meta";
+    const config = makeConfig(instance);
+    await install(config);
+    const dir = `${ROOT}/fixture-meta`;
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "messages.json"), "[]");
+    setCrmMeta(instance, "fixture_dir", dir);
+    setCrmMeta(instance, "self_email", SELF);
+    const status = crmExtractionStatus(config);
+    expect(status.source).toBe("fixture");
+    expect(status.selfEmail).toBe(SELF);
+    expect(status.accounts).toEqual([{ accountId: "", email: SELF, backfillSeeded: false, mailCursor: null }]);
+  });
 
   test("resolves the connected Google account from the machine registry", async () => {
     const instance = "crmx-gmail-resolve";

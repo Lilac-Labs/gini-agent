@@ -4,6 +4,7 @@ import { useCallback, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import { TopicPanel } from "@/components/chat/TopicPanel";
 import { TopicPanelContext } from "@/components/chat/TopicPanelContext";
+import { RoutineDetailsPanel } from "@/components/jobs/RoutineDetailsPanel";
 import { Greeting } from "@/components/home/Greeting";
 import { HomeComposer } from "@/components/home/HomeComposer";
 import { HomeTaskList } from "@/components/home/HomeTaskList";
@@ -56,7 +57,11 @@ export default function HomePage() {
             <RecentsList />
           </div>
         </div>
-        {panelSessionId ? <TopicPanel topicId={panelSessionId} /> : null}
+        {panelSessionId ? (
+          <TopicPanel topicId={panelSessionId} />
+        ) : panelJobId ? (
+          <RoutineDetailsPanel jobId={panelJobId} />
+        ) : null}
       </div>
     </TopicPanelContext.Provider>
   );

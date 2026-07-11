@@ -7,6 +7,7 @@ import { ChatTabBar } from "@/components/chat/ChatTabBar";
 import { ChatSurface, useChannelSession } from "@/components/chat/ChatSurface";
 import { TopicPanel } from "@/components/chat/TopicPanel";
 import { TopicPanelProvider, useTopicPanel } from "@/components/chat/TopicPanelContext";
+import { RoutineDetailsPanel } from "@/components/jobs/RoutineDetailsPanel";
 import { useAgentChat, useStatus } from "@/lib/queries";
 import type { ChatSession } from "@/lib/view-types";
 
@@ -79,11 +80,11 @@ function ChatPageBody() {
       : undefined;
   const resolving = !sessionId && (pinnedSessionId ? !pinnedSession : agentChat.isLoading);
 
-  // The forwarded-Topic drawer. When set (a chip's "View topic →" was clicked)
-  // the panel renders to the right of the main chat without touching the URL or
-  // unmounting it. A pinned `?session=` topic surface never opens its own panel
-  // over itself.
-  const { openTopicId } = useTopicPanel()!;
+  // The forwarded-Topic drawer / routine details panel (one slot). When set
+  // (a chip's "View topic →" or a routine card was clicked) the panel renders
+  // to the right of the main chat without touching the URL or unmounting it.
+  // A pinned `?session=` topic surface never opens its own panel over itself.
+  const { openTopicId, openRoutineJobId } = useTopicPanel()!;
   const panelTopicId = !isTopic && openTopicId ? openTopicId : null;
 
   // Redirecting (see the effect above) — render nothing for the frame.
@@ -115,7 +116,11 @@ function ChatPageBody() {
           activeAgentId={activeAgentId}
         />
       )}
-      {panelTopicId ? <TopicPanel topicId={panelTopicId} /> : null}
+      {panelTopicId ? (
+        <TopicPanel topicId={panelTopicId} />
+      ) : openRoutineJobId ? (
+        <RoutineDetailsPanel jobId={openRoutineJobId} />
+      ) : null}
     </div>
   );
 }

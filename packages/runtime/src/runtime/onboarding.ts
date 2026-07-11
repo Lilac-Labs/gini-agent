@@ -22,15 +22,12 @@
 // events stream (the browser is notified instead of polling). Validation
 // errors throw with the "Invalid input:" prefix the gateway maps to a 400.
 
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-
 import { resolveEffectiveContext } from "../execution/effective-context";
 import { assertSkillNamesResolve, removeJob } from "../jobs";
 import { autostartCrmExtractionAfterOnboarding } from "../jobs/crm-extractor";
 import { appendEvent, mutateState, readState } from "../state";
-import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../state/google-accounts";
+import { getGoogleAccountBindings } from "../state/google-account-bindings";
+import { readGoogleAccounts } from "../state/google-accounts";
 import { now } from "../state/ids";
 import { defaultOnboardingRecord, readOnboarding, writeOnboarding } from "../state/onboarding";
 import { runProfileScan } from "./onboarding-scan";
@@ -153,14 +150,14 @@ export async function startOnboardingScan(config: RuntimeConfig): Promise<Onboar
   const record = getOnboarding(config);
   if (record.completed) return record;
   if (record.scan.status === "running" || record.scan.status === "ready") return record;
-  if (!hasGoogleAccess()) {
+  if (!hasGoogleAccess(config)) {
     record.scan = { status: "no_account" };
     writeOnboarding(config.instance, record);
     return record;
   }
   record.scan = { status: "running", startedAt: now() };
   writeOnboarding(config.instance, record);
-  const configDir = resolveScanConfigDir();
+  const configDir = resolveScanConfigDir(config);
   // Fire-and-forget: run the pipeline off the request, then finalize. Any
   // pipeline fault already resolves inside runProfileScan (never throws); the
   // extra .catch is belt-and-suspenders so an unexpected throw still finalizes.
@@ -196,32 +193,24 @@ function finalizeScan(config: RuntimeConfig, outcome: { status: "ready"; profile
   });
 }
 
-// Whether ANY Gmail credential is plausibly present: a registered account in
-// the machine-global registry (ADR google-multi-account.md), the hosted
-// provisioning credentials file, or a legacy default ~/.config/gws session
-// dir. Presence-only — sign-in liveness is the pipeline's problem.
-function hasGoogleAccess(): boolean {
-  if (readGoogleAccounts().length > 0) return true;
-  if (process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE) return true;
-  const home = process.env.HOME || homedir();
-  return existsSync(join(home, ".config", "gws"));
+// Whether this instance has a Google account selected for onboarding. The
+// machine-global registry may hold reusable credentials, but a fresh instance
+// must not scan an account until the user signs into this instance.
+function hasGoogleAccess(config: RuntimeConfig): boolean {
+  return Boolean(resolveScanConfigDir(config));
 }
 
 // The gws config dir the scan should target: the persisted primary account's
-// dir when it still names a registered row, else the first provisioned row,
-// else the first row, else undefined (default gws — the hosted baked credential
-// or a legacy ~/.config/gws session, both read without a config dir). Mirrors
-// effectivePrimaryAccountId's precedence but stays registry-only (no gws probe)
-// so kicking the scan off is cheap; the pipeline's own credential export +
-// token mint is the liveness gate.
-function resolveScanConfigDir(): string | undefined {
+// dir when it still names a registered row. Machine-global credentials are not
+// enough: a fresh local instance must not scan whatever Gmail account happens
+// to exist in ~/.gini/google-accounts or ~/.config/gws.
+function resolveScanConfigDir(config: RuntimeConfig): string | undefined {
   const accounts = readGoogleAccounts();
   if (accounts.length === 0) return undefined;
-  const persisted = readPrimaryGoogleAccountId();
-  const primary =
-    (persisted ? accounts.find((a) => a.id === persisted) : undefined) ??
-    accounts.find((a) => a.provisioned) ??
-    accounts[0];
+  const bindings = getGoogleAccountBindings(config.instance);
+  const primary = bindings.primaryAccountId
+    ? accounts.find((account) => account.id === bindings.primaryAccountId)
+    : undefined;
   return primary?.configDir;
 }
 

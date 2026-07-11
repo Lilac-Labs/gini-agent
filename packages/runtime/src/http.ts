@@ -61,7 +61,7 @@ import { buildNotificationPreview, type PreviewEvent } from "./integrations/apns
 import { dailyUsage, homeView, mobileBootstrap, publicState } from "./runtime/views";
 import { checkConnector, createConnector, credentialTemplateForProvider, deleteConnector, firstUngrantedCredential, isSkillActive, updateConnector } from "./integrations/connectors";
 import { gwsSessionStatus } from "./integrations/connectors/gws-session";
-import { googleAuthMode, listAccountsWithStatus, provisionAccount, registerAccount, removeAccount, retagAccount } from "./integrations/connectors/google-accounts";
+import { detachInstanceGoogleAccount, googleAuthMode, listAccountsWithStatus, provisionAccount, registerAccount, removeAccount, retagAccount, signOutInstanceGoogleAccounts, useAccountForInstance } from "./integrations/connectors/google-accounts";
 import { handleGoogleLoginWebCallback, startGoogleLoginWeb } from "./integrations/connectors/google-login-web";
 import { getGoogleAccount, googleAccountsRoot } from "./state/google-accounts";
 import { listProviders } from "./integrations/connectors/registry";
@@ -2129,11 +2129,11 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // On-demand auto-detection — Skills page "Refresh detection" button
     // calls this. Same job that runs at gateway startup; idempotent.
     ["POST", /^\/api\/connectors\/detect$/, async () => json(await runConnectorDetection(config))],
-    // Machine-global tagged Google accounts (multi-account support). The
-    // registry + per-account gws config dirs live under ~/.gini/google-accounts;
-    // these routes are NOT instance-scoped. registerAccount throws
-    // "No signed-in Google session in <dir>" when the dir has no live session.
-    ["GET", /^\/api\/google\/accounts$/, async () => json(await listAccountsWithStatus())],
+    // Machine-global tagged Google credentials (multi-account support), joined
+    // with this instance's sign-in binding. Credential dirs live under
+    // ~/.gini/google-accounts; primary/attached state lives under
+    // ~/.gini/instances/<instance>/google-account-bindings.json.
+    ["GET", /^\/api\/google\/accounts$/, async () => json(await listAccountsWithStatus(config.instance))],
     ["POST", /^\/api\/google\/accounts$/, async (request) => {
       const payload = await body(request);
       // tag is optional: registerAccount defaults a missing one from the live
@@ -2155,14 +2155,21 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       const adopt = payload.adopt === true;
       try {
         const account = await registerAccount({ tag, configDir, adopt });
-        // A first mailbox just became reachable: kick the CRM extraction
-        // pipeline exactly like onboarding does. Self-guarding no-op when
-        // the pipeline has ever run (or is disabled), so re-registration
-        // and additional accounts never restart anything.
+        // If this registration makes an instance-bound mailbox reachable, kick
+        // the CRM extraction pipeline. Global-only registration remains a no-op.
         autostartCrmExtractionAfterOnboarding(config);
         return json(account, 201);
       } catch (err) {
         return json({ error: err instanceof Error ? err.message : "Failed to register account" }, 400);
+      }
+    }],
+    ["POST", /^\/api\/google\/accounts\/([^/]+)\/use$/, async (_request, params) => {
+      try {
+        return json(await useAccountForInstance(config.instance, params[0]));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to use account";
+        const status = message.includes("not found") ? 404 : 400;
+        return json({ error: message }, status);
       }
     }],
     // Hosted-edge account provisioning (ADR google-multi-account.md): the edge
@@ -2196,12 +2203,17 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
         // A sign-in-intent OAuth: the provisioned account becomes the
         // persisted primary (distinct from `primary`, which only routes
         // where the credential lands).
-        makePrimary: payload.makePrimary === true
+        makePrimary: payload.makePrimary === true,
+        instance: config.instance
       });
       // Same kick as the manual-registration route: a never-run pipeline
       // starts once a mailbox is reachable (no-op otherwise).
       autostartCrmExtractionAfterOnboarding(config);
       return json(provisioned, 201);
+    }],
+    ["POST", /^\/api\/google\/session\/signout$/, () => {
+      signOutInstanceGoogleAccounts(config.instance);
+      return json({ ok: true });
     }],
     // Runtime-owned same-tab Google login (loopback deployments; ADR
     // google-multi-account.md). Both routes are browser top-level navigations
@@ -2253,6 +2265,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     }],
     ["DELETE", /^\/api\/google\/accounts\/([^/]+)$/, (_request, params) => {
       removeAccount(params[0]);
+      detachInstanceGoogleAccount(config.instance, params[0]);
       return json({ id: params[0] });
     }],
     ["GET", /^\/api\/improvements$/, () => json(readState(config.instance).improvements)],

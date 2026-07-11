@@ -14,11 +14,17 @@ import {
   ensureHostedPrimaryAccount,
   googleAuthMode,
   listAccountsWithStatus,
+  normalizeHostedGwsEnv,
   provisionAccount,
   registerAccount,
-  removeAccount
+  removeAccount,
+  retagAccount,
+  signOutInstanceGoogleAccounts,
+  useAccountForInstance
 } from "./google-accounts";
 import type { GwsSessionStatus } from "./gws-session";
+import { attachGoogleAccountToInstance, getGoogleAccountBindings } from "../../state/google-account-bindings";
+import { defaultOnboardingRecord, writeOnboarding } from "../../state/onboarding";
 import {
   configDirForAccount,
   googleAccountsRoot,
@@ -29,6 +35,7 @@ import {
 
 let scratchHome: string;
 let prevHome: string | undefined;
+let prevStateRoot: string | undefined;
 let prevHosted: string | undefined;
 let prevCredentialsFile: string | undefined;
 
@@ -36,8 +43,12 @@ beforeEach(() => {
   scratchHome = mkdtempSync(join(tmpdir(), "gini-gaccts-orch-"));
   prevHome = process.env.HOME;
   process.env.HOME = scratchHome;
-  // The hosted markers drive googleAuthMode/ensureHostedPrimaryAccount; clear
-  // them so each test states exactly the environment it needs.
+  prevStateRoot = process.env.GINI_STATE_ROOT;
+  process.env.GINI_STATE_ROOT = join(scratchHome, "state");
+  // The hosted markers drive googleAuthMode/ensureHostedPrimaryAccount/
+  // hostedPrimaryConfigDir; clear them so each test states exactly the
+  // environment it needs (CONFIG_DIR is now the primary-dir source, so a leak
+  // would silently misroute the primary in another test).
   prevHosted = process.env.GINI_HOSTED;
   prevCredentialsFile = process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
   delete process.env.GINI_HOSTED;
@@ -47,6 +58,8 @@ beforeEach(() => {
 afterEach(() => {
   if (prevHome === undefined) delete process.env.HOME;
   else process.env.HOME = prevHome;
+  if (prevStateRoot === undefined) delete process.env.GINI_STATE_ROOT;
+  else process.env.GINI_STATE_ROOT = prevStateRoot;
   if (prevHosted === undefined) delete process.env.GINI_HOSTED;
   else process.env.GINI_HOSTED = prevHosted;
   if (prevCredentialsFile === undefined) delete process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
@@ -316,7 +329,33 @@ describe("listAccountsWithStatus", () => {
     expect(await listAccountsWithStatus({ statusForDir: async () => signedOut() })).toEqual([]);
   });
 
-  test("marks the persisted primary row primary:true and no other", async () => {
+  test("a fresh instance with global accounts has no primary", async () => {
+    await registerAccount(
+      { tag: "personal", configDir: "/tmp/gws-personal" },
+      { statusForDir: async () => signedIn("me@example.com") }
+    );
+
+    const list = await listAccountsWithStatus("fresh", { statusForDir: async () => signedOut() });
+    expect(list[0]?.primary).toBeUndefined();
+    expect(list[0]?.attached).toBeUndefined();
+  });
+
+  test("completed legacy instances adopt the old global primary once", async () => {
+    const account = await registerAccount(
+      { tag: "personal", configDir: "/tmp/gws-personal" },
+      { statusForDir: async () => signedIn("me@example.com") }
+    );
+    setPrimaryGoogleAccountId(account.id);
+    writeOnboarding("legacy", { ...defaultOnboardingRecord(), completed: true });
+
+    const list = await listAccountsWithStatus("legacy", { statusForDir: async () => signedOut() });
+
+    expect(list[0]?.primary).toBe(true);
+    expect(list[0]?.attached).toBe(true);
+    expect(getGoogleAccountBindings("legacy").legacyPrimaryMigratedAt).toBeDefined();
+  });
+
+  test("marks the instance-bound primary row primary:true and no other", async () => {
     await registerAccount(
       { tag: "personal", configDir: "/tmp/gws-personal" },
       { statusForDir: async () => signedIn("me@example.com") }
@@ -325,20 +364,22 @@ describe("listAccountsWithStatus", () => {
       { tag: "work", configDir: "/tmp/gws-work" },
       { statusForDir: async () => signedIn("work@corp.com") }
     );
-    setPrimaryGoogleAccountId(work.id);
+    attachGoogleAccountToInstance("inst-a", work, { primary: true });
 
-    const list = await listAccountsWithStatus({ statusForDir: async () => signedOut() });
+    const list = await listAccountsWithStatus("inst-a", { statusForDir: async () => signedOut() });
     expect(list.find((a) => a.tag === "work")?.primary).toBe(true);
+    expect(list.find((a) => a.tag === "work")?.attached).toBe(true);
     expect(list.find((a) => a.tag === "personal")?.primary).toBeUndefined();
   });
 
-  test("no persisted primary → the provisioned row, else the first row, is primary", async () => {
+  test("without an instance, listing does not infer primary from global registry", async () => {
     const first = await registerAccount(
       { tag: "personal", configDir: "/tmp/gws-personal" },
       { statusForDir: async () => signedIn("me@example.com") }
     );
     let list = await listAccountsWithStatus({ statusForDir: async () => signedOut() });
-    expect(list.find((a) => a.id === first.id)?.primary).toBe(true);
+    expect(list.find((a) => a.id === first.id)?.primary).toBeUndefined();
+    expect(effectivePrimaryAccountId()).toBe(first.id);
 
     const provisioned = await registerAccount({
       tag: "workspace",
@@ -346,7 +387,8 @@ describe("listAccountsWithStatus", () => {
       trusted: true
     });
     list = await listAccountsWithStatus({ statusForDir: async () => signedOut() });
-    expect(list.find((a) => a.id === provisioned.id)?.primary).toBe(true);
+    expect(effectivePrimaryAccountId()).toBe(provisioned.id);
+    expect(list.find((a) => a.id === provisioned.id)?.primary).toBeUndefined();
     expect(list.find((a) => a.id === first.id)?.primary).toBeUndefined();
   });
 
@@ -358,7 +400,7 @@ describe("listAccountsWithStatus", () => {
     setPrimaryGoogleAccountId("gacct_gone");
     expect(effectivePrimaryAccountId()).toBe(account.id);
     const list = await listAccountsWithStatus({ statusForDir: async () => signedOut() });
-    expect(list[0]?.primary).toBe(true);
+    expect(list[0]?.primary).toBeUndefined();
   });
 
   test("the primary flag survives a rejecting status fetch (degraded row keeps it)", async () => {
@@ -366,8 +408,8 @@ describe("listAccountsWithStatus", () => {
       { tag: "personal", configDir: "/tmp/gws-personal" },
       { statusForDir: async () => signedIn("me@example.com") }
     );
-    setPrimaryGoogleAccountId(account.id);
-    const list = await listAccountsWithStatus({
+    attachGoogleAccountToInstance("inst-a", account, { primary: true });
+    const list = await listAccountsWithStatus("inst-a", {
       statusForDir: async () => { throw new Error("gws blew up"); }
     });
     expect(list[0]?.signedIn).toBe(false);
@@ -385,6 +427,38 @@ describe("removeAccount", () => {
     removeAccount(account.id);
     expect(readPrimaryGoogleAccountId()).toBeUndefined();
     expect(readGoogleAccounts()).toEqual([]);
+  });
+});
+
+describe("instance sign-in helpers", () => {
+  test("useAccountForInstance requires a live account and binds only that instance", async () => {
+    const account = await registerAccount(
+      { tag: "personal", configDir: "/tmp/gws-personal" },
+      { statusForDir: async () => signedIn("me@example.com") }
+    );
+
+    const row = await useAccountForInstance("inst-a", account.id, {
+      statusForDir: async () => signedIn("me@example.com")
+    });
+
+    expect(row.primary).toBe(true);
+    expect(row.attached).toBe(true);
+    expect(getGoogleAccountBindings("inst-a").primaryAccountId).toBe(account.id);
+    expect(getGoogleAccountBindings("inst-b").primaryAccountId).toBeUndefined();
+  });
+
+  test("signOutInstanceGoogleAccounts clears active instance bindings and keeps credentials", async () => {
+    const account = await registerAccount(
+      { tag: "personal", configDir: "/tmp/gws-personal" },
+      { statusForDir: async () => signedIn("me@example.com") }
+    );
+    attachGoogleAccountToInstance("inst-a", account, { primary: true });
+
+    signOutInstanceGoogleAccounts("inst-a");
+
+    expect(getGoogleAccountBindings("inst-a").primaryAccountId).toBeUndefined();
+    expect(getGoogleAccountBindings("inst-a").attachedAccountIds).toEqual([]);
+    expect(readGoogleAccounts()).toHaveLength(1);
   });
 });
 
@@ -604,6 +678,13 @@ describe("provisionAccount", () => {
     await provisionAccount({ ...input, email: "bob@example.com", principal: "sub-bob" });
     expect(readPrimaryGoogleAccountId()).toBe(first.id);
   });
+
+  test("makePrimary with an instance binds the account only to that instance", async () => {
+    const account = await provisionAccount({ ...input, makePrimary: true, instance: "inst-a" });
+    expect(getGoogleAccountBindings("inst-a").primaryAccountId).toBe(account.id);
+    expect(getGoogleAccountBindings("inst-b").primaryAccountId).toBeUndefined();
+    expect(readPrimaryGoogleAccountId()).toBeUndefined();
+  });
 });
 
 describe("provisionAccount primary heal (hosted baked credential)", () => {
@@ -729,7 +810,7 @@ describe("ensureHostedPrimaryAccount", () => {
     expect(boot).toBeDefined();
   });
 
-  test("backfills an unset primaryAccountId on a guest whose row already exists, and logs the write", async () => {
+  test("binds the hosted primary on an instance whose row already exists, and logs the write", async () => {
     // A guest provisioned before the primary field existed: registry row
     // present, field unset. The next boot heals the field without
     // re-registering — and since the already-registered return is undefined
@@ -752,10 +833,11 @@ describe("ensureHostedPrimaryAccount", () => {
       else process.env.GINI_LOG_ROOT = prevLogRoot;
     }
     expect(readGoogleAccounts()).toHaveLength(1);
-    expect(readPrimaryGoogleAccountId()).toBe(row.id);
+    expect(getGoogleAccountBindings("boot-test").primaryAccountId).toBe(row.id);
+    expect(readPrimaryGoogleAccountId()).toBeUndefined();
     const logged = readFileSync(join(scratchHome, "logs", "boot-test", "runtime.jsonl"), "utf8");
     expect(JSON.parse(logged)).toMatchObject({
-      message: "google.hosted_primary.primary_backfilled",
+      message: "google.hosted_primary.primary_bound",
       data: { id: row.id }
     });
   });
@@ -780,5 +862,177 @@ describe("ensureHostedPrimaryAccount", () => {
     const account = await ensureHostedPrimaryAccount();
     expect(account?.tag).toBe("primary-2");
     expect(readGoogleAccounts()).toHaveLength(2);
+  });
+
+  test("registers the baked CONFIG_DIR dir (new-guest scheme) as a managed primary", async () => {
+    // New guests bake GOOGLE_WORKSPACE_CLI_CONFIG_DIR (not the tier-2 credentials
+    // file) pointing at a managed dir under the google-accounts root.
+    const configDir = configDirForAccount("gacct_primary");
+    process.env.GINI_HOSTED = "1";
+    process.env.GOOGLE_WORKSPACE_CLI_CONFIG_DIR = configDir;
+    const account = await ensureHostedPrimaryAccount();
+    expect(account?.tag).toBe("primary");
+    expect(account?.configDir).toBe(configDir);
+    expect(account?.id).toBe("gacct_primary"); // managed dir → id from basename
+    expect(account?.provisioned).toBe(true);
+    expect(readGoogleAccounts()).toHaveLength(1);
+    // Second boot: already registered → no-op.
+    expect(await ensureHostedPrimaryAccount()).toBeUndefined();
+  });
+
+  test("CONFIG_DIR wins over a stray legacy CREDENTIALS_FILE", async () => {
+    const configDir = configDirForAccount("gacct_primary");
+    process.env.GINI_HOSTED = "1";
+    process.env.GOOGLE_WORKSPACE_CLI_CONFIG_DIR = configDir;
+    process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE = join(scratchHome, ".config", "gws-hosted", "credentials.json");
+    const account = await ensureHostedPrimaryAccount();
+    expect(account?.configDir).toBe(configDir);
+  });
+
+  test("registers via the baked gacct_primary dir ON DISK when no gws env is set (snapshot-resume)", async () => {
+    // A snapshot-resumed guest: GINI_HOSTED is present (baked into the golden) but
+    // the tenant gws env is NOT (the resumed process never sourced it). The
+    // credential is baked at the stable path, so hostedPrimaryConfigDir falls back
+    // to it on disk and the primary still registers.
+    const bakedDir = configDirForAccount("gacct_primary");
+    mkdirSync(bakedDir, { recursive: true });
+    writeFileSync(join(bakedDir, "credentials.json"), "{}");
+    process.env.GINI_HOSTED = "1"; // no CONFIG_DIR, no CREDENTIALS_FILE (beforeEach cleared them)
+    const account = await ensureHostedPrimaryAccount();
+    expect(account?.id).toBe("gacct_primary");
+    expect(account?.configDir).toBe(bakedDir);
+    expect(account?.tag).toBe("primary");
+    expect(readGoogleAccounts()).toHaveLength(1);
+  });
+});
+
+describe("listAccountsWithStatus hosted self-heal", () => {
+  test("registers the baked primary on read when boot never ran (snapshot-resume)", async () => {
+    // On a resumed guest the boot-time registration never runs, so the registry
+    // starts empty even though the credential is baked. The first accounts read
+    // (onboarding polls this) self-heals it — no second consent needed.
+    const bakedDir = configDirForAccount("gacct_primary");
+    mkdirSync(bakedDir, { recursive: true });
+    writeFileSync(join(bakedDir, "credentials.json"), "{}");
+    process.env.GINI_HOSTED = "1";
+    expect(readGoogleAccounts()).toHaveLength(0);
+
+    const rows = await listAccountsWithStatus("hosted-read", {
+      statusForDir: async () => signedIn("wilson@lilaclabs.ai", ["/auth/gmail.modify", "/auth/calendar"])
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe("gacct_primary");
+    expect(rows[0].primary).toBe(true);
+    expect(rows[0].signedIn).toBe(true);
+  });
+
+  test("off-hosted: the read has no self-heal side effect", async () => {
+    // Not hosted → ensureHostedPrimaryAccount is inert, so a plain list neither
+    // registers anything nor errors.
+    const rows = await listAccountsWithStatus({ statusForDir: async () => signedIn("x@y.z") });
+    expect(rows).toEqual([]);
+    expect(readGoogleAccounts()).toEqual([]);
+  });
+});
+
+describe("normalizeHostedGwsEnv", () => {
+  test("hosted + tier-2 credentials file, no config dir → derives CONFIG_DIR and drops the pin", () => {
+    const env = {
+      GINI_HOSTED: "1",
+      GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE: "/home/bun/.config/gws-hosted/credentials.json"
+    } as NodeJS.ProcessEnv;
+    normalizeHostedGwsEnv(env);
+    expect(env.GOOGLE_WORKSPACE_CLI_CONFIG_DIR).toBe("/home/bun/.config/gws-hosted");
+    expect(env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE).toBeUndefined();
+  });
+
+  test("an already-set CONFIG_DIR is preserved; only the tier-2 pin is dropped", () => {
+    const env = {
+      GINI_HOSTED: "1",
+      GOOGLE_WORKSPACE_CLI_CONFIG_DIR: "/home/bun/.gini/google-accounts/gacct_primary",
+      GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE: "/home/bun/.config/gws-hosted/credentials.json"
+    } as NodeJS.ProcessEnv;
+    normalizeHostedGwsEnv(env);
+    expect(env.GOOGLE_WORKSPACE_CLI_CONFIG_DIR).toBe("/home/bun/.gini/google-accounts/gacct_primary");
+    expect(env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE).toBeUndefined();
+  });
+
+  test("off a hosted guest it is a no-op (both vars preserved)", () => {
+    const env = { GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE: "/x/credentials.json" } as NodeJS.ProcessEnv;
+    normalizeHostedGwsEnv(env);
+    expect(env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE).toBe("/x/credentials.json");
+    expect(env.GOOGLE_WORKSPACE_CLI_CONFIG_DIR).toBeUndefined();
+  });
+
+  test("hosted with no tier-2 pin leaves CONFIG_DIR untouched and is idempotent", () => {
+    const env = {
+      GINI_HOSTED: "1",
+      GOOGLE_WORKSPACE_CLI_CONFIG_DIR: "/home/bun/.gini/google-accounts/gacct_primary"
+    } as NodeJS.ProcessEnv;
+    normalizeHostedGwsEnv(env);
+    normalizeHostedGwsEnv(env);
+    expect(env.GOOGLE_WORKSPACE_CLI_CONFIG_DIR).toBe("/home/bun/.gini/google-accounts/gacct_primary");
+    expect(env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE).toBeUndefined();
+  });
+
+  test("defaults to process.env when no env is passed", () => {
+    process.env.GINI_HOSTED = "1";
+    process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE = join(scratchHome, ".config", "gws-hosted", "credentials.json");
+    normalizeHostedGwsEnv();
+    expect(process.env.GOOGLE_WORKSPACE_CLI_CONFIG_DIR).toBe(join(scratchHome, ".config", "gws-hosted"));
+    expect(process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE).toBeUndefined();
+  });
+});
+
+describe("removeAccount", () => {
+  test("deletes a gini-managed account's config dir", async () => {
+    const configDir = configDirForAccount("gacct_rm00001");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, "credentials.json"), "{}");
+    await registerAccount({ tag: "work", configDir, trusted: true });
+    removeAccount("gacct_rm00001");
+    expect(readGoogleAccounts()).toEqual([]);
+    expect(existsSync(configDir)).toBe(false);
+  });
+
+  test("never wipes the hosted primary's dir — the row drops but the credential survives", async () => {
+    // Under the unified layout the primary lives under the managed root, so the
+    // generic delete branch WOULD remove it; the primary-dir guard prevents that
+    // so it self-heals at the next boot.
+    const configDir = configDirForAccount("gacct_primary");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, "credentials.json"), "{}");
+    process.env.GINI_HOSTED = "1";
+    process.env.GOOGLE_WORKSPACE_CLI_CONFIG_DIR = configDir;
+    const primary = await ensureHostedPrimaryAccount();
+    removeAccount(primary!.id);
+    expect(readGoogleAccounts()).toEqual([]); // row dropped
+    expect(existsSync(join(configDir, "credentials.json"))).toBe(true); // creds survive
+  });
+
+  test("is a no-op for an unknown id", () => {
+    removeAccount("gacct_nope0001");
+    expect(readGoogleAccounts()).toEqual([]);
+  });
+
+  test("retagAccount renames an account's tag", async () => {
+    const configDir = configDirForAccount("gacct_retag01");
+    await registerAccount({ tag: "work", configDir, trusted: true });
+    retagAccount("gacct_retag01", "personal");
+    expect(readGoogleAccounts()[0]!.tag).toBe("personal");
+  });
+
+  test("never deletes an adopted dir outside the managed root", async () => {
+    const configDir = join(scratchHome, ".config", "gws");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, "credentials.json"), "{}");
+    await registerAccount(
+      { tag: "default", configDir, adopt: true },
+      { statusForDir: async () => signedIn("me@example.com") }
+    );
+    const id = readGoogleAccounts()[0]!.id;
+    removeAccount(id);
+    expect(readGoogleAccounts()).toEqual([]);
+    expect(existsSync(join(configDir, "credentials.json"))).toBe(true);
   });
 });

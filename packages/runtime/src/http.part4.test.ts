@@ -980,7 +980,7 @@ describe("email watcher routes", () => {
     mkdirSync(scratchHome, { recursive: true });
     process.env.HOME = scratchHome;
     try {
-      const { readPrimaryGoogleAccountId } = await import("./state/google-accounts");
+      const { getGoogleAccountBindings } = await import("./state/google-account-bindings");
       const provision = (body: Record<string, unknown>) =>
         rawCall(
           handler,
@@ -998,7 +998,7 @@ describe("email watcher routes", () => {
         principal: "sub-ada"
       });
       expect(added.status).toBe(201);
-      expect(readPrimaryGoogleAccountId()).toBeUndefined();
+      expect(getGoogleAccountBindings(config.instance).primaryAccountId).toBeUndefined();
       // A sign-in-intent provision flips the persisted primary to its account.
       const signedIn = await provision({
         clientId: "edge-client",
@@ -1010,7 +1010,7 @@ describe("email watcher routes", () => {
       });
       expect(signedIn.status).toBe(201);
       const account = await signedIn.json();
-      expect(readPrimaryGoogleAccountId()).toBe(account.id);
+      expect(getGoogleAccountBindings(config.instance).primaryAccountId).toBe(account.id);
     } finally {
       if (prevHome === undefined) delete process.env.HOME;
       else process.env.HOME = prevHome;

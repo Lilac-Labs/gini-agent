@@ -2358,6 +2358,23 @@ export interface GoogleAccount {
   principal?: string;
 }
 
+export interface GoogleAccountBindingSnapshot {
+  id: string;
+  email?: string;
+  principal?: string;
+  firstSignedInAt: string;
+  lastSignedInAt?: string;
+  lastSignedOutAt?: string;
+}
+
+export interface GoogleAccountBindings {
+  version: 1;
+  attachedAccountIds: string[];
+  accounts: Record<string, GoogleAccountBindingSnapshot>;
+  primaryAccountId?: string;
+  legacyPrimaryMigratedAt?: string;
+}
+
 // A registry account enriched with its live `gws auth status` (per config dir).
 // `services` mirrors the connector `session.services` shape — keyed by the
 // google-* skill suffix (calendar, gmail, drive, docs, sheets, forms, meet) —
@@ -2376,6 +2393,10 @@ export interface GoogleAccountStatus extends GoogleAccount {
   // first provisioned row, else the first row). Server-resolved so every
   // client agrees on which account is "the" account.
   primary?: boolean;
+  // True when this account is attached to the current runtime instance. An
+  // account can exist in the machine-global registry without being attached to
+  // this instance.
+  attached?: boolean;
 }
 
 // Web onboarding record (ADR web-onboarding-flow.md). Persisted per-instance

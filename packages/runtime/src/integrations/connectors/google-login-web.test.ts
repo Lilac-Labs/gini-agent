@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { RuntimeConfig } from "../../types";
+import { getGoogleAccountBindings } from "../../state/google-account-bindings";
 import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../../state/google-accounts";
 import { RELAY_WORKSPACE_CLIENT } from "./relay-workspace-client";
 import {
@@ -294,12 +295,12 @@ describe("handleGoogleLoginWebCallback", () => {
     expect(cred.refresh_token).toBe("rt-2");
   });
 
-  test("signin intent makes the provisioned account the persisted primary; add/default never does", async () => {
+  test("signin intent makes the provisioned account the instance primary; add/default never does", async () => {
     // Default (add) intent: no primary persisted.
     const addConsent = await startedLocation("/onboarding");
     stubGoogle({});
     await handleGoogleLoginWebCallback(config, { code: "c1", state: addConsent.searchParams.get("state") });
-    expect(readPrimaryGoogleAccountId()).toBeUndefined();
+    expect(getGoogleAccountBindings(config.instance).primaryAccountId).toBeUndefined();
 
     // Signin intent as a second identity: that account becomes the primary.
     const signinConsent = await startedLocation("/onboarding", ORIGIN, "signin");
@@ -312,13 +313,14 @@ describe("handleGoogleLoginWebCallback", () => {
     const accounts = readGoogleAccounts();
     expect(accounts).toHaveLength(2);
     const bob = accounts.find((a) => a.principal === "sub-2");
-    expect(readPrimaryGoogleAccountId()).toBe(bob!.id);
+    expect(getGoogleAccountBindings(config.instance).primaryAccountId).toBe(bob!.id);
+    expect(readPrimaryGoogleAccountId()).toBeUndefined();
 
     // A later explicit add leaves the signin-chosen primary alone.
     const laterAdd = await startedLocation("/onboarding", ORIGIN, "add");
     stubGoogle({ sub: "sub-3", email: "carol@example.com" });
     await handleGoogleLoginWebCallback(config, { code: "c3", state: laterAdd.searchParams.get("state") });
-    expect(readPrimaryGoogleAccountId()).toBe(bob!.id);
+    expect(getGoogleAccountBindings(config.instance).primaryAccountId).toBe(bob!.id);
   });
 
   test("a failed signin-intent exchange never flips the primary", async () => {
@@ -329,7 +331,7 @@ describe("handleGoogleLoginWebCallback", () => {
       state: consent.searchParams.get("state")
     });
     expect(location).toBe("/onboarding?googleAddError=1");
-    expect(readPrimaryGoogleAccountId()).toBeUndefined();
+    expect(getGoogleAccountBindings(config.instance).primaryAccountId).toBeUndefined();
   });
 
   test("a failed token exchange redirects with the error and registers nothing", async () => {

@@ -249,7 +249,8 @@ export async function handleGoogleLoginWebCallback(
       // A sign-in-intent login makes the account the persisted primary; the
       // flag applies only after the provision succeeds, so a failed exchange
       // can never flip it.
-      makePrimary: live.intent === "signin"
+      makePrimary: live.intent === "signin",
+      instance: config.instance
     });
     return { location: live.returnTo };
   } catch {

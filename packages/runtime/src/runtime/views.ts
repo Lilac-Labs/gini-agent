@@ -3,6 +3,7 @@ import type {
   ChatSessionRecord,
   ContainerAttention,
   HomeTaskItem,
+  JobRecord,
   RecentItem,
   RuntimeConfig,
   SetupRequest,
@@ -162,6 +163,16 @@ export function homeView(
   for (const auth of state.authorizations) {
     if (auth.action === "messaging.send" && auth.taskId) draftTaskIds.add(auth.taskId);
   }
+  // Session → the newest scheduled job created from that conversation (a
+  // chat-created job stamps its originating session on job.chatSessionId).
+  // Precomputed in one pass so each row lookup is O(1); the newest job wins
+  // when several point at one conversation. Drives the row's Routine chip.
+  const routineJobBySession = new Map<string, JobRecord>();
+  for (const job of state.jobs) {
+    if (!job.chatSessionId) continue;
+    const current = routineJobBySession.get(job.chatSessionId);
+    if (!current || job.createdAt > current.createdAt) routineJobBySession.set(job.chatSessionId, job);
+  }
   const tasks: HomeTaskItem[] = [];
   const recents: RecentItem[] = [];
   for (const session of state.chatSessions) {
@@ -213,6 +224,8 @@ export function homeView(
       startedBy,
       updatedAt: session.updatedAt
     };
+    const routineJob = routineJobBySession.get(session.id);
+    if (routineJob) item.routineJobId = routineJob.id;
     if (attention === "done_unacknowledged" && outcome) {
       item.outcomeLine = outcomeLineFor(outcome);
       // Only a failure gets the destructive treatment + Retry; cancelled

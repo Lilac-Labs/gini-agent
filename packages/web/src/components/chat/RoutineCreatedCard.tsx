@@ -16,6 +16,17 @@ import { useTopicPanel } from "./TopicPanelContext";
 // details panel beside the chat, or deep-links to the detail page when no
 // panel provider is mounted. When the job has since been deleted, the card
 // degrades to a non-clickable "Routine removed" state.
+// The violet "Routine" pill — shared with HomeTaskRow's right-slot chip so
+// the two affordances can't drift visually.
+export function RoutineChip() {
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-[12px] font-medium text-violet-600 dark:border-violet-500/30 dark:bg-violet-500/10 dark:text-violet-400">
+      <Repeat2 className="size-[13px]" aria-hidden="true" />
+      Routine
+    </span>
+  );
+}
+
 export function RoutineCreatedCard({ block }: { block: ToolCallBlock & { jobId: string } }) {
   const jobs = useAllJobs();
   const panel = useTopicPanel();
@@ -27,12 +38,7 @@ export function RoutineCreatedCard({ block }: { block: ToolCallBlock & { jobId: 
   const removed = Boolean(jobs.data) && !job;
   const name = job ? jobDisplayName(job) : String(block.argsFull?.name ?? block.argsPreview);
 
-  const chip = (
-    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-[12px] font-medium text-violet-600 dark:border-violet-500/30 dark:bg-violet-500/10 dark:text-violet-400">
-      <Repeat2 className="size-[13px]" aria-hidden="true" />
-      Routine
-    </span>
-  );
+  const chip = <RoutineChip />;
   const body = (
     <span className="min-w-0">
       <span className="block truncate text-sm font-semibold">{name}</span>

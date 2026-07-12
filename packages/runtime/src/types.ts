@@ -1185,6 +1185,10 @@ export interface HomeTaskItem {
   // decay to attention "none" and are filtered server-side); the client flips
   // it optimistically after POST /api/containers/:id/acknowledge.
   acknowledged: boolean;
+  // Present when a scheduled job was created from this conversation
+  // (job.chatSessionId points here); the newest such job wins. Drives the
+  // row's violet Routine chip, which opens the routine details panel.
+  routineJobId?: string;
   startedBy: "user" | "agent" | "schedule";
   updatedAt: string;
 }

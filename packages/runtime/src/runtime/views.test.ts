@@ -40,6 +40,31 @@ describe("publicState", () => {
   });
 });
 
+// Minimal JobRecord for the routineJobId mapping — only identity, schedule,
+// and the chatSessionId provenance under test matter here.
+function seedJob(state: RuntimeState, id: string, chatSessionId: string | undefined, createdAt: string): void {
+  state.jobs.push({
+    id,
+    instance: state.instance,
+    name: id,
+    prompt: "check things",
+    status: "active",
+    deliveryTargets: [],
+    context: [],
+    retryLimit: 0,
+    timeoutSeconds: 60,
+    intervalSeconds: 3600,
+    ...(chatSessionId ? { chatSessionId } : {}),
+    createdAt,
+    updatedAt: createdAt,
+    nextRunAt: createdAt,
+    runCount: 0,
+    missedRuns: 0,
+    taskIds: [],
+    runIds: []
+  });
+}
+
 function seedTask(state: RuntimeState, sessionId: string, status: Task["status"], at: string): Task {
   const task = createTask(state.instance, `run in ${sessionId}`, undefined, undefined, undefined, undefined, undefined, sessionId);
   task.status = status;
@@ -86,5 +111,33 @@ describe("homeView", () => {
     expect(home.tasks.map((t) => t.id)).toEqual([ids.taskMode, ids.legacy]);
     // Recents are the artifact feed — message-mode completions stay in it.
     expect(home.recents.map((r) => r.containerId)).toEqual([ids.doneMessage, ids.legacy]);
+  });
+
+  test("stamps routineJobId when a job was created from the conversation — newest wins; other rows omit it", async () => {
+    const config = testConfig("views-home-routine");
+    readState(config.instance);
+    const ids = await mutateState(config.instance, (state) => {
+      // Two jobs point at the same conversation (e.g. the user re-created the
+      // routine in the same thread) — the newest by createdAt wins.
+      const withRoutine = createTopic(state, { title: "HN mentions", startedAs: "task" });
+      seedTask(state, withRoutine.id, "completed", "2026-07-01T12:00:00.000Z");
+      seedJob(state, "job_old", withRoutine.id, "2026-07-01T10:00:00.000Z");
+      seedJob(state, "job_new", withRoutine.id, "2026-07-01T11:00:00.000Z");
+
+      // A row without a matching job, plus a job with no chatSessionId
+      // (imperative/CLI creation) that must map to no row at all.
+      const plain = createTopic(state, { title: "No routine here", startedAs: "task" });
+      seedTask(state, plain.id, "completed", "2026-07-01T09:00:00.000Z");
+      seedJob(state, "job_unbound", undefined, "2026-07-01T08:00:00.000Z");
+
+      return { withRoutine: withRoutine.id, plain: plain.id };
+    });
+
+    const home = homeView(config);
+    const withRoutine = home.tasks.find((t) => t.id === ids.withRoutine);
+    const plain = home.tasks.find((t) => t.id === ids.plain);
+    expect(withRoutine?.routineJobId).toBe("job_new");
+    expect(plain).toBeDefined();
+    expect(plain?.routineJobId).toBeUndefined();
   });
 });

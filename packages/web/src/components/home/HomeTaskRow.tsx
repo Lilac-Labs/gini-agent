@@ -6,6 +6,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Check, FileText, RotateCcw, Send } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { RoutineChip } from "@/components/chat/RoutineCreatedCard";
 import { useTopicPanel } from "@/components/chat/TopicPanelContext";
 import { HomeNeedsInput } from "@/components/home/HomeNeedsInput";
 import { api } from "@/lib/api";
@@ -212,6 +213,24 @@ export function HomeTaskRow({
           <RotateCcw />
           Retry
         </Button>
+      ) : null}
+
+      {item.routineJobId ? (
+        // This task created a routine (server-mapped via job.chatSessionId).
+        // The chip opens the routine details panel — NOT the row's topic
+        // thread, hence the stopPropagation.
+        <button
+          type="button"
+          aria-label={`Open routine details for ${item.title}`}
+          className="shrink-0 transition-opacity hover:opacity-75"
+          onClick={(event) => {
+            event.stopPropagation();
+            if (panel) panel.openRoutine(item.routineJobId!);
+            else router.push(`/routines/job/${encodeURIComponent(item.routineJobId!)}`);
+          }}
+        >
+          <RoutineChip />
+        </button>
       ) : null}
     </div>
   );

@@ -31,7 +31,8 @@ import {
   type CrmQueueCounts,
   type CrmRunState,
 } from "../state/crm-extraction-db";
-import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../state/google-accounts";
+import { readGoogleAccounts } from "../state/google-accounts";
+import { readGoogleAccountBindings } from "../state/google-account-bindings";
 import { fixtureCrmMailSource, gmailCrmMailSource, type CrmMailSource } from "../integrations/crm-mail";
 import {
   analyzeThread,
@@ -223,9 +224,14 @@ function resolveMailAccounts(instance: Instance): CrmMailAccount[] {
     return [{ accountId: "", email: getCrmMeta(instance, "self_email") ?? "user@example.com", source: fixtureCrmMailSource(fixtureDir) }];
   }
   const accounts = readGoogleAccounts().filter((a) => a.email);
-  if (accounts.length === 0) return [];
-  const primaryId = readPrimaryGoogleAccountId();
-  const ordered = [...accounts].sort((a, b) => Number(b.id === primaryId) - Number(a.id === primaryId));
+  const bindings = readGoogleAccountBindings(instance);
+  if (accounts.length === 0 || !bindings || bindings.attachedAccountIds.length === 0) return [];
+  const byId = new Map(accounts.map((account) => [account.id, account]));
+  const orderedIds = [
+    ...(bindings.primaryAccountId ? [bindings.primaryAccountId] : []),
+    ...bindings.attachedAccountIds.filter((id) => id !== bindings.primaryAccountId),
+  ];
+  const ordered = orderedIds.map((id) => byId.get(id)).filter((account): account is NonNullable<typeof account> => account !== undefined);
   const seen = new Set<string>();
   const out: CrmMailAccount[] = [];
   for (const account of ordered) {

@@ -2165,7 +2165,9 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     }],
     ["POST", /^\/api\/google\/accounts\/([^/]+)\/use$/, async (_request, params) => {
       try {
-        return json(await useAccountForInstance(config.instance, params[0]));
+        const account = await useAccountForInstance(config.instance, params[0]);
+        autostartCrmExtractionAfterOnboarding(config);
+        return json(account);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to use account";
         const status = message.includes("not found") ? 404 : 400;

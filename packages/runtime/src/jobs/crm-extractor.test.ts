@@ -27,6 +27,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { clearEchoToolCallingResponses, normalizeProvider, setEchoToolCallingFailure, setEchoToolCallingResponse } from "../provider";
 import { install } from "../runtime";
+import { attachGoogleAccountToInstance } from "../state/google-account-bindings";
 import type { RuntimeConfig } from "../types";
 
 // Process-unique because parallel test processes can run this file at once;
@@ -582,18 +583,19 @@ describe("crm-extractor", () => {
     const home = `${ROOT}/dup-home`;
     const registryDir = join(home, ".gini", "google-accounts");
     mkdirSync(registryDir, { recursive: true });
+    const first = { id: "gacct_a", tag: "a", email: "same@x.io", configDir: `${home}/a`, addedAt: "2026-01-01T00:00:00Z" };
+    const primary = { id: "gacct_b", tag: "b", email: "SAME@x.io", configDir: `${home}/b`, addedAt: "2026-01-02T00:00:00Z" };
+    const other = { id: "gacct_c", tag: "c", email: "other@y.io", configDir: `${home}/c`, addedAt: "2026-01-03T00:00:00Z" };
     writeFileSync(
       join(registryDir, "accounts.json"),
       JSON.stringify({
         version: 1,
-        accounts: [
-          { id: "gacct_a", tag: "a", email: "same@x.io", configDir: `${home}/a`, addedAt: "2026-01-01T00:00:00Z" },
-          { id: "gacct_b", tag: "b", email: "SAME@x.io", configDir: `${home}/b`, addedAt: "2026-01-02T00:00:00Z" },
-          { id: "gacct_c", tag: "c", email: "other@y.io", configDir: `${home}/c`, addedAt: "2026-01-03T00:00:00Z" },
-        ],
-        primaryAccountId: "gacct_b",
+        accounts: [first, primary, other],
       }),
     );
+    attachGoogleAccountToInstance(instance, first);
+    attachGoogleAccountToInstance(instance, primary, { primary: true });
+    attachGoogleAccountToInstance(instance, other);
     process.env.HOME = home;
     try {
       const status = crmExtractionStatus(config);
@@ -658,7 +660,7 @@ describe("crm-extractor", () => {
     expect(status.accounts).toEqual([{ accountId: "", email: SELF, backfillSeeded: false, mailCursor: null }]);
   });
 
-  test("resolves the connected Google account from the machine registry", async () => {
+  test("resolves the instance-bound Google account from the machine registry", async () => {
     const instance = "crmx-gmail-resolve";
     const config = makeConfig(instance);
     await install(config);
@@ -669,18 +671,25 @@ describe("crm-extractor", () => {
     const account = (id: string, email: string) => ({ id, tag: id, email, configDir: `${home}/${id}`, addedAt: "2026-01-01T00:00:00Z" });
     process.env.HOME = home;
     try {
-      // Primary points at the second account → it wins (email lowercased).
+      // Machine-global registry rows are not enough: the mailbox must be bound
+      // to this instance, and the instance primary wins (email lowercased).
+      const first = account("gacct_a", "a@x.io");
+      const primary = account("gacct_b", "B@Y.io");
       writeFileSync(
         join(registryDir, "accounts.json"),
-        JSON.stringify({ version: 1, accounts: [account("gacct_a", "a@x.io"), account("gacct_b", "B@Y.io")], primaryAccountId: "gacct_b" }),
+        JSON.stringify({ version: 1, accounts: [first, primary] }),
       );
       let status = crmExtractionStatus(config);
+      expect(status.source).toBeNull();
+      attachGoogleAccountToInstance(instance, first);
+      attachGoogleAccountToInstance(instance, primary, { primary: true });
+      status = crmExtractionStatus(config);
       expect(status.source).toBe("gmail");
       expect(status.selfEmail).toBe("b@y.io");
-      // A stale primary id falls back to the first account.
+      // A stale bound primary id falls back to the remaining attached account.
       writeFileSync(
         join(registryDir, "accounts.json"),
-        JSON.stringify({ version: 1, accounts: [account("gacct_a", "a@x.io")], primaryAccountId: "gacct_gone" }),
+        JSON.stringify({ version: 1, accounts: [first] }),
       );
       status = crmExtractionStatus(config);
       expect(status.selfEmail).toBe("a@x.io");

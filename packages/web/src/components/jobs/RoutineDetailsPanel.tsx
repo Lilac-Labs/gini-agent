@@ -86,7 +86,10 @@ function RoutineDetailsBody({ job, onClose }: { job: JobRecord; onClose: () => v
     mutationFn: () => api<JobRecord>(`/jobs/${job.id}`, { method: "DELETE" }),
     onSuccess: () => {
       toast.success(`Removed ${name}`);
-      invalidate(["jobs", "jobRuns", "events"]);
+      // "home" too: a home task row may be showing this routine's chip
+      // (HomeTaskItem.routineJobId), which would otherwise linger until the
+      // home view's 30s idle refetch.
+      invalidate(["jobs", "jobRuns", "events", "home"]);
       onClose();
     },
     onError: (error: Error) => toast.error(error.message)

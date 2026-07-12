@@ -270,6 +270,39 @@ describe("agent-data-db", () => {
     dbExecute(inst, "agent_cat", "UPDATE contacts SET category = NULL");
   });
 
+  test("the reserved self row's 'You —' description prefix survives curator rewrites", () => {
+    const inst = "self-row-guard";
+    const A = "agent_self";
+    dbExecute(inst, A, "INSERT INTO contacts (first_name, email_address, description) VALUES ('You', 'me@x.io', 'You — the reserved row.')");
+    // Rewrites that keep the marker are fine.
+    dbExecute(inst, A, "UPDATE contacts SET description = 'You — reserved; aliases include me+tag@x.io.' WHERE email_address = 'me@x.io'");
+    // Dropping the marker (observed live: the literal word 'description') is rejected.
+    expect(() =>
+      dbExecute(inst, A, "UPDATE contacts SET description = 'description' WHERE email_address = 'me@x.io'"),
+    ).toThrow(/You —/);
+    expect(() =>
+      dbExecute(inst, A, "UPDATE contacts SET description = NULL WHERE email_address = 'me@x.io'"),
+    ).toThrow(/You —/);
+    // Ordinary rows keep full freedom over description.
+    dbExecute(inst, A, "INSERT INTO contacts (first_name, description) VALUES ('Pal', 'old text')");
+    dbExecute(inst, A, "UPDATE contacts SET description = 'new text' WHERE first_name = 'Pal'");
+  });
+
+  test("last_spoke_at rejects date strings — epoch milliseconds only", () => {
+    const inst = "spoke-type-guard";
+    const A = "agent_spoke";
+    dbExecute(inst, A, "INSERT INTO contacts (first_name, last_spoke_at) VALUES ('Ok', 1783800000000)");
+    expect(() =>
+      dbExecute(inst, A, "INSERT INTO contacts (first_name, last_spoke_at) VALUES ('Bad', '2025-09-29T18:00:46.000Z')"),
+    ).toThrow(/epoch milliseconds/);
+    expect(() =>
+      dbExecute(inst, A, "UPDATE contacts SET last_spoke_at = '2025-09-29' WHERE first_name = 'Ok'"),
+    ).toThrow(/epoch milliseconds/);
+    // Numeric strings pass through INTEGER affinity before the guard sees them.
+    dbExecute(inst, A, "UPDATE contacts SET last_spoke_at = '1783800000001' WHERE first_name = 'Ok'");
+    dbExecute(inst, A, "UPDATE contacts SET last_spoke_at = NULL WHERE first_name = 'Ok'");
+  });
+
   test("a failing migration rolls back and surfaces instead of half-applying", () => {
     const inst = "add-legacy-fail";
     const path = agentDataDbPath(inst, "agent_fail");

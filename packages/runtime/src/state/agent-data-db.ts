@@ -137,6 +137,38 @@ BEGIN
 END;
 `;
 
+// Two field-integrity guards, recreated on open like the others:
+// - The reserved self row is identified everywhere (runtime, skill, UI) by
+//   its `You —` description prefix; a curator rewrite that clobbers the
+//   prefix (observed live: description set to the literal word
+//   "description") breaks self-row detection and lets the user's own
+//   addresses re-materialize as contacts. Updates may rewrite the text but
+//   must keep the marker.
+// - last_spoke_at is epoch ms; SQLite's INTEGER affinity can't coerce an
+//   ISO date string (observed live), and a text value breaks every recency
+//   sort/filter over the column.
+const SEED_CONTACTS_INTEGRITY_GUARDS = `
+DROP TRIGGER IF EXISTS contacts_self_row_marker_guard;
+CREATE TRIGGER contacts_self_row_marker_guard BEFORE UPDATE OF description ON contacts
+  FOR EACH ROW WHEN OLD.description LIKE 'You —%'
+    AND (NEW.description IS NULL OR NEW.description NOT LIKE 'You —%')
+BEGIN
+  SELECT RAISE(ABORT, 'reserved self row: description must keep its ''You —'' prefix');
+END;
+DROP TRIGGER IF EXISTS contacts_last_spoke_type_guard_insert;
+CREATE TRIGGER contacts_last_spoke_type_guard_insert BEFORE INSERT ON contacts
+  FOR EACH ROW WHEN NEW.last_spoke_at IS NOT NULL AND typeof(NEW.last_spoke_at) NOT IN ('integer', 'real')
+BEGIN
+  SELECT RAISE(ABORT, 'CHECK constraint failed: last_spoke_at must be epoch milliseconds (integer)');
+END;
+DROP TRIGGER IF EXISTS contacts_last_spoke_type_guard_update;
+CREATE TRIGGER contacts_last_spoke_type_guard_update BEFORE UPDATE OF last_spoke_at ON contacts
+  FOR EACH ROW WHEN NEW.last_spoke_at IS NOT NULL AND typeof(NEW.last_spoke_at) NOT IN ('integer', 'real')
+BEGIN
+  SELECT RAISE(ABORT, 'CHECK constraint failed: last_spoke_at must be epoch milliseconds (integer)');
+END;
+`;
+
 function contactsCols(db: Database): Set<string> {
   return new Set(
     db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('contacts')").all().map((c) => c.name)
@@ -415,6 +447,9 @@ function seedBaselineTables(db: Database): void {
   }
   if (cols.has("category")) {
     db.exec(SEED_CONTACTS_CATEGORY_GUARDS);
+  }
+  if (cols.has("description") && cols.has("last_spoke_at")) {
+    db.exec(SEED_CONTACTS_INTEGRITY_GUARDS);
   }
 }
 

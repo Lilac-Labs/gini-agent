@@ -19,7 +19,7 @@ import {
 } from "./crm-extractor";
 import type { CrmMail } from "./crm-extraction-pipeline";
 import type { CrmMailSource } from "../integrations/crm-mail";
-import { crmQueueCounts, enqueueCrmThreads, listCrmThreads, markCrmThreads, setCrmMeta, setCrmRunState, closeAllCrmExtractionDbs, getCrmRunState } from "../state/crm-extraction-db";
+import { crmQueueCounts, enqueueCrmThreads, getCrmMeta, listCrmThreads, markCrmThreads, setCrmMeta, setCrmRunState, closeAllCrmExtractionDbs, getCrmRunState } from "../state/crm-extraction-db";
 import { closeAllAgentDataDbs, dbExecute, dbQuery } from "../state/agent-data-db";
 import { closeAllMemoryDbs, mutateState, readState, readTrace } from "../state";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -152,12 +152,30 @@ describe("crm-extractor", () => {
     expect(you.rows.length).toBe(1);
     expect(you.rows[0]!.email_address).toBe(SELF);
 
+    // Phase 2.5: after the backfill drains, exactly one whole-directory
+    // reconciliation turn runs (pinned to the same persona, skill inlined)
+    // and the per-account meta flag stops it from re-arming.
+    await until("reconcile turn marks its meta flag", () => getCrmMeta(instance, "reconciled") === "1");
+    const reconcileTasks = readState(instance).tasks.filter(
+      (t) => typeof t.input === "string" && t.input.includes("Reconcile my people-CRM directory"),
+    );
+    expect(reconcileTasks.length).toBe(1);
+    expect(reconcileTasks[0]!.agentId).toBe("agent_default");
+    expect(reconcileTasks[0]!.subagentId).toBe(subagent!.id);
+    expect(reconcileTasks[0]!.input).toContain("```people-crm-skill");
+
     // Watcher: a brand-new engaged thread arrives later → processed without
     // any restart (the infinite watcher).
     messages.push(
       mail({ id: "m4", threadId: "T-new", date: Date.now(), from: { address: SELF }, to: [{ address: "newpal@z.com" }] }),
     );
     await until("watcher picks up the new thread", () => crmQueueCounts(instance).done === 2);
+    // Still exactly one reconcile turn after the watcher-era thread.
+    expect(
+      readState(instance).tasks.filter(
+        (t) => typeof t.input === "string" && t.input.includes("Reconcile my people-CRM directory"),
+      ).length,
+    ).toBe(1);
 
     // Reopen: NEW mail lands on the already-done thread → it re-runs.
     messages.push(

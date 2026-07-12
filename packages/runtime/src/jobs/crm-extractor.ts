@@ -164,6 +164,11 @@ function seededKey(accountId: string): string {
 function cursorKey(accountId: string): string {
   return accountId ? `mail_cursor:${accountId}` : "mail_cursor";
 }
+// Reconciliation flag, keyed like the seed flag: connecting a new mailbox
+// re-arms one directory-wide reconcile pass after ITS backfill drains.
+function reconciledKey(accountId: string): string {
+  return accountId ? `reconciled:${accountId}` : "reconciled";
+}
 
 // The skill body embedded into every turn (saves the read_skill round trip;
 // measured in the ADR). Bundled path — the skill ships with the runtime.
@@ -246,6 +251,60 @@ async function mapPool<T>(items: T[], limit: number, fn: (item: T) => Promise<vo
     }
   });
   await Promise.all(workers);
+}
+
+// The whole-directory reconciliation turn (phase 2.5). Per-thread turns run
+// in parallel and each sees only its own batch, so one human with two
+// mailboxes (or a self-alias) can race into twin rows that no single turn
+// had the evidence to merge — the UNIQUE constraints arbitrate identical
+// keys, but two different addresses pass. One pass with the whole table
+// visible closes that hole.
+function buildReconcileMessage(skill: string, selfEmail: string): string {
+  return [
+    `Reconcile my people-CRM directory — a full pass over my mailbox just finished (your people-crm skill is included below — no need to read_skill). I'm ${selfEmail}.`,
+    "",
+    "```people-crm-skill",
+    skill.trim(),
+    "```",
+    "",
+    "This is a whole-directory audit, not a per-thread fold. Query ALL rows (scalar columns + description first; read a profile only when deciding a specific merge), then:",
+    "1. Duplicate humans: rows sharing a distinctive full name are one person by default — merge per the skill's rules (keep the richer row, fold the other address and any unique dossier claims in, repoint `relations`, DELETE the thinner row) unless the dossiers prove two distinct humans.",
+    "2. Me: any row that is actually me under another address folds into the reserved `You —` row as an alias per the skill's self check.",
+    "3. Mention-only rows: DELETE rows with no address and no direct interaction (name-drops, calendar-only co-invitees), noting the mention in the citing contact's dossier.",
+    "4. Repair the `You —` row if damaged: description keeps its `You —` prefix and one-line summary, aliases consolidated, no placeholder values anywhere.",
+    "Finish with one short line summarizing merges/deletes/repairs (or why none were needed).",
+  ].join("\n");
+}
+
+async function runReconcileTurn(
+  config: RuntimeConfig,
+  handle: ExtractorHandle,
+  agentId: string,
+  subagentId: string,
+  selfEmail: string,
+): Promise<boolean> {
+  handle.inFlightTurns += 1;
+  try {
+    const task = await submitTask(config, buildReconcileMessage(skillBody(), selfEmail), {
+      mode: "chat", agentId, subagentId,
+    });
+    const deadline = Date.now() + turnTimeoutMs();
+    while (Date.now() < deadline) {
+      await Bun.sleep(Math.min(2_000, turnTimeoutMs()));
+      const row = readState(config.instance).tasks.find((t) => t.id === task.id);
+      if (!row) return false;
+      if (row.status === "completed") return true;
+      if (row.status === "failed" || row.status === "cancelled") return false;
+      if (row.status === "waiting_approval" || row.status === "needs_input") return false;
+    }
+    return false;
+  } catch (error) {
+    handle.lastError = error instanceof Error ? error.message : String(error);
+    return false;
+  } finally {
+    handle.inFlightTurns -= 1;
+    handle.lastActivityAt = Date.now();
+  }
 }
 
 // One curator turn over one batch of threads; convergent, so a timeout is
@@ -451,6 +510,33 @@ async function runLoopIteration(config: RuntimeConfig, handle: ExtractorHandle):
         if (handle.stopRequested) return;
         await runTurn(config, handle, agentId, subagent.id, accounts, accountByThread, primary.email, batch);
       });
+    }
+    return;
+  }
+
+  // Phase 2.5 — one whole-directory reconciliation after a mailbox's
+  // backfill fully drains (see buildReconcileMessage for why). Runs at most
+  // once per account seed; three failed attempts stand down so a persistent
+  // failure can't burn a turn every watcher interval.
+  const unreconciled = accounts.filter((a) => getCrmMeta(instance, reconciledKey(a.accountId)) !== "1");
+  if (unreconciled.length > 0 && crmQueueCounts(instance).done > 0 && !handle.stopRequested) {
+    const attempts = Number(getCrmMeta(instance, "reconcile_attempts") ?? "0");
+    if (attempts < 3) {
+      const subagent = await ensureCuratorSubagent(config, agentId);
+      seedSelfRow(instance, agentId, primary.email);
+      appendLog(instance, "crm.extraction.reconcile", { attempt: attempts + 1 });
+      const ok = await runReconcileTurn(config, handle, agentId, subagent.id, primary.email);
+      if (ok) {
+        for (const account of accounts) setCrmMeta(instance, reconciledKey(account.accountId), "1");
+        setCrmMeta(instance, "reconcile_attempts", "0");
+        appendLog(instance, "crm.extraction.reconciled", {});
+      } else {
+        setCrmMeta(instance, "reconcile_attempts", String(attempts + 1));
+      }
+    } else {
+      for (const account of accounts) setCrmMeta(instance, reconciledKey(account.accountId), "1");
+      setCrmMeta(instance, "reconcile_attempts", "0");
+      appendLog(instance, "crm.extraction.reconcile_abandoned", {});
     }
     return;
   }

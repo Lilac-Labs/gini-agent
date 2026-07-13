@@ -5,7 +5,9 @@ import type { JobRecord } from "@runtime/types";
 // the routine detail pages. Two display modes:
 //   - cron-driven:  `At 09:00 AM, Monday through Friday (America/Los_Angeles)`
 //                   (human English via cronstrue, timezone appended)
-//   - interval:     `every 60s`
+//   - interval:     `every 10 minutes` (humanized when the seconds divide
+//                   cleanly into minutes/hours/days; raw `every 90s`
+//                   otherwise)
 // The helper is the single source of truth so list and detail can't drift
 // out of sync. A cron-driven JobRecord carries no intervalSeconds at all;
 // the cron branch handles that case explicitly so the interval branch only
@@ -22,7 +24,25 @@ export function scheduleLabel(job: JobRecord): string {
   // Defensive fallback for hand-edited / migrated records that lost their
   // interval — render an explicit marker instead of "every undefineds".
   if (job.intervalSeconds === undefined) return "(no schedule)";
-  return `every ${job.intervalSeconds}s`;
+  return intervalLabel(job.intervalSeconds);
+}
+
+// Humanize a clean interval into the largest unit it divides into ("every
+// 10 minutes", "every 2 hours", "every day"); odd second counts keep the
+// raw `every Ns` shape so nothing rounds dishonestly.
+function intervalLabel(seconds: number): string {
+  const units: Array<[number, string]> = [
+    [86_400, "day"],
+    [3_600, "hour"],
+    [60, "minute"]
+  ];
+  for (const [size, name] of units) {
+    if (seconds >= size && seconds % size === 0) {
+      const count = seconds / size;
+      return count === 1 ? `every ${name}` : `every ${count} ${name}s`;
+    }
+  }
+  return `every ${seconds}s`;
 }
 
 // Wrap cronstrue's toString with a try/catch so a malformed expression

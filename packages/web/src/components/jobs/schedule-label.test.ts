@@ -1,7 +1,8 @@
 // Unit tests for the schedule-label helper used by the chat Jobs tab,
 // the routine detail pages, and EditJobDialog. Three modes to cover:
 //   - cron with TZ: cronstrue renders human English + we append "(TZ)"
-//   - interval: keeps the existing "every Ns" shape
+//   - interval: humanized when the seconds divide cleanly into
+//     minutes/hours/days; raw "every Ns" otherwise
 //   - invalid cron: helper returns the raw expression so the UI doesn't
 //     surface a stack trace under the input
 //
@@ -57,9 +58,20 @@ describe("scheduleLabel", () => {
     expect(label).toContain("(UTC)");
   });
 
-  test("interval-driven job keeps the 'every Ns' shape", () => {
-    const label = scheduleLabel(buildJob({ intervalSeconds: 86400 }));
-    expect(label).toBe("every 86400s");
+  test("clean intervals humanize into the largest dividing unit", () => {
+    expect(scheduleLabel(buildJob({ intervalSeconds: 60 }))).toBe("every minute");
+    expect(scheduleLabel(buildJob({ intervalSeconds: 600 }))).toBe("every 10 minutes");
+    expect(scheduleLabel(buildJob({ intervalSeconds: 3600 }))).toBe("every hour");
+    expect(scheduleLabel(buildJob({ intervalSeconds: 7200 }))).toBe("every 2 hours");
+    expect(scheduleLabel(buildJob({ intervalSeconds: 86400 }))).toBe("every day");
+    expect(scheduleLabel(buildJob({ intervalSeconds: 172800 }))).toBe("every 2 days");
+    // 90 minutes divides into minutes, not hours — the largest CLEAN unit wins.
+    expect(scheduleLabel(buildJob({ intervalSeconds: 5400 }))).toBe("every 90 minutes");
+  });
+
+  test("odd second counts keep the raw 'every Ns' shape", () => {
+    expect(scheduleLabel(buildJob({ intervalSeconds: 45 }))).toBe("every 45s");
+    expect(scheduleLabel(buildJob({ intervalSeconds: 90 }))).toBe("every 90s");
   });
 
   test("invalid cron falls back to the raw expression + TZ", () => {

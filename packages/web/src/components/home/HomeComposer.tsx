@@ -17,6 +17,7 @@ import {
   AttachmentTray,
   useAttachments
 } from "@/components/chat/attachments";
+import { useTopicPanel } from "@/components/chat/TopicPanelContext";
 import { useStartTask, useStatus } from "@/lib/queries";
 
 type ComposerMode = "task" | "message";
@@ -33,6 +34,7 @@ const MODE_STORAGE_KEY = "gini.home.composerMode";
 export function HomeComposer() {
   const router = useRouter();
   const params = useSearchParams();
+  const panel = useTopicPanel();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [text, setText] = useState("");
   const [mode, setMode] = useState<ComposerMode>("task");
@@ -70,18 +72,21 @@ export function HomeComposer() {
   };
 
   // /?compose=message (the sidebar Messages "+") deep-links straight into
-  // Message mode with the textarea focused, then strips the param so
-  // reload/back-nav doesn't re-trigger it. /?prompt=<text> additionally seeds
-  // the composer (e.g. the routines "Create routine" entry point) — pre-fill
-  // only, never auto-submit. Keyed on the params (not mount): clicking "+"
+  // Message mode, /?compose=task (the routines "Create routine" entry point)
+  // into Task mode — textarea focused, then the params are stripped so
+  // reload/back-nav doesn't re-trigger. /?prompt=<text> additionally seeds
+  // the composer — pre-fill only, never auto-submit; a bare ?prompt= with no
+  // compose param keeps the legacy Message-mode seed so external links don't
+  // change behavior. Keyed on the params (not mount): clicking "+"
   // while already on home only changes the query string, and the composer
   // never remounts. Declared after the storage read above so the deep link
   // wins the mount race; deliberately transient — it never writes the
   // persisted mode chip.
   useEffect(() => {
+    const compose = params?.get("compose");
     const seed = params?.get("prompt");
-    if (params?.get("compose") !== "message" && !seed) return;
-    setMode("message");
+    if (compose !== "message" && compose !== "task" && !seed) return;
+    setMode(compose === "task" ? "task" : "message");
     if (seed) setText(seed);
     const el = textareaRef.current;
     el?.focus();
@@ -138,8 +143,12 @@ export function HomeComposer() {
       { content, images, startedAs: messageMode ? "message" : "task" },
       {
         onSuccess: (data) => {
-          // Message mode opens the new conversation's own thread.
+          // Message mode opens the new conversation's own thread full-page;
+          // Task mode stays on home and opens the new container in the
+          // right-side topic panel so the user watches the turn in place
+          // (the optimistic Tasks row lands alongside).
           if (messageMode) router.push(`/chat?session=${data.containerId}`);
+          else panel?.openTopic(data.containerId);
         },
         onError: (error) => {
           setText(content);

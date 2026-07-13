@@ -32,6 +32,41 @@ cron expressions stay product-owned in the catalog and are never composed in
 the browser — the client only sends settings state. Adding a template is one
 catalog entry.
 
+### Per-account settings values
+
+A template can mark `perAccountSettings: true` (Auto-inbox does): the field
+*schema* stays shared, but the *values* are kept per connected Google
+account, keyed by lowercased email — the same address key the email-watch
+records and the agent's account selection use. The persisted shape is a
+wrapper, `templateSettings = { accounts: Record<email, RoutineSettings> }`,
+distinguishable from a legacy flat blob by its `accounts` object.
+`resolveInstallSettings` owns the install shapes: an email-keyed body (any
+key carrying "@") validates each entry through `resolveSettings` (at most
+10 accounts; keys must be bounded, whitespace-free email addresses,
+lowercased on store); a flat body — including the legacy boolean `options`
+map, which is how `POST /api/onboarding/routines` arrives — applies alike
+to every registered account; an absent body seeds one entry per registered
+account from the per-account defaults. With zero registered accounts every
+non-account-keyed shape falls back to the flat single blob, so instances
+without a Google account keep the flat behavior end to end. Account
+enumeration is the sync machine-global registry (`readGoogleAccounts`,
+rows with a known email) — never the live-status probe — because it runs
+on every gallery GET.
+
+Auto-inbox's `buildSpec` composes the per-account wrapper into one prompt:
+a preamble instructing the run to work ONLY the listed accounts, then per
+account an `Account <email>:` heading followed by that account's own
+behavior lines (its label list and prefix, reply scope, scheduling rules).
+Accounts with every function off are omitted; all accounts off builds no
+spec (the same zero-behavior rule as the flat shape), and the
+google-calendar skill attaches when ANY account assists scheduling.
+
+An account connected AFTER an install still appears in the Settings tab
+(the view join below adds it with seeded defaults) and joins the persisted
+map on the next save — but the baked prompt covers only the accounts
+configured at install time until then; connecting an account does not
+auto-reinstall.
+
 Two callers share the catalog:
 
 - the **onboarding starter-routines step** — `routineJobSpecs` in
@@ -42,8 +77,8 @@ Two callers share the catalog:
 
 | Endpoint | Behavior |
 | --- | --- |
-| `GET /api/routines/templates` | The catalog joined with installed state — the live job carrying each `templateId`, scoped by `?agentId=` like `GET /api/jobs`. `installed.settings` carries the job's resolved settings state: the persisted `templateSettings` when stamped, else the legacy `templateOptions` mapped through the template's `legacySettings` hook, each filled with the catalog defaults (absent on templates without settings and on jobs predating provenance). |
-| `POST /api/routines/templates/<id>/install` | Body `{ timezone?, settings?, options? }`. Missing setting keys fall back to the template defaults; the legacy flat boolean `options` map is still accepted and mapped through `legacySettings`; timezone precedence is payload > onboarding record > UTC. Idempotent per-template replace scoped to the active agent: skills are pre-validated (`assertSkillNamesResolve`, a clean 400 with zero side effects), then the owning agent's job with this `templateId` is deleted and one fresh job created via `createScheduledJob` — the same call `POST /api/jobs` makes. The owning agent is resolved server-side (never caller-supplied), the same way `createScheduledJob` stamps `agentId`. Returns the `JobRecord`. |
+| `GET /api/routines/templates` | The catalog joined with installed state — the live job carrying each `templateId`, scoped by `?agentId=` like `GET /api/jobs`. `installed.settings` carries the job's resolved settings state: the persisted `templateSettings` when stamped, else the legacy `templateOptions` mapped through the template's `legacySettings` hook, each filled with the catalog defaults (absent on templates without settings and on jobs predating provenance). Per-account templates carry `installed.accountSettings` instead — one row per registered account (`{ accountId, email, primary?, settings }`, exactly the effective primary marked) with per-account precedence: the account's saved entry in the `{ accounts }` wrapper, else the job's legacy flat stamp, else the account's seeded defaults. The flat `installed.settings` remains only when no account is registered. |
+| `POST /api/routines/templates/<id>/install` | Body `{ timezone?, settings?, options? }`. Missing setting keys fall back to the template defaults; the legacy flat boolean `options` map is still accepted and mapped through `legacySettings`; for per-account templates `settings` may be the email-keyed map (see Per-account settings values above); timezone precedence is payload > onboarding record > UTC. Idempotent per-template replace scoped to the active agent: skills are pre-validated (`assertSkillNamesResolve`, a clean 400 with zero side effects), then the owning agent's job with this `templateId` is deleted and one fresh job created via `createScheduledJob` — the same call `POST /api/jobs` makes. The owning agent is resolved server-side (never caller-supplied), the same way `createScheduledJob` stamps `agentId`. Returns the `JobRecord`. |
 | `DELETE /api/routines/templates/<id>` | Removes the active agent's installed job(s) with this `templateId` (same server-side agent resolution as install); 404 when that agent has none. For message-delivering routines, `removeJob` archives the routine's conversation with the job — it leaves the Messages list, its history stays addressable by id. |
 
 ### Delivery: visible routines own conversations when they produce chat output

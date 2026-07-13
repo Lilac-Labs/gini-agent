@@ -19,8 +19,9 @@
 import { resolveEffectiveContext } from "../execution/effective-context";
 import { assertSkillNamesResolve, createScheduledJob, removeJob } from "../jobs";
 import { mutateState, readState, setContainerArchived } from "../state";
+import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../state/google-accounts";
 import { readOnboarding } from "../state/onboarding";
-import type { JobRecord, JobStatus, RuntimeConfig, RuntimeState } from "../types";
+import type { GoogleAccount, JobRecord, JobStatus, RuntimeConfig, RuntimeState } from "../types";
 
 // One editable Gmail filtering label: the exact label name, a UI-only swatch
 // color (hex — never pushed to Gmail label colors), the natural-language
@@ -53,6 +54,25 @@ export interface RoutineSettingsSection {
 // The resolved settings state, keyed by field key (flat across sections).
 export type RoutineSettings = Record<string, boolean | string | RoutineLabelRule[]>;
 
+// The persisted settings shape for per-account templates: one resolved
+// settings state per connected Google account, keyed by lowercased email —
+// the same address key EmailWatcherRecord.accountEmail matches accounts on,
+// and the way the agent addresses accounts in prompts. The wrapper's
+// `accounts` object is what distinguishes it from a legacy flat blob when
+// reading a persisted templateSettings. Flat templates keep the bare
+// RoutineSettings blob, and a per-account template installed with zero
+// registered accounts falls back to it too, so instances without a Google
+// account keep the flat single-blob behavior.
+export interface PerAccountRoutineSettings {
+  accounts: Record<string, RoutineSettings>;
+}
+
+export function isPerAccountSettings(value: unknown): value is PerAccountRoutineSettings {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const accounts = (value as { accounts?: unknown }).accounts;
+  return accounts !== null && typeof accounts === "object" && !Array.isArray(accounts);
+}
+
 export interface RoutineTemplate {
   id: string;
   name: string;
@@ -66,6 +86,13 @@ export interface RoutineTemplate {
   // creating a Messages conversation of their own.
   createsMessagesConversation: boolean;
   settings: RoutineSettingsSection[];
+  // Whether this template's settings VALUES are kept per connected Google
+  // account (the field schema in `settings` stays shared across accounts).
+  // Install persists the { accounts } wrapper instead of one flat blob,
+  // buildSpec composes a per-account prompt from it, and the gallery view
+  // joins each registered account's resolved state as
+  // installed.accountSettings.
+  perAccountSettings?: boolean;
   // Map a legacy flat boolean option map — the pre-settings wire shape still
   // sent by POST /api/onboarding/routines and persisted on older jobs as
   // templateOptions — onto the settings model. Keys without a same-named
@@ -73,12 +100,17 @@ export interface RoutineTemplate {
   // archiveUnimportant); absent, the option map is used as settings verbatim.
   legacySettings?(options: Record<string, boolean>): RoutineSettings;
   // Compose the createScheduledJob payload for the given resolved settings
-  // state. Templates with settings stamp the state as `templateSettings`
+  // state — the flat blob, or the { accounts } wrapper for per-account
+  // templates. Templates with settings stamp the state as `templateSettings`
   // (next to `templateId`) so the installed job records the configuration it
   // was built from. Returns undefined when the selection yields no behavior
-  // at all (an Auto-inbox with every function off), mirroring the
-  // onboarding rule that such a selection creates no job.
-  buildSpec(settings: RoutineSettings, timezone: string): Record<string, unknown> | undefined;
+  // at all (an Auto-inbox with every function off — for the per-account
+  // shape, off on every account), mirroring the onboarding rule that such a
+  // selection creates no job.
+  buildSpec(
+    settings: RoutineSettings | PerAccountRoutineSettings,
+    timezone: string
+  ): Record<string, unknown> | undefined;
 }
 
 // The design's eight label swatch hexes, in default-label order. Doubles as
@@ -105,6 +137,55 @@ const AUTO_INBOX_DEFAULT_LABELS: RoutineLabelRule[] = [
 // default labels (legacySettings below).
 const LEGACY_AUTO_ARCHIVE_LABEL_NAMES = new Set(["newsletters", "promotional", "updates"]);
 
+// One account's Auto-inbox behavior lines, composed ONLY of the functions
+// its settings toggle on. Shared by both buildSpec shapes: the flat blob
+// emits them directly, the per-account wrapper emits each account's lines
+// under its "Account <email>:" heading.
+function autoInboxBehaviors(settings: RoutineSettings): string[] {
+  const labels = (Array.isArray(settings.labels) ? settings.labels : []) as RoutineLabelRule[];
+  const labelPrefix = settings.labelPrefix === true;
+  const draftRepliesScope = collapseWhitespace(typeof settings.draftRepliesScope === "string" ? settings.draftRepliesScope : "");
+  const schedulingRules = collapseWhitespace(typeof settings.schedulingRules === "string" ? settings.schedulingRules : "");
+  const behaviors: string[] = [];
+  if (settings.labelNewMail === true && labels.length > 0) {
+    behaviors.push(
+      [
+        "- Label new mail. Classify each new email into the single best-fitting label from this list, creating the Gmail label first when it doesn't exist yet:",
+        ...labels.map((label) => {
+          const name = labelPrefix ? `Gini/${label.name}` : label.name;
+          const rule = collapseWhitespace(label.rule);
+          return `  - "${name}"${label.autoArchive ? " (auto-archive)" : ""}${rule ? `: ${rule}` : ""}`;
+        }),
+        "  When no label fits, leave the email unlabeled — never invent labels outside this list.",
+        "  After labeling, archive (remove the INBOX label from) ONLY emails whose label is marked (auto-archive) above; every other email stays in the inbox."
+      ].join("\n")
+    );
+  }
+  if (settings.assistScheduling === true) {
+    behaviors.push(
+      "- Detect scheduling requests. When a response is needed, spawn a surfaced child task to draft the scheduling reply." +
+        (schedulingRules ? ` The user's scheduling rules and availability: ${schedulingRules}` : "")
+    );
+  }
+  if (settings.draftReplies === true) {
+    behaviors.push(
+      "- Detect important emails awaiting a response. For each one, spawn a surfaced child task to draft the reply." +
+        (draftRepliesScope ? ` Only draft replies to these kinds of emails: ${draftRepliesScope}` : "")
+    );
+  }
+  return behaviors;
+}
+
+// The delivery/safety framing every Auto-inbox prompt ends with, identical
+// across the flat and per-account shapes.
+const AUTO_INBOX_SHARED_PROMPT = [
+  "Silent behaviors: labeling and archiving happen directly in this Auto-inbox run and need no user-facing delivery.",
+  "Draft-producing behaviors: do NOT save draft replies in this Auto-inbox run. For every email that needs a reply or scheduling response, call spawn_task with surface:true and await:\"none\" so the user sees a Home task. Use one task per email thread/message, with a stable correlation_key like `auto-inbox:<account>:<message-or-thread-id>` so later runs do not duplicate it.",
+  "Each spawned task brief must be self-contained: include the exact Gmail account, message id and thread id when known, sender, subject, relevant body/snippet, why a response is needed, and any scheduling constraints/calendar context already discovered.",
+  "The spawned task's goal is to save a Gmail draft and render it as an `email-draft` card with DraftId and Account so the user can review, iterate, and send from the card. If the draft proposes a specific meeting time, the child task must also render the calendar preview required by the google-gmail skill.",
+  "Gini never sends email or messages without the user's review — save drafts only, never send."
+];
+
 // The starter catalog. Adding a template is one entry here — prompts and
 // crons are product-owned (never composed in the browser), and the field
 // defaults match the onboarding StepRoutines defaults.
@@ -116,6 +197,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     icon: "inbox",
     scheduleHint: "Every 30 minutes",
     createsMessagesConversation: false,
+    perAccountSettings: true,
     settings: [
       {
         key: "labeling",
@@ -201,38 +283,38 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
         : {})
     }),
     buildSpec: (settings, timezone) => {
-      const labels = (Array.isArray(settings.labels) ? settings.labels : []) as RoutineLabelRule[];
-      const labelPrefix = settings.labelPrefix === true;
-      const draftRepliesScope = collapseWhitespace(typeof settings.draftRepliesScope === "string" ? settings.draftRepliesScope : "");
-      const schedulingRules = collapseWhitespace(typeof settings.schedulingRules === "string" ? settings.schedulingRules : "");
-      // The prompt is composed ONLY of the functions the user toggled on.
-      const behaviors: string[] = [];
-      if (settings.labelNewMail === true && labels.length > 0) {
-        behaviors.push(
-          [
-            "- Label new mail. Classify each new email into the single best-fitting label from this list, creating the Gmail label first when it doesn't exist yet:",
-            ...labels.map((label) => {
-              const name = labelPrefix ? `Gini/${label.name}` : label.name;
-              const rule = collapseWhitespace(label.rule);
-              return `  - "${name}"${label.autoArchive ? " (auto-archive)" : ""}${rule ? `: ${rule}` : ""}`;
-            }),
-            "  When no label fits, leave the email unlabeled — never invent labels outside this list.",
-            "  After labeling, archive (remove the INBOX label from) ONLY emails whose label is marked (auto-archive) above; every other email stays in the inbox."
+      // Per-account shape: each account contributes its own behavior lines
+      // under an "Account <email>:" heading (its own labels/prefix, reply
+      // scope, scheduling rules). Accounts whose functions are all off are
+      // omitted; every account off means no job at all, the same rule as the
+      // flat shape. Email keys were validated whitespace-free by
+      // resolveInstallSettings, so a key can never forge extra prompt lines.
+      if (isPerAccountSettings(settings)) {
+        const perAccount = Object.entries(settings.accounts)
+          .map(([email, accountSettings]) => ({ email, behaviors: autoInboxBehaviors(accountSettings) }))
+          .filter((entry) => entry.behaviors.length > 0);
+        if (perAccount.length === 0) return undefined;
+        const assistsScheduling = Object.values(settings.accounts).some(
+          (accountSettings) => accountSettings.assistScheduling === true
+        );
+        return {
+          name: "Auto-inbox",
+          templateId: "auto-inbox",
+          templateSettings: { accounts: { ...settings.accounts } },
+          cronExpression: "*/30 * * * *",
+          cronTimezone: timezone,
+          skillNames: assistsScheduling ? ["google-gmail", "google-calendar"] : ["google-gmail"],
+          prompt: [
+            "Tidy the user's Gmail inboxes: work through mail that arrived since the last run.",
+            "Work ONLY the Gmail accounts listed below — each account carries its own configuration, applied to that account's inbox and no other:",
+            ...perAccount.flatMap(({ email, behaviors }) => [`Account ${email}:`, ...behaviors]),
+            ...AUTO_INBOX_SHARED_PROMPT
           ].join("\n")
-        );
+        };
       }
-      if (settings.assistScheduling === true) {
-        behaviors.push(
-          "- Detect scheduling requests. When a response is needed, spawn a surfaced child task to draft the scheduling reply." +
-            (schedulingRules ? ` The user's scheduling rules and availability: ${schedulingRules}` : "")
-        );
-      }
-      if (settings.draftReplies === true) {
-        behaviors.push(
-          "- Detect important emails awaiting a response. For each one, spawn a surfaced child task to draft the reply." +
-            (draftRepliesScope ? ` Only draft replies to these kinds of emails: ${draftRepliesScope}` : "")
-        );
-      }
+      // Flat shape (zero-accounts installs and legacy jobs): the prompt is
+      // composed ONLY of the functions the user toggled on.
+      const behaviors = autoInboxBehaviors(settings);
       if (behaviors.length === 0) return undefined;
       return {
         name: "Auto-inbox",
@@ -244,11 +326,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
         prompt: [
           "Tidy the user's Gmail inbox: work through mail that arrived since the last run.",
           ...behaviors,
-          "Silent behaviors: labeling and archiving happen directly in this Auto-inbox run and need no user-facing delivery.",
-          "Draft-producing behaviors: do NOT save draft replies in this Auto-inbox run. For every email that needs a reply or scheduling response, call spawn_task with surface:true and await:\"none\" so the user sees a Home task. Use one task per email thread/message, with a stable correlation_key like `auto-inbox:<account>:<message-or-thread-id>` so later runs do not duplicate it.",
-          "Each spawned task brief must be self-contained: include the exact Gmail account, message id and thread id when known, sender, subject, relevant body/snippet, why a response is needed, and any scheduling constraints/calendar context already discovered.",
-          "The spawned task's goal is to save a Gmail draft and render it as an `email-draft` card with DraftId and Account so the user can review, iterate, and send from the card. If the draft proposes a specific meeting time, the child task must also render the calendar preview required by the google-gmail skill.",
-          "Gini never sends email or messages without the user's review — save drafts only, never send."
+          ...AUTO_INBOX_SHARED_PROMPT
         ].join("\n")
       };
     }
@@ -267,20 +345,25 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
         fields: [{ kind: "toggle", key: "personalizedNews", label: "Personalized news topics", defaultValue: true }]
       }
     ],
-    buildSpec: (settings, timezone) => ({
-      name: "Morning Briefing",
-      templateId: "morning-briefing",
-      templateSettings: { ...settings },
-      cronExpression: "0 8 * * *",
-      cronTimezone: timezone,
-      skillNames: ["google-gmail", "google-calendar"],
-      prompt: [
-        "Prepare the user's morning briefing: a brief digest of important unread email plus today's calendar.",
-        ...(settings.personalizedNews === true
-          ? ["Add a short section of news relevant to the user's work, using what you know about them from memory and their profile."]
-          : [])
-      ].join("\n")
-    })
+    buildSpec: (state, timezone) => {
+      // Flat-only template: the install path builds the { accounts } wrapper
+      // only for perAccountSettings templates, so it never reaches here.
+      const settings = isPerAccountSettings(state) ? {} : state;
+      return {
+        name: "Morning Briefing",
+        templateId: "morning-briefing",
+        templateSettings: { ...settings },
+        cronExpression: "0 8 * * *",
+        cronTimezone: timezone,
+        skillNames: ["google-gmail", "google-calendar"],
+        prompt: [
+          "Prepare the user's morning briefing: a brief digest of important unread email plus today's calendar.",
+          ...(settings.personalizedNews === true
+            ? ["Add a short section of news relevant to the user's work, using what you know about them from memory and their profile."]
+            : [])
+        ].join("\n")
+      };
+    }
   },
   {
     id: "meeting-briefing",
@@ -355,14 +438,28 @@ export function reusableRoutineSessionId(state: RuntimeState, job: JobRecord): s
   return session && session.kind === "channel" && !session.archivedAt ? session.id : undefined;
 }
 
+// One connected account's row in a per-account template's installed state:
+// the registry identity plus the resolved settings that account renders in
+// the Settings tab. Exactly the effective primary row carries `primary`, so
+// the web's account switcher can default to it.
+export interface RoutineAccountSettingsView {
+  accountId: string;
+  email: string;
+  primary?: boolean;
+  settings: RoutineSettings;
+}
+
 // The gallery's wire shape: the template presentation fields plus the live
 // installed state — the job carrying this templateId (scoped to `agentId`
 // when supplied, like GET /api/jobs). `installed.settings` is the resolved
 // settings state the job was installed with (absent on templates without
-// settings and on jobs predating provenance); `installed.chatSessionId`
-// is the routine's conversation when this template delivers to Messages
-// (absent for Auto-inbox and on jobs predating session provisioning) so the
-// detail page can deep-link Open messages where applicable.
+// settings and on jobs predating provenance); per-account templates carry
+// `installed.accountSettings` instead — one row per registered Google
+// account — falling back to the flat `settings` only when no account is
+// registered. `installed.chatSessionId` is the routine's conversation when
+// this template delivers to Messages (absent for Auto-inbox and on jobs
+// predating session provisioning) so the detail page can deep-link Open
+// messages where applicable.
 export interface RoutineTemplateView {
   id: string;
   name: string;
@@ -370,12 +467,20 @@ export interface RoutineTemplateView {
   icon: string;
   scheduleHint: string;
   settings: RoutineSettingsSection[];
-  installed: { jobId: string; status: JobStatus; settings?: RoutineSettings; chatSessionId?: string } | null;
+  installed: {
+    jobId: string;
+    status: JobStatus;
+    settings?: RoutineSettings;
+    accountSettings?: RoutineAccountSettingsView[];
+    chatSessionId?: string;
+  } | null;
 }
 
 // GET /api/routines/templates
 export function listRoutineTemplates(config: RuntimeConfig, agentId?: string): { templates: RoutineTemplateView[] } {
   const jobs = readState(config.instance).jobs;
+  const accounts = registeredGmailAccounts();
+  const primaryAccountId = effectivePrimaryId(accounts);
   return {
     templates: ROUTINE_TEMPLATES.map((template) => {
       const job = jobs.find((j) => j.templateId === template.id && (!agentId || j.agentId === agentId));
@@ -390,7 +495,16 @@ export function listRoutineTemplates(config: RuntimeConfig, agentId?: string): {
           ? {
               jobId: job.id,
               status: job.status,
-              settings: installedSettings(template, job),
+              ...(template.perAccountSettings && accounts.length > 0
+                ? {
+                    accountSettings: accounts.map((account) => ({
+                      accountId: account.id,
+                      email: accountEmailKey(account),
+                      ...(account.id === primaryAccountId ? { primary: true as const } : {}),
+                      settings: installedAccountSettings(template, job, account)
+                    }))
+                  }
+                : { settings: installedSettings(template, job) }),
               ...(template.createsMessagesConversation ? { chatSessionId: job.chatSessionId } : {})
             }
           : null
@@ -415,10 +529,54 @@ function installedSettings(template: RoutineTemplate, job: JobRecord): RoutineSe
   return fillSettingsDefaults(template, raw as Record<string, unknown>);
 }
 
+// The settings state ONE account renders in a per-account template's
+// Settings tab, by precedence: the account's own entry in the persisted
+// { accounts } wrapper, else the job's legacy flat stamp (a pre-per-account
+// install applies to every account alike), else the account's seeded
+// defaults — so an account connected after the install still shows an
+// editable state and joins the persisted map on the next save.
+function installedAccountSettings(template: RoutineTemplate, job: JobRecord, account: GoogleAccount): RoutineSettings {
+  if (isPerAccountSettings(job.templateSettings)) {
+    const own = job.templateSettings.accounts[accountEmailKey(account)];
+    return own !== undefined
+      ? fillSettingsDefaults(template, own as Record<string, unknown>)
+      : defaultSettingsForAccount(template, account);
+  }
+  return installedSettings(template, job) ?? defaultSettingsForAccount(template, account);
+}
+
+// The registry rows per-account settings enumerate: every registered Google
+// account whose email is known (a trusted-registered row can predate its
+// email backfill — it joins once a list read back-fills the live email).
+// Sync and registry-only (no gws probes): this runs on every gallery GET.
+function registeredGmailAccounts(): GoogleAccount[] {
+  return readGoogleAccounts().filter((account) => account.email.trim().length > 0);
+}
+
+// The lowercased-email key an account's settings live under — the same
+// address form EmailWatcherRecord.accountEmail matches on.
+function accountEmailKey(account: GoogleAccount): string {
+  return account.email.trim().toLowerCase();
+}
+
+// The effective primary among the rows: the persisted primaryAccountId when
+// it names one of them, else the first provisioned row, else the first row —
+// the same precedence as effectivePrimaryAccountId in
+// integrations/connectors/google-accounts.ts, mirrored registry-only here
+// (like resolveScanConfigDir in onboarding.ts) so this hot gallery read
+// never grows a connectors-layer import.
+function effectivePrimaryId(accounts: GoogleAccount[]): string | undefined {
+  const persisted = readPrimaryGoogleAccountId();
+  if (persisted && accounts.some((account) => account.id === persisted)) return persisted;
+  return (accounts.find((account) => account.provisioned) ?? accounts[0])?.id;
+}
+
 // POST /api/routines/templates/<id>/install body: { timezone?, settings?,
 // options? }. Missing setting keys fall back to the template defaults; the
 // legacy flat boolean `options` map is still accepted (mapped through
-// legacySettings) so pre-settings clients keep working. Idempotent
+// legacySettings) so pre-settings clients keep working. For per-account
+// templates `settings` is keyed by account email (resolveInstallSettings
+// below owns the shapes and fallbacks). Idempotent
 // per-template replace: any job the OWNING AGENT already has carrying this
 // templateId is deleted, then one fresh job is created — the same
 // createScheduledJob call POST /api/jobs makes. The owning agent is resolved
@@ -438,12 +596,7 @@ export async function installRoutineTemplate(
     payload.timezone !== undefined
       ? validateTimezone(payload.timezone)
       : (readOnboarding(config.instance)?.timezone ?? "UTC");
-  const settings = resolveSettings(
-    template,
-    payload.settings !== undefined && payload.settings !== null
-      ? payload.settings
-      : legacyOptionsToSettings(template, payload.options)
-  );
+  const settings = resolveInstallSettings(template, payload);
   const spec = template.buildSpec(settings, timezone);
   if (!spec) {
     throw new Error(`Invalid input: enable at least one ${template.name} option`);
@@ -539,6 +692,99 @@ export function legacyOptionsToSettings(template: RoutineTemplate, raw: unknown)
   }
   const options = raw as Record<string, boolean>;
   return template.legacySettings ? template.legacySettings(options) : options;
+}
+
+// Resolve an install payload's settings ({ settings?, options? }) into the
+// state buildSpec composes from. Flat templates resolve exactly as before
+// (settings > legacy options > field defaults). For per-account templates
+// the resolved state is the { accounts } wrapper:
+//   - a body keyed by email validates each entry through resolveSettings
+//     under its lowercased email key;
+//   - a flat body — or the legacy boolean options map, which is how the
+//     onboarding routines path arrives here — applies alike to every
+//     registered account;
+//   - an absent body seeds one entry per registered account from the
+//     per-account defaults;
+//   - with zero registered accounts every non-account-keyed shape falls back
+//     to the flat single blob, so instances without a Google account still
+//     install.
+// Shared by the gallery install and the onboarding routineJobSpecs so both
+// writers persist the same shape.
+export function resolveInstallSettings(
+  template: RoutineTemplate,
+  payload: Record<string, unknown>
+): RoutineSettings | PerAccountRoutineSettings {
+  const raw =
+    payload.settings !== undefined && payload.settings !== null
+      ? payload.settings
+      : legacyOptionsToSettings(template, payload.options);
+  if (!template.perAccountSettings) return resolveSettings(template, raw);
+  if (isAccountKeyedSettings(raw)) {
+    return { accounts: resolveAccountSettingsMap(template, raw as Record<string, unknown>) };
+  }
+  const accounts = registeredGmailAccounts();
+  if (accounts.length === 0) return resolveSettings(template, raw);
+  if (raw !== undefined) {
+    return {
+      accounts: Object.fromEntries(accounts.map((account) => [accountEmailKey(account), resolveSettings(template, raw)]))
+    };
+  }
+  return {
+    accounts: Object.fromEntries(
+      accounts.map((account) => [accountEmailKey(account), defaultSettingsForAccount(template, account)])
+    )
+  };
+}
+
+// A settings body is account-keyed when any key carries an email's "@" —
+// field keys never do — so the flat blob and the per-account map share the
+// wire without a wrapper. A map mixing email and field keys fails the
+// per-key email validation below, surfacing the payload mistake.
+function isAccountKeyedSettings(raw: unknown): boolean {
+  if (raw === null || raw === undefined || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const keys = Object.keys(raw);
+  return keys.length > 0 && keys.some((key) => key.includes("@"));
+}
+
+// Bounds on the per-account map: ten entries covers any realistic set of
+// connected accounts while keeping a hostile payload from ballooning the
+// persisted job record.
+const MAX_SETTINGS_ACCOUNTS = 10;
+const MAX_ACCOUNT_EMAIL_CHARS = 200;
+
+// Validate an account-keyed settings map: each key must look like an email
+// (non-empty, "@", bounded, whitespace-free — keys embed into "Account
+// <email>:" prompt lines, so whitespace could otherwise forge extra lines)
+// and is lowercased on store; each value passes the same per-field
+// validation a flat install does. Emails are NOT checked against the
+// registry: the web posts the map it rendered, and an account removed
+// between render and save must not fail the save.
+function resolveAccountSettingsMap(template: RoutineTemplate, raw: Record<string, unknown>): Record<string, RoutineSettings> {
+  const entries = Object.entries(raw);
+  if (entries.length > MAX_SETTINGS_ACCOUNTS) {
+    throw new Error(`Invalid input: settings allows at most ${MAX_SETTINGS_ACCOUNTS} accounts`);
+  }
+  const accounts: Record<string, RoutineSettings> = {};
+  for (const [key, value] of entries) {
+    const email = key.trim().toLowerCase();
+    if (email.length === 0 || email.length > MAX_ACCOUNT_EMAIL_CHARS || !email.includes("@") || /\s/.test(email)) {
+      throw new Error(`Invalid input: settings account key "${key}" must be an email address`);
+    }
+    if (accounts[email] !== undefined) {
+      throw new Error(`Invalid input: settings repeats account "${email}"`);
+    }
+    accounts[email] = resolveSettings(template, value);
+  }
+  return accounts;
+}
+
+// One account's seeded default settings: the catalog field defaults.
+function defaultSettingsForAccount(template: RoutineTemplate, _account: GoogleAccount): RoutineSettings {
+  const resolved: RoutineSettings = {};
+  for (const field of settingFields(template)) {
+    resolved[field.key] = defaultSettingValue(field);
+  }
+  return resolved;
 }
 
 const MAX_LABELS = 24;

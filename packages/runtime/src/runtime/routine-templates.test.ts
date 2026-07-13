@@ -6,6 +6,11 @@
 //     rule and the label-list prompt enumeration)
 //   - resolveSettings validation (unknown keys, per-kind shapes, label
 //     caps/canonicalization) and the legacy flat-options mapping
+//   - per-account settings (Auto-inbox): resolveInstallSettings shapes (the
+//     email-keyed map, flat-body fan-out to every registered account,
+//     absent-body seeding, the zero-accounts flat fallback), the
+//     multi-account buildSpec prompt, and the accountSettings view join
+//     precedence (saved entry > legacy flat stamp > seeded defaults)
 //   - GET reflects installed state (templateId join, agent scoping)
 //   - install: templateId stamping, settings defaults, idempotent
 //     per-template replace, timezone precedence (payload > onboarding record
@@ -38,9 +43,10 @@ import { join } from "node:path";
 
 import { createHandler } from "../http";
 import { readState } from "../state";
+import { addGoogleAccount, configDirForAccount, setPrimaryGoogleAccountId } from "../state/google-accounts";
 import { writeOnboarding } from "../state/onboarding";
-import { ROUTINE_TEMPLATES, resolveSettings, routineTemplate } from "./routine-templates";
-import type { RoutineLabelRule } from "./routine-templates";
+import { ROUTINE_TEMPLATES, resolveInstallSettings, resolveSettings, routineTemplate } from "./routine-templates";
+import type { PerAccountRoutineSettings, RoutineLabelRule, RoutineSettings } from "./routine-templates";
 import type { RuntimeConfig } from "../types";
 
 const DEFAULT_LABEL_NAMES = [
@@ -230,6 +236,237 @@ describe("routine templates", () => {
       { name: "VIP", color: "#ABCDEF", rule: "", autoArchive: true }
     ]);
     expect(resolved.schedulingRules).toBe("mornings only");
+  });
+
+  test("resolveInstallSettings validates the email-keyed map and picks the shape per registry", () => {
+    const template = routineTemplate("auto-inbox")!;
+
+    // Zero registered accounts: every non-account-keyed shape falls back to
+    // the flat single blob (the pre-per-account behavior).
+    const flat = resolveInstallSettings(template, { settings: { labelNewMail: false } }) as RoutineSettings;
+    expect(flat.labelNewMail).toBe(false);
+    expect((resolveInstallSettings(template, {}) as RoutineSettings).labelNewMail).toBe(true);
+
+    // An email-keyed map resolves per account regardless of the registry:
+    // keys are lowercased, each value passes the same per-field validation.
+    const mapped = resolveInstallSettings(template, {
+      settings: { "A@X.com": { labelNewMail: false }, "b@y.com": {} }
+    }) as PerAccountRoutineSettings;
+    expect(Object.keys(mapped.accounts).sort()).toEqual(["a@x.com", "b@y.com"]);
+    expect(mapped.accounts["a@x.com"]!.labelNewMail).toBe(false);
+    expect(mapped.accounts["b@y.com"]!.labelNewMail).toBe(true);
+
+    // A key without "@" in an otherwise account-keyed map, a whitespace-
+    // forgeable key (emails embed into "Account <email>:" prompt lines), a
+    // case-collapsed duplicate, and an oversized map are payload mistakes.
+    expect(() => resolveInstallSettings(template, { settings: { "a@x.com": {}, nope: {} } })).toThrow(
+      'account key "nope" must be an email address'
+    );
+    expect(() => resolveInstallSettings(template, { settings: { "a b@x.com": {} } })).toThrow(
+      "must be an email address"
+    );
+    expect(() => resolveInstallSettings(template, { settings: { "a@x.com": {}, "A@x.COM": {} } })).toThrow(
+      'repeats account "a@x.com"'
+    );
+    expect(() =>
+      resolveInstallSettings(template, {
+        settings: Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`user${i}@x.com`, {}]))
+      })
+    ).toThrow("at most 10 accounts");
+    // Per-value validation is the same as a flat install's.
+    expect(() => resolveInstallSettings(template, { settings: { "a@x.com": { labels: [{ name: "" }] } } })).toThrow(
+      "label names must be non-empty"
+    );
+    // Flat templates never take the map shape: the email key is just an
+    // unknown setting there.
+    expect(() =>
+      resolveInstallSettings(routineTemplate("morning-briefing")!, { settings: { "a@x.com": {} } })
+    ).toThrow('unknown setting "a@x.com"');
+  });
+
+  test("buildSpec composes the per-account prompt from the { accounts } wrapper", () => {
+    const template = routineTemplate("auto-inbox")!;
+    const spec = template.buildSpec(
+      {
+        accounts: {
+          "a@x.com": resolveSettings(template, {
+            labelPrefix: true,
+            labels: [{ name: "vip", color: "#4277FB", rule: "Important people", autoArchive: true }],
+            draftReplies: false,
+            assistScheduling: false
+          }),
+          "b@y.com": resolveSettings(template, {
+            labelNewMail: false,
+            draftRepliesScope: "Only real people",
+            assistScheduling: false
+          }),
+          // Every function off: this account contributes nothing and is
+          // omitted from the prompt entirely.
+          "c@z.com": resolveSettings(template, { labelNewMail: false, draftReplies: false, assistScheduling: false })
+        }
+      },
+      "UTC"
+    )!;
+    const prompt = spec.prompt as string;
+    expect(prompt).toContain(
+      "Work ONLY the Gmail accounts listed below — each account carries its own configuration, applied to that account's inbox and no other:"
+    );
+    // Each account heading is followed by that account's own behavior lines
+    // (a@x.com's prefixed auto-archive label; b@y.com's scoped replies).
+    expect(prompt).toContain('Account a@x.com:\n- Label new mail.');
+    expect(prompt).toContain('  - "Gini/vip" (auto-archive): Important people');
+    expect(prompt).toContain(
+      "Account b@y.com:\n- Detect important emails awaiting a response. For each one, spawn a surfaced child task to draft the reply. Only draft replies to these kinds of emails: Only real people"
+    );
+    expect(prompt).not.toContain("c@z.com");
+    // The shared delivery/safety framing survives on the per-account shape.
+    expect(prompt).toContain("Gini never sends email or messages without the user's review — save drafts only, never send.");
+    // No account assists scheduling, so the calendar skill drops off; the
+    // stamped settings are the wrapper itself.
+    expect(spec.skillNames).toEqual(["google-gmail"]);
+    expect((spec.templateSettings as PerAccountRoutineSettings).accounts["a@x.com"]).toBeDefined();
+
+    const scheduling = template.buildSpec(
+      {
+        accounts: {
+          "a@x.com": resolveSettings(template, { assistScheduling: false }),
+          "b@y.com": resolveSettings(template, { schedulingRules: "Mornings only" })
+        }
+      },
+      "UTC"
+    )!;
+    expect(scheduling.skillNames).toEqual(["google-gmail", "google-calendar"]);
+    expect(scheduling.prompt as string).toContain("The user's scheduling rules and availability: Mornings only");
+
+    // Every account off ⇒ no spec at all, mirroring the flat zero-behavior rule.
+    expect(
+      template.buildSpec(
+        {
+          accounts: {
+            "a@x.com": resolveSettings(template, { labelNewMail: false, draftReplies: false, assistScheduling: false })
+          }
+        },
+        "UTC"
+      )
+    ).toBeUndefined();
+  });
+
+  test("install seeds and persists the per-account map for registered accounts", async () => {
+    const config = testConfig(root, "templates-per-account-install");
+    const handler = createHandler(config);
+    await seedWorkspaceSkills(handler, config);
+    seedGoogleAccount("gacct_a", "A@X.com");
+    seedGoogleAccount("gacct_b", "b@y.com");
+
+    // Settings omitted → one seeded entry per registered account (emails
+    // lowercased), each the catalog defaults.
+    const seeded = await call(handler, config, "/api/routines/templates/auto-inbox/install", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    const seededSettings = seeded.templateSettings as { accounts: Record<string, RoutineSettings> };
+    expect(Object.keys(seededSettings.accounts).sort()).toEqual(["a@x.com", "b@y.com"]);
+    expect(seededSettings.accounts["a@x.com"]!.labelNewMail).toBe(true);
+    expect((seededSettings.accounts["b@y.com"]!.labels as RoutineLabelRule[]).map((l) => l.name)).toEqual(
+      DEFAULT_LABEL_NAMES
+    );
+    expect(seeded.prompt).toContain("Account a@x.com:");
+    expect(seeded.prompt).toContain("Account b@y.com:");
+
+    // A legacy flat body (the onboarding wire shape) fans out to every
+    // registered account alike — archiveUnimportant lands as per-label
+    // auto-archive on each account's default labels.
+    const legacy = await call(handler, config, "/api/routines/templates/auto-inbox/install", {
+      method: "POST",
+      body: JSON.stringify({ options: { archiveUnimportant: true, draftReplies: false } })
+    });
+    const legacySettings = legacy.templateSettings as { accounts: Record<string, RoutineSettings> };
+    for (const email of ["a@x.com", "b@y.com"]) {
+      expect(legacySettings.accounts[email]!.draftReplies).toBe(false);
+      expect(
+        (legacySettings.accounts[email]!.labels as RoutineLabelRule[]).filter((l) => l.autoArchive).map((l) => l.name)
+      ).toEqual(["newsletters", "promotional", "updates"]);
+    }
+
+    // An email-keyed body persists exactly the entries it names.
+    const explicit = await call(handler, config, "/api/routines/templates/auto-inbox/install", {
+      method: "POST",
+      body: JSON.stringify({ settings: { "a@x.com": { labelNewMail: false } } })
+    });
+    const explicitSettings = explicit.templateSettings as { accounts: Record<string, RoutineSettings> };
+    expect(Object.keys(explicitSettings.accounts)).toEqual(["a@x.com"]);
+    expect(explicitSettings.accounts["a@x.com"]!.labelNewMail).toBe(false);
+  });
+
+  test("GET joins per-account settings with saved > legacy flat > seeded precedence", async () => {
+    const config = testConfig(root, "templates-per-account-view");
+    const handler = createHandler(config);
+    await seedWorkspaceSkills(handler, config);
+    seedGoogleAccount("gacct_a", "a@x.com");
+    seedGoogleAccount("gacct_b", "b@y.com");
+    setPrimaryGoogleAccountId("gacct_b");
+
+    // Saved entry for a@x.com only: it renders its saved state (defaults
+    // filled), while b@y.com — connected but absent from the persisted map —
+    // renders seeded defaults. Exactly the effective primary row is marked.
+    await call(handler, config, "/api/routines/templates/auto-inbox/install", {
+      method: "POST",
+      body: JSON.stringify({ settings: { "a@x.com": { labelNewMail: false } } })
+    });
+    const listed = await call(handler, config, "/api/routines/templates");
+    const autoInbox = listed.templates.find((t: { id: string }) => t.id === "auto-inbox");
+    expect(autoInbox.installed.settings).toBeUndefined();
+    const rows = autoInbox.installed.accountSettings as Array<{
+      accountId: string;
+      email: string;
+      primary?: boolean;
+      settings: RoutineSettings;
+    }>;
+    expect(rows.map((row) => [row.accountId, row.email])).toEqual([
+      ["gacct_a", "a@x.com"],
+      ["gacct_b", "b@y.com"]
+    ]);
+    expect(rows.map((row) => row.primary)).toEqual([undefined, true]);
+    expect(rows[0]!.settings.labelNewMail).toBe(false);
+    expect(rows[0]!.settings.draftReplies).toBe(true);
+    expect(rows[1]!.settings.labelNewMail).toBe(true);
+    expect((rows[1]!.settings.labels as RoutineLabelRule[]).map((l) => l.name)).toEqual(DEFAULT_LABEL_NAMES);
+
+    // A pre-per-account job (legacy flat templateOptions stamp) shows the
+    // same normalized flat state on every account.
+    await call(handler, config, "/api/routines/templates/auto-inbox", { method: "DELETE" });
+    await call(handler, config, "/api/jobs", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Auto-inbox",
+        prompt: "legacy",
+        cronExpression: "*/30 * * * *",
+        skillNames: ["google-gmail"],
+        templateId: "auto-inbox",
+        templateOptions: { labelNewMail: false, archiveUnimportant: true, assistScheduling: true, draftReplies: true }
+      })
+    });
+    const legacyListed = await call(handler, config, "/api/routines/templates");
+    const legacyRows = legacyListed.templates.find((t: { id: string }) => t.id === "auto-inbox").installed
+      .accountSettings as Array<{ email: string; settings: RoutineSettings }>;
+    for (const row of legacyRows) {
+      expect(row.settings.labelNewMail).toBe(false);
+      expect(
+        (row.settings.labels as RoutineLabelRule[]).filter((l) => l.autoArchive).map((l) => l.name)
+      ).toEqual(["newsletters", "promotional", "updates"]);
+    }
+
+    // Flat templates keep the flat settings shape even with accounts around.
+    const morning = legacyListed.templates.find((t: { id: string }) => t.id === "morning-briefing");
+    expect(morning.installed).toBeNull();
+    await call(handler, config, "/api/routines/templates/morning-briefing/install", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    const flatListed = await call(handler, config, "/api/routines/templates");
+    const flatMorning = flatListed.templates.find((t: { id: string }) => t.id === "morning-briefing");
+    expect(flatMorning.installed.accountSettings).toBeUndefined();
+    expect(flatMorning.installed.settings).toEqual({ personalizedNews: true });
   });
 
   test("GET lists the catalog and reflects installed state per agent", async () => {
@@ -763,6 +1000,13 @@ describe("routine templates", () => {
     expect(listed.templates.every((t: { installed: unknown }) => t.installed !== null)).toBe(true);
   });
 });
+
+// Register a Google account in the (scratch-HOME) machine-global registry so
+// per-account installs see it. Emails are stored as given — the settings
+// paths own the lowercasing.
+function seedGoogleAccount(id: string, email: string): void {
+  addGoogleAccount({ id, tag: id, email, configDir: configDirForAccount(id), addedAt: new Date().toISOString() });
+}
 
 // The install path's skillNames validate against ENABLED skills; seed the two
 // Workspace skills the specs reference (bundled in production) and return

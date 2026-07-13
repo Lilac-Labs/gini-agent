@@ -517,6 +517,16 @@ export interface RoutineSettingsSection {
 
 export type RoutineSettings = Record<string, boolean | string | RoutineLabelRule[]>;
 
+// One connected account's row in a per-account template's installed state.
+// Exactly the effective primary account carries `primary`, so the settings
+// tab's account switcher can default to it.
+export interface RoutineAccountSettingsView {
+  accountId: string;
+  email: string;
+  primary?: boolean;
+  settings: RoutineSettings;
+}
+
 export interface RoutineTemplateView {
   id: string;
   name: string;
@@ -527,12 +537,16 @@ export interface RoutineTemplateView {
   // `settings` is the resolved settings state the job was installed with
   // (server-normalized, defaults filled — including legacy installs) —
   // absent on templates without settings and on jobs predating provenance.
+  // Per-account templates (Auto-inbox) carry `accountSettings` instead —
+  // one server-joined row per registered Google account — falling back to
+  // the flat `settings` only when no account is registered.
   // `chatSessionId` is the routine's dedicated conversation (absent only on
   // jobs predating session provisioning) — the Open messages deep link.
   installed: {
     jobId: string;
     status: JobRecord["status"];
     settings?: RoutineSettings;
+    accountSettings?: RoutineAccountSettingsView[];
     chatSessionId?: string;
   } | null;
 }
@@ -550,10 +564,16 @@ export function useRoutineTemplates() {
 }
 
 // POST /api/routines/templates/<id>/install — idempotent per-template
-// replace server-side; returns the created JobRecord.
+// replace server-side; returns the created JobRecord. For per-account
+// templates `settings` is the full email-keyed map (the server tells the
+// two shapes apart by the "@" in the keys).
 export function useInstallRoutineTemplate() {
   const qc = useQueryClient();
-  return useMutation<JobRecord, Error, { id: string; timezone?: string; settings?: RoutineSettings }>({
+  return useMutation<
+    JobRecord,
+    Error,
+    { id: string; timezone?: string; settings?: RoutineSettings | Record<string, RoutineSettings> }
+  >({
     mutationFn: ({ id, ...body }) =>
       api<JobRecord>(`/routines/templates/${encodeURIComponent(id)}/install`, {
         method: "POST",

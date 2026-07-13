@@ -34,8 +34,7 @@ import { runProfileScan } from "./onboarding-scan";
 import {
   ROUTINE_TEMPLATES,
   createRoutineJob,
-  legacyOptionsToSettings,
-  resolveSettings,
+  resolveInstallSettings,
   reusableRoutineSessionId,
   routineTemplate,
   validateTimezone
@@ -313,9 +312,10 @@ export async function applyOnboardingRoutines(
 // the POST body's toggle state onto the shared routine-template catalog
 // (src/runtime/routine-templates.ts) — the prompts/crons/skills are
 // product-owned there (never composed in the browser). The body's flat
-// booleans go through the same legacy-options mapping the gallery install
-// accepts (each template's legacySettings hook, then resolveSettings fills
-// the field defaults), and the Auto-inbox spec is composed ONLY of the
+// booleans go through the same resolveInstallSettings path the gallery
+// install uses (each template's legacySettings hook, field defaults filled,
+// and for per-account templates the flat selection applied to every
+// registered account), and the Auto-inbox spec is composed ONLY of the
 // behaviors the user toggled on (zero behaviors ⇒ buildSpec returns
 // undefined ⇒ no job).
 function routineJobSpecs(payload: Record<string, unknown>, timezone: string): Record<string, unknown>[] {
@@ -330,7 +330,7 @@ function routineJobSpecs(payload: Record<string, unknown>, timezone: string): Re
     const template = routineTemplate(templateId);
     if (!template) continue;
     const legacyOptions = Object.fromEntries(options.map((key) => [key, flag(section, key)]));
-    const settings = resolveSettings(template, legacyOptionsToSettings(template, legacyOptions));
+    const settings = resolveInstallSettings(template, { options: legacyOptions });
     const spec = template.buildSpec(settings, timezone);
     if (spec) specs.push(spec);
   }

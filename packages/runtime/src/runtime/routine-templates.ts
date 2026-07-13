@@ -122,6 +122,12 @@ export interface RoutineTemplate {
 // (src/runtime/label-discovery.ts).
 export const LABEL_COLOR_PALETTE = ["#4277FB", "#12B5C4", "#F5820A", "#1FA463", "#EC6B9E", "#9B7DF0", "#7DA9FB", "#E8A317"];
 
+// The Gmail namespace the labelPrefix toggle nests labels under
+// ("Gini/<name>"). Label discovery (src/runtime/label-discovery.ts) excludes
+// this exact prefix at its fetch stage so the routine's own output labels are
+// never re-imported as the user's organizational scheme.
+export const ROUTINE_LABEL_NAMESPACE = "Gini/";
+
 // The Auto-inbox starter label set (names, colors, and classification rules
 // from the GiniRoutineDetail design handoff). Every label starts with
 // auto-archive off — archiving is an explicit per-label opt-in.
@@ -156,7 +162,7 @@ function autoInboxBehaviors(settings: RoutineSettings): string[] {
       [
         "- Label new mail. Classify each new email into the single best-fitting label from this list, creating the Gmail label first when it doesn't exist yet:",
         ...labels.map((label) => {
-          const name = labelPrefix ? `Gini/${label.name}` : label.name;
+          const name = labelPrefix ? `${ROUTINE_LABEL_NAMESPACE}${label.name}` : label.name;
           const rule = collapseWhitespace(label.rule);
           return `  - "${name}"${label.autoArchive ? " (auto-archive)" : ""}${rule ? `: ${rule}` : ""}`;
         }),

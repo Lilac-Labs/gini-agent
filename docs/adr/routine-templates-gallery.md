@@ -73,17 +73,22 @@ An account's *seeded defaults* prefer the user's own labels over the
 standard starter set. When a Google account is connected, a fire-and-forget
 background pipeline (`src/runtime/label-discovery.ts`, mirroring the
 onboarding profile scan's discipline) digests the account's EXISTING Gmail
-labels: a deterministic fetch stage — the account's plaintext
-`authorized_user` credential minting an in-memory token, then direct Gmail
-HTTP for the user-created label list plus per-label message counts and a
-few recent From/Subject samples — feeds ONE `generateStructured` call that
-keeps the labels a human plainly uses to organize mail and infers each
-one's plain-language classification rule. The validator clamps rather than
-rejects (label names and samples are untrusted mailbox content), a digested
-label must name one of the REAL input labels, and auto-archive is always
-off — archiving stays a user opt-in. There is deliberately no gws-spawn
-fallback: an account without the plaintext credential records a clean
-failure and no subprocess ever spawns from the triggers.
+labels: a deterministic fetch stage — the same auth gate as the onboarding
+scan's mailbox fetch (the plaintext `authorized_user` credential when
+present, else one `gws auth export --unmasked` spawn for keyring-backed
+logins) minting an in-memory token, then direct Gmail HTTP for the
+user-created label list plus per-label message counts and a few recent
+From/Subject samples — feeds ONE `generateStructured` call that keeps the
+labels a human plainly uses to organize mail and infers each one's
+plain-language classification rule. Labels under the routine's own output
+namespace (`Gini/…`, the labelPrefix composition) are excluded at the fetch
+stage: on a mailbox where Auto-inbox already ran they are the routine's
+product, and re-importing them would circularly seed the profile with our
+own labels. The validator clamps rather than rejects (label names and
+samples are untrusted mailbox content), a digested label must name one of
+the REAL input labels, and auto-archive is always off — archiving stays a
+user opt-in. An account where both credential paths come up empty records
+a clean failure.
 
 The digest persists machine-globally per account at
 `~/.gini/google-accounts/<accountId>/label-profile.json`

@@ -4,10 +4,13 @@
 // account's EXISTING Gmail labels — the user's own organizational scheme —
 // into per-account filtering-label defaults for Auto-inbox:
 //   1. fetchLabelUsage — deterministic Gmail reads off an in-memory access
-//      token minted from the account's plaintext `authorized_user`
-//      credentials.json (the shared onboarding-scan toolkit): the
-//      user-created label list plus, per label, its message count and a few
-//      recent From/Subject samples.
+//      token, with the same auth gate as onboarding-scan's fetchMailbox
+//      (the shared toolkit): the account's plaintext `authorized_user`
+//      credentials.json when present, else one `gws auth export --unmasked`
+//      spawn for keyring-established logins. It gathers the user-created
+//      label list — excluding the routine's own `Gini/` output namespace,
+//      which is Auto-inbox's product, not the user's scheme — plus, per
+//      label, its message count and a few recent From/Subject samples.
 //   2. Synthesis — ONE `generateStructured` call keeps the labels a human
 //      plainly uses to organize mail and infers each one's plain-language
 //      classification rule.
@@ -19,10 +22,7 @@
 // (every fetch/model fault resolves to { status: "failed" }); label names
 // and sample headers are UNTRUSTED mailbox content, so the digest validator
 // clamps rather than rejects — and a digested label must name one of the
-// REAL input labels, so the model can never invent one. Unlike the
-// onboarding scan there is no gws-spawn fallback: discovery reads the
-// plaintext credential only (a login-established dir without one records a
-// clean failure), so the fire-and-forget triggers never spawn a subprocess.
+// REAL input labels, so the model can never invent one.
 //
 // SECURITY: the credential and minted token live in pipeline-local variables
 // only — never logged, never persisted, never in error strings.
@@ -31,8 +31,17 @@ import { providerOverrideForRuntime } from "../execution/effective-context";
 import { generateStructured, type StructuredValidator } from "../provider";
 import { readLabelProfile, writeLabelProfile } from "../state/google-label-profiles";
 import { now } from "../state/ids";
-import { credentialsFromConfigDir, gmailGet, mapWithConcurrency, mintAccessToken, type FetchImpl } from "./onboarding-scan";
-import { LABEL_COLOR_PALETTE, MAX_LABEL_NAME_CHARS, MAX_LABEL_RULE_CHARS } from "./routine-templates";
+import {
+  credentialsFromConfigDir,
+  defaultGwsSpawn,
+  gmailGet,
+  mapWithConcurrency,
+  mintAccessToken,
+  parseExportedCredentials,
+  type FetchImpl,
+  type GwsSpawn
+} from "./onboarding-scan";
+import { LABEL_COLOR_PALETTE, MAX_LABEL_NAME_CHARS, MAX_LABEL_RULE_CHARS, ROUTINE_LABEL_NAMESPACE } from "./routine-templates";
 import type { RoutineLabelRule } from "./routine-templates";
 import type { GoogleAccount, RuntimeConfig } from "../types";
 
@@ -67,16 +76,21 @@ export interface LabelUsageBundle {
   labels: LabelUsage[];
 }
 
-// Assemble the deterministic label-usage bundle. The plaintext credential +
-// token mint is the auth gate: no credentials.json (or a refused mint)
-// returns { tokenValid: false } without a synthesis call. Token and
-// labels-list faults throw (the discovery fails); a single label's detail or
-// sample reads failing degrade that label to name-only.
+// Assemble the deterministic label-usage bundle. The auth gate mirrors
+// onboarding-scan's fetchMailbox: the plaintext credentials.json when
+// present, else one `gws auth export --unmasked` spawn (keyring-established
+// logins); a missing credential either way or a refused mint returns
+// { tokenValid: false } without a synthesis call. Token and labels-list
+// faults throw (the discovery fails); a single label's detail or sample
+// reads failing degrade that label to name-only.
 export async function fetchLabelUsage(
-  configDir: string | undefined,
-  fetchImpl: FetchImpl = globalThis.fetch
+  gwsSpawn: GwsSpawn,
+  opts: { configDir?: string; fetchImpl?: FetchImpl } = {}
 ): Promise<{ tokenValid: true; bundle: LabelUsageBundle } | { tokenValid: false }> {
-  const credentials = credentialsFromConfigDir(configDir);
+  const fetchImpl: FetchImpl = opts.fetchImpl ?? globalThis.fetch;
+  const credentials =
+    credentialsFromConfigDir(opts.configDir) ??
+    parseExportedCredentials(await gwsSpawn(["auth", "export", "--unmasked"], opts.configDir));
   if (!credentials) return { tokenValid: false };
   const accessToken = await mintAccessToken(fetchImpl, credentials);
   if (!accessToken) return { tokenValid: false };
@@ -114,7 +128,12 @@ export async function fetchLabelUsage(
 
 // The user-created labels out of a `labels.list` doc (system labels like
 // INBOX/SPAM/CATEGORY_* carry type "system" and are never the user's own
-// organizational scheme).
+// organizational scheme). Labels under the routine's own output namespace
+// ("Gini/…", the labelPrefix composition in routine-templates.ts) are also
+// excluded: on a mailbox where Auto-inbox already ran they are the routine's
+// product, and re-importing them would circularly seed the profile with our
+// own labels. Case-sensitive exact-prefix match — that is the only form
+// buildSpec emits.
 function userLabels(doc: Record<string, unknown> | undefined): Array<{ id: string; name: string }> {
   const labels = doc?.labels;
   if (!Array.isArray(labels)) return [];
@@ -125,6 +144,7 @@ function userLabels(doc: Record<string, unknown> | undefined): Array<{ id: strin
     if (type !== "user") continue;
     if (typeof id !== "string" || id.length === 0) continue;
     if (typeof name !== "string" || name.trim().length === 0) continue;
+    if (name.trim().startsWith(ROUTINE_LABEL_NAMESPACE)) continue;
     out.push({ id, name: name.trim() });
   }
   return out;
@@ -253,15 +273,16 @@ const NO_SESSION_ERROR = "No signed-in Google session for this account — recon
 // Run the discovery: fetch the label usage, then one structured digest call.
 // A mailbox with no user-created labels is READY with an empty list (there
 // is nothing to digest — consumers fall back to the catalog defaults), not a
-// failure. Never throws; `fetchImpl` is injectable so the pipeline
-// unit-tests without network.
+// failure. Never throws; `gwsSpawn` + `fetchImpl` are injectable so the
+// pipeline unit-tests without a gws binary or network.
 export async function runLabelDiscovery(
   config: RuntimeConfig,
   account: GoogleAccount,
-  opts: { fetchImpl?: FetchImpl } = {}
+  opts: { gwsSpawn?: GwsSpawn; fetchImpl?: FetchImpl } = {}
 ): Promise<LabelDiscoveryOutcome> {
+  const gwsSpawn = opts.gwsSpawn ?? defaultGwsSpawn;
   try {
-    const fetched = await fetchLabelUsage(account.configDir, opts.fetchImpl);
+    const fetched = await fetchLabelUsage(gwsSpawn, { configDir: account.configDir, fetchImpl: opts.fetchImpl });
     if (!fetched.tokenValid) return { status: "failed", error: NO_SESSION_ERROR };
     const { bundle } = fetched;
     if (bundle.labels.length === 0) {
@@ -307,13 +328,13 @@ const inFlight = new Set<string>();
 // login callback) call unconditionally so a fresh sign-in retries, while the
 // gallery-read backfill (listRoutineTemplates) only fires for accounts with
 // NO profile at all, so a persistent failure never loops on a poll-driven
-// read. When the account has no plaintext credential the failure is recorded
-// SYNCHRONOUSLY — the deterministic pipeline cannot run without it, and no
-// async work (or network) is ever spawned for it.
+// read. Whether a credential exists is the async run's call — the auth gate
+// in fetchLabelUsage (plaintext file, else gws export) decides, and an
+// account with neither resolves to a failed profile there.
 export function ensureLabelProfile(
   config: RuntimeConfig,
   account: GoogleAccount,
-  opts: { fetchImpl?: FetchImpl } = {}
+  opts: { gwsSpawn?: GwsSpawn; fetchImpl?: FetchImpl } = {}
 ): void {
   if (inFlight.has(account.id)) return;
   const existing = readLabelProfile(account.id);
@@ -323,10 +344,6 @@ export function ensureLabelProfile(
     if (Number.isFinite(startedAt) && Date.now() - startedAt < LABEL_PROFILE_STALE_MS) return;
   }
   const email = account.email.trim().toLowerCase();
-  if (!credentialsFromConfigDir(account.configDir)) {
-    writeLabelProfile({ version: 1, accountId: account.id, email, status: "failed", labels: [], error: NO_SESSION_ERROR });
-    return;
-  }
   const startedAt = now();
   writeLabelProfile({ version: 1, accountId: account.id, email, status: "running", labels: [], startedAt });
   inFlight.add(account.id);

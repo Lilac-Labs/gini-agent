@@ -127,8 +127,10 @@ export interface ExportedCredentials {
 
 // Parse `{ client_id, client_secret, refresh_token }` out of the export's
 // stdout. Missing/garbled output (signed out, no stored token) => undefined,
-// which the caller maps to the no-signed-in-session failure.
-function parseExportedCredentials(stdout: string): ExportedCredentials | undefined {
+// which the caller maps to the no-signed-in-session failure. Exported as part
+// of the shared deterministic-Gmail-pipeline toolkit (see mintAccessToken
+// below): label discovery's auth gate mirrors fetchMailbox's.
+export function parseExportedCredentials(stdout: string): ExportedCredentials | undefined {
   const doc = parseGwsJson(stdout);
   const clientId = doc?.client_id;
   const clientSecret = doc?.client_secret;

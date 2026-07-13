@@ -1,15 +1,15 @@
 /// <reference lib="dom" />
 
 // chat.choice rendering: the ask_user question renders as the agent
-// speaking — an assistant-style message bubble (avatar + name + question),
+// speaking — an assistant-style message line (avatar + name + question),
 // never the bordered "Question" setup card. Pending WITH options shows
-// one-click option chips beneath the bubble plus the UI-owned "Other (type
+// one-click choice rows beneath the question plus the UI-owned "Other (type
 // your answer)" and a subtle Skip; clicking an option POSTs
 // { choice: { label } } to /setup-requests/:id/complete immediately. A
 // historical question-only row (pre-options-only ask_user) shows just the
 // question — no input, no Submit, no Skip — because the composer is the
 // answer path. Settled rows keep the question as the agent's message with a
-// muted outcome line and no chips.
+// muted outcome line and no choices.
 
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -94,7 +94,7 @@ afterEach(() => {
 });
 
 describe("BlockSetupRequested chat.choice", () => {
-  test("pending with options renders as the agent speaking with option chips, Other, and Skip", async () => {
+  test("pending with options renders as the agent speaking with choice rows, Other, and Skip", async () => {
     setupRows = [choiceSetup()];
     renderWithQuery(<BlockSetupRequested block={choiceBlock()} agent={{ id: "agent_1", name: "Gini" }} />);
 
@@ -104,7 +104,7 @@ describe("BlockSetupRequested chat.choice", () => {
     expect(screen.queryByText("Question")).toBeNull();
     expect(screen.queryByText("Show details")).toBeNull();
 
-    // Chips appear once the setup row loads.
+    // Choice rows appear once the setup row loads.
     await waitFor(() => expect(screen.queryByText("Blue Door")).not.toBeNull());
     expect(screen.getByText("Harbor House")).not.toBeNull();
     expect(screen.getByText("Closest")).not.toBeNull();
@@ -177,7 +177,7 @@ describe("BlockSetupRequested chat.choice", () => {
     );
 
     // Post-cancel: the settled row keeps the question with the muted
-    // "Skipped" line, chips and Skip gone.
+    // "Skipped" line, choices and Skip gone.
     document.body.innerHTML = "";
     setupRows = [choiceSetup({ status: "cancelled" })];
     renderWithQuery(<BlockSetupRequested block={choiceBlock()} />);
@@ -187,7 +187,7 @@ describe("BlockSetupRequested chat.choice", () => {
     expect(screen.queryByText("Skip")).toBeNull();
   });
 
-  test("a missing setup record falls back to block.summary and withholds the chips", async () => {
+  test("a missing setup record falls back to block.summary and withholds the choices", async () => {
     // The record can be absent from /setup-requests (e.g. pruned state);
     // without the trusted payload there is nothing safe to submit, so only
     // the question renders — no options, no Other, no Skip.
@@ -213,7 +213,7 @@ describe("BlockSetupRequested chat.choice", () => {
     expect(screen.queryByPlaceholderText("Type your answer")).toBeNull();
   });
 
-  test("settled rows keep the question as the agent's message with the outcome line, chips gone", async () => {
+  test("settled rows keep the question as the agent's message with the outcome line, choices gone", async () => {
     setupRows = [
       choiceSetup({ status: "completed", connectOutcome: { ok: true, message: "You selected: Blue Door" } })
     ];

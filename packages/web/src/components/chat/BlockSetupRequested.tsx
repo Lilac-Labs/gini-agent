@@ -541,13 +541,13 @@ export function BlockSetupRequested({
   const effectiveConnectMessage = persistedOutcome?.message ?? connectError ?? null;
 
   // === chat.choice renders as the agent speaking, not a setup card ===
-  // The question is a normal assistant-style message (avatar + name +
-  // bubble — same shape as BlockAssistantText). While pending WITH options,
-  // one-click option chips render beneath it (plus the UI-owned Other input
+  // The question is a normal assistant-style message line (avatar + name +
+  // question). While pending WITH options,
+  // one-click choice rows render beneath it (plus the UI-owned Other input
   // and a subtle Skip). A historical question-only row (pre-options-only
   // ask_user) shows just the question — the composer is the answer path (a
   // plain message post resumes the same run). Settled rows keep the
-  // question as the agent's message with a muted outcome line; chips gone.
+  // question as the agent's message with a muted outcome line; choices gone.
   if (isChatChoice) {
     const name = agent?.name ?? "Gini";
     const seed = agent?.id ?? name;
@@ -565,13 +565,16 @@ export function BlockSetupRequested({
             <span className="font-semibold text-foreground">{name}</span>
             {timestamp ? <span className="text-muted-foreground">{timestamp}</span> : null}
           </div>
-          <div className="max-w-[90%] rounded-xl border bg-card px-3 py-2.5 text-sm text-card-foreground">
+          <div className="max-w-[90%] pl-1 text-sm leading-relaxed text-foreground [&_.chat-markdown]:inline [&_.chat-markdown>*]:inline">
+            {isPending && setup && choiceOptions.length > 0 ? (
+              <span className="font-semibold text-blue-600">Needs input: </span>
+            ) : null}
             {/* Same markdown path as BlockAssistantText so a question with
                 emphasis/links/code renders like any other agent message. */}
             <MarkdownContent text={choiceQuestion} dropForeignImages />
           </div>
           {isPending && setup && choiceOptions.length > 0 ? (
-            <ChoiceChips
+            <ChoiceCard
               setupRequestId={block.setupRequestId}
               options={choiceOptions}
               onSkip={() => cancel.mutate()}
@@ -1123,15 +1126,15 @@ function parseChoiceOptions(raw: unknown): ChoiceOption[] {
   return out;
 }
 
-// One-click option chips for a pending chat.choice, rendered under the
-// question bubble (the question itself reads as the agent's message — see
-// the isChatChoice branch above). Options come from the trusted setup
+// One-click options for a pending chat.choice, rendered under the question
+// line (the question itself reads as the agent's message — see the
+// isChatChoice branch above). Options come from the trusted setup
 // payload; clicking one POSTs { choice: { label } } immediately. The UI
 // owns the "Other (type your answer)" affordance (expands into a free-text
 // input that POSTs { choice: { other } }) and the subtle Skip (the shared
 // /cancel endpoint, which resumes the agent with a skip fallback rather
 // than failing the task) — they are never model-supplied options.
-function ChoiceChips({
+function ChoiceCard({
   setupRequestId,
   options,
   onSkip,
@@ -1159,33 +1162,44 @@ function ChoiceChips({
   });
 
   return (
-    <div className="mt-2 max-w-[90%] space-y-2">
-      <div className="flex flex-wrap items-center gap-1.5">
+    <div className="mt-3 max-w-[90%] rounded-lg border border-amber-300 bg-amber-50 p-2.5 shadow-sm dark:border-amber-500/40 dark:bg-amber-500/10">
+      <div className="space-y-2" role="group" aria-label="Choice options">
         {options.map((option) => (
           <button
             key={option.label}
             type="button"
             disabled={submit.isPending}
             onClick={() => submit.mutate({ label: option.label })}
-            className="rounded-lg border border-border bg-background px-3 py-1.5 text-left transition-colors hover:bg-accent disabled:opacity-50"
+            className="group flex w-full items-start gap-3 rounded-lg border border-slate-200 bg-white px-3 py-3 text-left text-sm leading-snug shadow-sm transition-colors hover:border-amber-400 hover:bg-amber-50/50 disabled:opacity-50 dark:border-border dark:bg-background/90 dark:hover:border-amber-500/70 dark:hover:bg-amber-500/10"
           >
-            <span className="block text-xs text-foreground">{option.label}</span>
-            {option.description ? (
-              <span className="block text-[11px] text-muted-foreground">{option.description}</span>
-            ) : null}
+            <span
+              aria-hidden="true"
+              className="mt-0.5 size-5 shrink-0 rounded-full border-2 border-slate-300 bg-white transition-colors group-hover:border-amber-500 dark:border-muted-foreground/50 dark:bg-background"
+            />
+            <span className="min-w-0 flex-1 text-foreground">
+              <span className="font-semibold">{option.label}</span>
+              {option.description ? (
+                <>
+                  <span>{" — "}</span>
+                  <span>{option.description}</span>
+                </>
+              ) : null}
+            </span>
           </button>
         ))}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
         <button
           type="button"
           disabled={submit.isPending}
           onClick={() => setOtherOpen((v) => !v)}
-          className="rounded-lg border border-border bg-background px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent disabled:opacity-50"
+          className="text-xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50"
         >
           Other (type your answer)
         </button>
         <button
           type="button"
-          className="px-1.5 text-[11px] text-muted-foreground underline-offset-2 hover:underline disabled:opacity-50"
+          className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50"
           disabled={skipPending || submit.isPending}
           onClick={onSkip}
         >
@@ -1193,7 +1207,7 @@ function ChoiceChips({
         </button>
       </div>
       {otherOpen ? (
-        <div className="flex items-center gap-2">
+        <div className="mt-2 flex items-center gap-2">
           <Input
             value={otherText}
             onChange={(e) => setOtherText(e.target.value)}

@@ -88,6 +88,9 @@ function RoutineDetail({ template }: { template: RoutineTemplateView }) {
   const uninstall = useUninstallRoutineTemplate();
   const invalidate = useInvalidate();
   const [tab, setTab] = useState<"sessions" | "settings" | "info">("sessions");
+  // Held here, above the jobId-keyed SettingsTab, so the account being edited
+  // survives the remount a Save triggers (re-install mints a new jobId).
+  const [settingsAccount, setSettingsAccount] = useState<string>();
 
   // Same inline mutation shape as the jobs page: POST /jobs/<id>/{run,pause,resume}.
   const action = useMutation({
@@ -255,6 +258,8 @@ function RoutineDetail({ template }: { template: RoutineTemplateView }) {
                   template={template}
                   pending={install.isPending}
                   onSave={submitSave}
+                  activeAccount={settingsAccount}
+                  onSelectAccount={setSettingsAccount}
                 />
               ) : (
                 <InfoTab
@@ -382,18 +387,31 @@ function serializeSettings(template: RoutineTemplateView, settings: RoutineSetti
 function SettingsTab({
   template,
   pending,
-  onSave
+  onSave,
+  activeAccount,
+  onSelectAccount
 }: {
   template: RoutineTemplateView;
   pending: boolean;
   onSave: (settings: RoutineSettings | Record<string, RoutineSettings>) => void;
+  activeAccount: string | undefined;
+  onSelectAccount: (email: string) => void;
 }) {
   // Per-account templates (Auto-inbox) get the account switcher; flat
   // templates — and a per-account install on a machine with no registered
   // account (the server omits accountSettings then) — keep the flat editor.
   const accounts = template.installed?.accountSettings;
   if (accounts && accounts.length > 0) {
-    return <PerAccountSettingsTab template={template} accounts={accounts} pending={pending} onSave={onSave} />;
+    return (
+      <PerAccountSettingsTab
+        template={template}
+        accounts={accounts}
+        pending={pending}
+        onSave={onSave}
+        activeAccount={activeAccount}
+        onSelectAccount={onSelectAccount}
+      />
+    );
   }
   return <FlatSettingsTab template={template} pending={pending} onSave={onSave} />;
 }
@@ -430,21 +448,26 @@ function FlatSettingsTab({
 // settings state per connected Google account, the switcher scopes the
 // sections below to one account while edits accumulate across all of them,
 // and Save posts the FULL email-keyed map — the wire's per-account shape.
-// The switcher defaults to the primary account (server-marked).
+// The selection is owned by the parent (it must survive the Save remount);
+// absent or stale (a disconnected account), it falls back to the primary.
 function PerAccountSettingsTab({
   template,
   accounts,
   pending,
-  onSave
+  onSave,
+  activeAccount,
+  onSelectAccount
 }: {
   template: RoutineTemplateView;
   accounts: RoutineAccountSettingsView[];
   pending: boolean;
   onSave: (settings: Record<string, RoutineSettings>) => void;
+  activeAccount: string | undefined;
+  onSelectAccount: (email: string) => void;
 }) {
-  const [activeEmail, setActiveEmail] = useState(
-    () => (accounts.find((account) => account.primary) ?? accounts[0]!).email
-  );
+  const activeEmail = accounts.some((account) => account.email === activeAccount)
+    ? activeAccount!
+    : (accounts.find((account) => account.primary) ?? accounts[0]!).email;
   const [values, setValues] = useState<Record<string, RoutineSettings>>(() =>
     Object.fromEntries(accounts.map((account) => [account.email, { ...account.settings }]))
   );
@@ -465,7 +488,7 @@ function PerAccountSettingsTab({
               key={account.email}
               type="button"
               aria-pressed={active}
-              onClick={() => setActiveEmail(account.email)}
+              onClick={() => onSelectAccount(account.email)}
               className={cn(
                 "inline-flex h-9 items-center gap-2 rounded-full border pl-2 pr-3.5 text-[13px] transition-colors",
                 active

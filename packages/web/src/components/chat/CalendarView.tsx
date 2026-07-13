@@ -19,7 +19,7 @@ import { WeekView } from "@/components/calendar/week-view";
 //
 // The block is plain text: optional `view:` / `date:` / `tz:` header lines up to
 // the first blank line, then pipe-delimited event lines. The preview always
-// renders the shared 7-day WeekView (the same macOS-Calendar-style grid the Jobs
+// renders the shared 7-day WeekView (the same macOS-Calendar-style grid the Routines
 // tab uses) for the week containing the anchor, read-only — there is no Apply
 // affordance; the real calendar write still goes through Gini's normal flow.
 
@@ -43,7 +43,7 @@ export type ParsedCalendar = {
 
 // Compact hour-row height for the inline preview. The viewport below is sized to
 // 12 of these rows so the 8 AM–8 PM window is fully visible by default while
-// scrolling still reveals the earlier/later hours. (Jobs use the grid's 96px.)
+// scrolling still reveals the earlier/later hours. (Routines use the grid's 96px.)
 const INLINE_HOUR_PX = 44;
 
 const HEADER_KEYS = ["view", "date", "tz"] as const;

@@ -54,7 +54,7 @@ function ChatPageBody() {
   );
   // A pinned `kind:"topic"` session is the Topic surface: its own subject-scoped
   // conversation. Like a channel it carries the topic's own title and the owning
-  // agent as the assistant, but it's headed as `#<title>` and hides the Jobs tab.
+  // agent as the assistant, but it's headed as `#<title>` and hides the Routines tab.
   const isTopic = Boolean(pinnedSessionId && session?.kind === "topic");
 
   const headerName = isTopic

@@ -68,7 +68,7 @@ export function TaskDetail({
                   <Field label="Created" value={new Date(task.createdAt).toLocaleString()} />
                   <Field label="Updated" value={new Date(task.updatedAt).toLocaleString()} />
                   {task.currentStep ? <Field label="Current step" value={task.currentStep} mono /> : null}
-                  {task.jobId ? <Field label="Job" value={task.jobId} mono /> : null}
+                  {task.jobId ? <Field label="Routine" value={task.jobId} mono /> : null}
                   {task.parentTaskId ? <Field label="Parent task" value={task.parentTaskId} mono /> : null}
                   {task.subagentId ? <Field label="Subagent" value={task.subagentId} mono /> : null}
                 </div>

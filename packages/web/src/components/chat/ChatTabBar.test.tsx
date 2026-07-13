@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 
 // ChatTabBar tests. Pins the tab strip's contract:
-//   - tab visibility flag (Jobs hidden on channels)
+//   - tab visibility flag (Routines hidden on channels)
 //   - optional whole-strip hiding when only one tab remains
 //   - count pills hide at zero and carry an accessible label
 //   - clicking a tab reports its id
@@ -15,26 +15,26 @@ describe("ChatTabBar", () => {
   test("renders all tabs and reports clicks", () => {
     const changes: ChatTab[] = [];
     render(<ChatTabBar active="messages" onChange={(t) => changes.push(t)} />);
-    for (const label of ["Messages", "Jobs"]) {
+    for (const label of ["Chat", "Routines"]) {
       expect(screen.getByText(label)).not.toBeNull();
     }
-    fireEvent.click(screen.getByText("Jobs"));
+    fireEvent.click(screen.getByText("Routines"));
     expect(changes).toEqual(["jobs"]);
   });
 
-  test("hides Jobs on channels", () => {
+  test("hides Routines on channels", () => {
     render(<ChatTabBar active="messages" onChange={() => {}} hideJobsTab />);
-    expect(screen.queryByText("Jobs")).toBeNull();
-    expect(screen.getByText("Messages")).not.toBeNull();
+    expect(screen.queryByText("Routines")).toBeNull();
+    expect(screen.getByText("Chat")).not.toBeNull();
   });
 
   test("can hide the whole strip when only one tab remains", () => {
     render(<ChatTabBar active="messages" onChange={() => {}} hideJobsTab hideWhenSingleTab />);
-    expect(screen.queryByText("Messages")).toBeNull();
-    expect(screen.queryByText("Jobs")).toBeNull();
+    expect(screen.queryByText("Chat")).toBeNull();
+    expect(screen.queryByText("Routines")).toBeNull();
   });
 
-  test("shows the Jobs count pill only when non-zero", () => {
+  test("shows the Routines count pill only when non-zero", () => {
     const { rerender } = render(
       <ChatTabBar active="messages" onChange={() => {}} jobCount={2} />
     );

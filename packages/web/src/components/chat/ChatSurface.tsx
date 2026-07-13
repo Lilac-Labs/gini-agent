@@ -274,7 +274,7 @@ export function ChatSurface({
   }, [renderItems, runIdToJobName]);
 
   // Pin the transcript to the newest message. Snap instantly when the chat
-  // opens or the user returns to the Messages tab (the viewport mounts at the
+  // opens or the user returns to the Chat tab (the viewport mounts at the
   // top, so an animated scroll there would be visible); follow smoothly as new
   // blocks arrive mid-turn. Keyed by sessionId so switching agents re-arms the snap.
   const {
@@ -440,7 +440,7 @@ export function ChatSurface({
             }
           />
         )}
-        {/* Topics and channels only expose Messages, so the tab bar is a
+        {/* Topics and channels only expose Chat, so the tab bar is a
             redundant single tab. The transcript still renders since `tab`
             defaults to "messages". */}
         {panel || isTopic ? null : (
@@ -473,8 +473,8 @@ export function ChatSurface({
                     <ul className="space-y-5">
                       {itemSegments.map((segment, segmentIndex) =>
                         segment.jobName ? (
-                          // Job-delivered messages: one light-blue left-bordered
-                          // container with a single "from <job name>" subtitle so
+                          // Routine-delivered chat: one light-blue left-bordered
+                          // container with a single "from <routine name>" subtitle so
                           // they're distinguishable from the user's own turn.
                           <li key={`job-${segmentIndex}`}>
                             <div className="rounded-r-lg border-l-2 border-sky-500/40 bg-sky-500/5 py-3 pl-4">
@@ -496,7 +496,7 @@ export function ChatSurface({
                 <button
                   type="button"
                   onClick={scrollMessagesToBottom}
-                  aria-label="Scroll to latest messages"
+                  aria-label="Scroll to latest chat"
                   className="absolute bottom-3 left-1/2 z-10 inline-flex size-9 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background text-muted-foreground shadow-md transition-colors hover:bg-accent hover:text-foreground"
                 >
                   <ChevronDown className="size-5" />

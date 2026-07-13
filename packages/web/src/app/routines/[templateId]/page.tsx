@@ -206,7 +206,7 @@ function RoutineDetail({ template }: { template: RoutineTemplateView }) {
               </button>
               {installed.chatSessionId ? (
                 // The routine's dedicated conversation when the template
-                // delivers into Messages (same idiom as the watcher detail's
+                // delivers into Chats (same idiom as the watcher detail's
                 // Open channel).
                 <button
                   type="button"

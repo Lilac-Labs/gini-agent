@@ -76,7 +76,7 @@ export function EditJobDialog({ job, trigger }: { job: JobRecord; trigger?: Reac
     mutationFn: (patch: Record<string, unknown>) =>
       api<JobRecord>(`/jobs/${job.id}`, { method: "PATCH", body: JSON.stringify(patch) }),
     onSuccess: () => {
-      toast.success(`Job updated: ${job.id}`);
+      toast.success(`Routine updated: ${job.id}`);
       invalidate(["jobs", "events"]);
       setOpen(false);
     },
@@ -130,7 +130,7 @@ export function EditJobDialog({ job, trigger }: { job: JobRecord; trigger?: Reac
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Edit job</DialogTitle>
+          <DialogTitle>Edit routine</DialogTitle>
           <DialogDescription className="font-mono text-[11px]">{job.id}</DialogDescription>
         </DialogHeader>
         <div className="grid gap-3">

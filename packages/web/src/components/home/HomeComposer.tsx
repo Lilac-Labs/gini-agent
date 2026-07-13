@@ -30,8 +30,8 @@ const MODE_STORAGE_KEY = "gini.home.composerMode";
 // Enter/Shift-Enter handling, and attachment machinery (shared
 // useAttachments hook) so typing and attaching feel identical. Both modes
 // start a container directly (POST /api/containers): Task mode stays on
-// home with an optimistic working row; Message mode navigates into the new
-// conversation's thread (never the persistent root agent chat).
+// home with an optimistic working row; Chat mode navigates into the new
+// chat thread (never the persistent root agent chat).
 export function HomeComposer() {
   const router = useRouter();
   const params = useSearchParams();
@@ -73,12 +73,12 @@ export function HomeComposer() {
     }
   };
 
-  // /?compose=message (the sidebar Messages "+") deep-links straight into
-  // Message mode, /?compose=task (the routines "Create routine" entry point)
-  // into Task mode — textarea focused, then the params are stripped so
+  // /?compose=message (the sidebar Chats "+") deep-links straight into
+  // Chat mode, /?compose=task (the routines "Create routine" entry point)
+  // into Task mode with the textarea focused, then strips the params so
   // reload/back-nav doesn't re-trigger. /?prompt=<text> additionally seeds
   // the composer — pre-fill only, never auto-submit; a bare ?prompt= with no
-  // compose param keeps the legacy Message-mode seed so external links don't
+  // compose param keeps the legacy Chat-mode seed so external links don't
   // change behavior. Keyed on the params (not mount): clicking "+"
   // while already on home only changes the query string, and the composer
   // never remounts. Declared after the storage read above so the deep link
@@ -134,20 +134,20 @@ export function HomeComposer() {
     const content = text.trim();
     const images = readyRefs();
     // Clear immediately — the optimistic row (Task mode) / navigation
-    // (Message mode) is the feedback; text restored on error. The tray is
+    // (Chat mode) is the feedback; text restored on error. The tray is
     // not restored (its previews are revoked here), matching the chat
     // Composer — the uploads themselves survive server-side.
     setText("");
     clearAttachments();
     const messageMode = mode === "message";
     startTask.mutate(
-      // startedAs records the creation gesture: the sidebar Messages section
+      // startedAs records the creation gesture: the sidebar Chats section
       // lists startedAs === "message" containers; Task-mode mints stay home
       // work items only.
       { content, images, startedAs: messageMode ? "message" : "task" },
       {
         onSuccess: (data) => {
-          // Message mode opens the new conversation's own thread full-page;
+          // Chat mode opens the new conversation's own thread full-page;
           // Task mode stays on home and opens the new container in the
           // right-side topic panel so the user watches the turn in place
           // (the optimistic Tasks row lands alongside).
@@ -240,13 +240,13 @@ export function HomeComposer() {
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="outline" size="sm">
-              {mode === "task" ? "Task" : "Message"}
+              {mode === "task" ? "Task" : "Chat"}
               <ChevronDown className="text-muted-foreground" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             <DropdownMenuItem onSelect={() => selectMode("task")}>Task</DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => selectMode("message")}>Message</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => selectMode("message")}>Chat</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
         <button

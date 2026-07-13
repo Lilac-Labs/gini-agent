@@ -99,7 +99,7 @@ export function SessionItem({
             aria-label={(() => {
               const suffixes: string[] = [];
               if (isUnread) suffixes.push("unread");
-              if (session.origin === "job") suffixes.push("created by a job");
+              if (session.origin === "job") suffixes.push("created by a routine");
               if (needsApproval) suffixes.push("awaiting approval");
               return suffixes.length > 0 ? `${label} (${suffixes.join(", ")})` : label;
             })()}
@@ -112,7 +112,7 @@ export function SessionItem({
             ) : null}
             {session.origin === "job" ? (
               <span
-                title="Created by a job"
+                title="Created by a routine"
                 aria-hidden="true"
                 className="flex shrink-0 items-center"
               >

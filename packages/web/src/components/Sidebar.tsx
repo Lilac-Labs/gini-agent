@@ -105,7 +105,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
   // work-item containers surface on home, never here. Newest-activity first
   // so the most recently touched subject sits on top; scoped to the active
   // agent (each Topic belongs to that agent's Chat) so the section tracks
-  // the selected agent, like the Messages/agent rows.
+  // the selected agent, like the Chats/agent rows.
   const topics = useMemo<ChatSession[]>(() => {
     return (allSessions.data ?? [])
       .filter(
@@ -117,10 +117,10 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
       .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
   }, [allSessions.data, activeAgentId]);
 
-  // Messages: the user's active conversations — unpinned (pinning promotes a
+  // Chats: the user's active conversations — unpinned (pinning promotes a
   // conversation into Topics), non-archived, non-headless, agent-scoped like
   // Topics. Two kinds of rows qualify:
-  //   - conversations the user started by hand in the composer's Message
+  //   - conversations the user started by hand in the composer's Chat
   //     mode (startedAs === "message", no spawnedByTaskId, origin !== "job"
   //     — router/agent-minted containers stay off the chrome, Task-mode
   //     mints stay home work items only, and containers predating the field
@@ -327,9 +327,11 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
 
           <div className="h-px bg-sidebar-border" />
 
-          {/* Messages — the user's active (unpinned) conversations */}
-          {messages.length > 0 ? (
-            <>
+          {/* Chats — the user's active (unpinned) conversations. The
+              section is always present (even with no conversations) so the
+              header and "New chat" affordance stay reachable; an empty
+              list shows a muted placeholder instead of collapsing away. */}
+          <>
               <div className="flex flex-col gap-1">
                 <div className="flex items-center justify-between px-2">
                   <button
@@ -341,11 +343,11 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
                     <ChevronDown
                       className={cn("size-3 transition-transform", messagesCollapsed && "-rotate-90")}
                     />
-                    <span className="text-[11px] font-semibold tracking-[0.5px]">Messages</span>
+                    <span className="text-[11px] font-semibold tracking-[0.5px]">Chats</span>
                   </button>
                   <button
                     type="button"
-                    aria-label="New message"
+                    aria-label="New chat"
                     onClick={() => {
                       router.push("/?compose=message");
                       onNavigate?.();
@@ -356,6 +358,11 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
                   </button>
                 </div>
                 <ul className={cn("flex flex-col gap-0.5", messagesCollapsed && "hidden")}>
+                  {messages.length === 0 ? (
+                    <li className="px-2.5 py-2 text-[13px] text-sidebar-foreground/45">
+                      No chats yet
+                    </li>
+                  ) : null}
                   {messages.map((session) => {
                     const active = onChat && selectedSession === session.id;
                     const unread = !active && isUnread(session);
@@ -429,7 +436,6 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
               </div>
               <div className="h-px bg-sidebar-border" />
             </>
-          ) : null}
 
           {/* Topics */}
           {topics.length > 0 ? (
@@ -572,7 +578,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-// Confirm-then-delete for a sidebar Messages row (DELETE /api/containers/:id)
+// Confirm-then-delete for a sidebar Chats row (DELETE /api/containers/:id)
 // — the DeleteAgentDialog pattern. The server refuses while a run is live
 // (409); the error text surfaces in the toast so the user knows to let the
 // run finish (or cancel it) first.

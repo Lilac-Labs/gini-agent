@@ -1,7 +1,7 @@
 import cronstrue from "cronstrue";
 import type { JobRecord } from "@runtime/types";
 
-// Shared "how is this job scheduled?" label used by the chat Jobs tab and
+// Shared "how is this job scheduled?" label used by the chat Routines tab and
 // the routine detail pages. Two display modes:
 //   - cron-driven:  `At 09:00 AM, Monday through Friday (America/Los_Angeles)`
 //                   (human English via cronstrue, timezone appended)

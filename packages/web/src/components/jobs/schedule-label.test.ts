@@ -1,4 +1,4 @@
-// Unit tests for the schedule-label helper used by the chat Jobs tab,
+// Unit tests for the schedule-label helper used by the chat Routines tab,
 // the routine detail pages, and EditJobDialog. Three modes to cover:
 //   - cron with TZ: cronstrue renders human English + we append "(TZ)"
 //   - interval: humanized when the seconds divide cleanly into

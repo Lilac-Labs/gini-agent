@@ -380,7 +380,7 @@ describe("VoiceBubble accessibility (VoiceOver adjustable)", () => {
     const seek = getSeekControl(tree);
     expect(seek).toBeTruthy();
     expect(seek!.props.accessible).toBe(true);
-    expect(seek!.props.accessibilityLabel).toBe("Seek voice message");
+    expect(seek!.props.accessibilityLabel).toBe("Seek voice chat");
     // 2s of 8s → 25%.
     expect(seek!.props.accessibilityValue).toEqual({ now: 25, min: 0, max: 100 });
     expect(seek!.props.accessibilityActions).toEqual([{ name: "increment" }, { name: "decrement" }]);

@@ -197,7 +197,11 @@ Recent sessions lists the job's run history, Settings renders the template's
 settings sections (toggle rows, text fields, and the filtering-label editor
 — per-label name/rule/auto-archive edits, add and remove) and saves by
 re-installing with the full settings state (the idempotent per-template
-replace — the jobId changes), and Delete routine uninstalls. Errors surface
+replace — the jobId changes; the page owns the switcher selection so it
+survives that remount), and Delete routine uninstalls. On per-account
+templates an account-switcher pill row scopes the sections to one connected
+account (edits accumulate across accounts; Save posts the full email-keyed
+map), and seeded labels carry their read-only Existing/Suggested badge. Errors surface
 as toasts;
 the install endpoint's skill-resolve 400 is the connector-readiness signal
 (no pre-flight on the card).

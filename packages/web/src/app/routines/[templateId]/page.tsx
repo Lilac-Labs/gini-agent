@@ -18,7 +18,6 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { EmptyState } from "@/components/PageHeader";
 import { api } from "@/lib/api";
@@ -30,6 +29,7 @@ import {
   useJobs,
   useRoutineTemplates,
   useUninstallRoutineTemplate,
+  type RoutineAccountSettingsView,
   type RoutineLabelRule,
   type RoutineSettingField,
   type RoutineSettings,
@@ -112,11 +112,12 @@ function RoutineDetail({ template }: { template: RoutineTemplateView }) {
     );
   };
 
-  // Save re-installs with the edited settings (idempotent per-template
+  // Save re-installs with the edited settings — the flat state, or the full
+  // email-keyed map for per-account templates (idempotent per-template
   // replace server-side — the jobId changes, and the invalidated templates
   // query re-resolves the page onto the new job). The current job's
   // cronTimezone rides along so the schedule's timezone is preserved.
-  const submitSave = (settings: RoutineSettings) => {
+  const submitSave = (settings: RoutineSettings | Record<string, RoutineSettings>) => {
     install.mutate(
       {
         id: template.id,
@@ -363,7 +364,41 @@ function baselineSettings(template: RoutineTemplateView): RoutineSettings {
   );
 }
 
+// Canonical serialization for dirty tracking: deep-compare in catalog field
+// order, so key insertion order never fakes (or masks) a dirty state.
+function serializeSettings(template: RoutineTemplateView, settings: RoutineSettings): string {
+  return JSON.stringify(
+    template.settings.flatMap((section) =>
+      section.fields.map((field) => {
+        const value = settings[field.key];
+        return Array.isArray(value)
+          ? value.map((label) => [label.name, label.color, label.rule, label.autoArchive])
+          : value;
+      })
+    )
+  );
+}
+
 function SettingsTab({
+  template,
+  pending,
+  onSave
+}: {
+  template: RoutineTemplateView;
+  pending: boolean;
+  onSave: (settings: RoutineSettings | Record<string, RoutineSettings>) => void;
+}) {
+  // Per-account templates (Auto-inbox) get the account switcher; flat
+  // templates — and a per-account install on a machine with no registered
+  // account (the server omits accountSettings then) — keep the flat editor.
+  const accounts = template.installed?.accountSettings;
+  if (accounts && accounts.length > 0) {
+    return <PerAccountSettingsTab template={template} accounts={accounts} pending={pending} onSave={onSave} />;
+  }
+  return <FlatSettingsTab template={template} pending={pending} onSave={onSave} />;
+}
+
+function FlatSettingsTab({
   template,
   pending,
   onSave
@@ -375,27 +410,94 @@ function SettingsTab({
   const [values, setValues] = useState<RoutineSettings>(() => ({ ...baselineSettings(template) }));
   const setField = (key: string, value: RoutineSettings[string]) =>
     setValues((current) => ({ ...current, [key]: value }));
-
-  // Deep compare against the baseline in catalog field order, so key
-  // insertion order never fakes (or masks) a dirty state.
-  const serialize = (settings: RoutineSettings) =>
-    JSON.stringify(
-      template.settings.flatMap((section) =>
-        section.fields.map((field) => {
-          const value = settings[field.key];
-          return Array.isArray(value)
-            ? value.map((label) => [label.name, label.color, label.rule, label.autoArchive])
-            : value;
-        })
-      )
-    );
-  const dirty = serialize(values) !== serialize(baselineSettings(template));
+  const dirty = serializeSettings(template, values) !== serializeSettings(template, baselineSettings(template));
 
   return (
     <div className="mt-6">
       <div className="flex flex-col gap-4">
         {template.settings.map((section) => (
           <SettingsSection key={section.key} section={section} values={values} onChange={setField} />
+        ))}
+      </div>
+      <Button size="sm" className="mt-4" disabled={!dirty || pending} onClick={() => onSave(values)}>
+        {pending ? "Saving…" : "Save"}
+      </Button>
+    </div>
+  );
+}
+
+// Per-account settings (the design's account switcher): the server joins one
+// settings state per connected Google account, the switcher scopes the
+// sections below to one account while edits accumulate across all of them,
+// and Save posts the FULL email-keyed map — the wire's per-account shape.
+// The switcher defaults to the primary account (server-marked).
+function PerAccountSettingsTab({
+  template,
+  accounts,
+  pending,
+  onSave
+}: {
+  template: RoutineTemplateView;
+  accounts: RoutineAccountSettingsView[];
+  pending: boolean;
+  onSave: (settings: Record<string, RoutineSettings>) => void;
+}) {
+  const [activeEmail, setActiveEmail] = useState(
+    () => (accounts.find((account) => account.primary) ?? accounts[0]!).email
+  );
+  const [values, setValues] = useState<Record<string, RoutineSettings>>(() =>
+    Object.fromEntries(accounts.map((account) => [account.email, { ...account.settings }]))
+  );
+  const setField = (key: string, value: RoutineSettings[string]) =>
+    setValues((current) => ({ ...current, [activeEmail]: { ...current[activeEmail], [key]: value } }));
+  const dirty = accounts.some(
+    (account) =>
+      serializeSettings(template, values[account.email] ?? {}) !== serializeSettings(template, account.settings)
+  );
+
+  return (
+    <div className="mt-6">
+      <div className="flex flex-wrap items-center gap-2">
+        {accounts.map((account) => {
+          const active = account.email === activeEmail;
+          return (
+            <button
+              key={account.email}
+              type="button"
+              aria-pressed={active}
+              onClick={() => setActiveEmail(account.email)}
+              className={cn(
+                "inline-flex h-9 items-center gap-2 rounded-full border pl-2 pr-3.5 text-[13px] transition-colors",
+                active
+                  ? "border-foreground bg-foreground font-semibold text-background"
+                  : "border-input bg-card font-medium text-muted-foreground hover:border-foreground/28 hover:text-foreground"
+              )}
+            >
+              <span
+                className={cn(
+                  "flex size-[22px] shrink-0 items-center justify-center rounded-full text-[11px] font-bold",
+                  active ? "bg-background text-foreground" : "bg-muted text-muted-foreground"
+                )}
+              >
+                {account.email.charAt(0).toUpperCase()}
+              </span>
+              {account.email}
+            </button>
+          );
+        })}
+      </div>
+      <p className="mb-4 mt-2.5 text-[13px] text-muted-foreground">
+        Settings below apply only to <span className="font-semibold text-foreground">{activeEmail}</span>. Each
+        connected email account has its own settings.
+      </p>
+      <div className="flex flex-col gap-4">
+        {template.settings.map((section) => (
+          <SettingsSection
+            key={section.key}
+            section={section}
+            values={values[activeEmail] ?? {}}
+            onChange={setField}
+          />
         ))}
       </div>
       <Button size="sm" className="mt-4" disabled={!dirty || pending} onClick={() => onSave(values)}>
@@ -497,9 +599,11 @@ function SettingField({
   );
 }
 
-// The filtering-label editor: one bordered card per label (swatch, inline
-// name input, Auto-archive mini toggle, remove) with the muted rule panel
-// below, then the Add new label input appending with a cycled palette color.
+// The filtering-label editor: one bordered card per label (swatch, muted
+// name-input pill, Auto-archive mini toggle, remove) with the rule textarea
+// in a padded wrapper below — both editable areas share the muted-pill
+// hover/primary-focus treatment — then the 44px Add new label row appending
+// with a cycled palette color.
 function LabelListEditor({
   value,
   onChange
@@ -519,19 +623,28 @@ function LabelListEditor({
     ]);
     setDraft("");
   };
+  // The pill treatment the design gives every editable area in a label card:
+  // muted fill with a transparent border, darkening on hover, and lifting to
+  // a background fill with the primary ring on focus.
+  const editablePill =
+    "rounded-[8px] border border-transparent bg-muted outline-none transition hover:bg-foreground/6 focus:border-primary focus:bg-background focus:ring-[3px] focus:ring-primary/18";
   return (
     <div className="mt-3.5 flex flex-col gap-3">
       {value.map((label, index) => (
-        <div key={index} className="overflow-hidden rounded-lg border border-border">
-          <div className="flex items-center gap-3 px-3 py-[9px]">
-            <span className="size-3.5 shrink-0 rounded-[4px]" style={{ backgroundColor: label.color }} aria-hidden />
+        <div
+          key={index}
+          className="rounded-lg border border-border bg-card transition hover:border-foreground/20 hover:shadow-[0_1px_2px_rgba(21,23,28,0.05)]"
+        >
+          <div className="flex items-center gap-2 px-2.5 py-2">
+            <span className="mx-1 size-3.5 shrink-0 rounded-[4px]" style={{ backgroundColor: label.color }} aria-hidden />
             <input
               value={label.name}
+              placeholder="Label name"
               aria-label="Label name"
               onChange={(event) => update(index, { ...label, name: event.target.value })}
-              className="min-w-0 flex-1 border-none bg-transparent text-sm font-medium outline-none"
+              className={cn("min-w-0 flex-1 px-[9px] py-1.5 text-sm font-semibold", editablePill)}
             />
-            <span className="shrink-0 text-[13px] text-muted-foreground">Auto-archive</span>
+            <span className="ml-1 shrink-0 text-[13px] text-muted-foreground">Auto-archive</span>
             <MiniToggle
               on={label.autoArchive}
               label={`Auto-archive ${label.name}`}
@@ -546,17 +659,22 @@ function LabelListEditor({
               <XIcon className="size-4" aria-hidden />
             </button>
           </div>
-          <textarea
-            value={label.rule}
-            aria-label={`Rule for ${label.name}`}
-            rows={1}
-            onChange={(event) => update(index, { ...label, rule: event.target.value })}
-            className="block field-sizing-content w-full resize-none bg-muted px-3.5 py-3 text-[13px] leading-normal text-foreground/80 outline-none"
-          />
+          <div className="px-2.5 pb-2.5">
+            <textarea
+              value={label.rule}
+              aria-label={`Rule for ${label.name}`}
+              rows={1}
+              onChange={(event) => update(index, { ...label, rule: event.target.value })}
+              className={cn(
+                "block field-sizing-content w-full resize-none px-3 py-2.5 text-[13px] leading-normal text-foreground/80 focus:text-foreground",
+                editablePill
+              )}
+            />
+          </div>
         </div>
       ))}
-      <div className="flex items-center gap-2">
-        <Input
+      <div className="flex items-center gap-2.5">
+        <input
           value={draft}
           placeholder="Add new label..."
           aria-label="Add new label"
@@ -567,10 +685,17 @@ function LabelListEditor({
               addLabel();
             }
           }}
+          className="h-11 min-w-0 flex-1 rounded-lg border border-input bg-card px-3.5 text-sm outline-none transition hover:border-foreground/28 focus:border-primary focus:ring-[3px] focus:ring-primary/18"
         />
-        <Button type="button" size="icon" variant="outline" aria-label="Add label" disabled={!draft.trim()} onClick={addLabel}>
-          <PlusIcon aria-hidden />
-        </Button>
+        <button
+          type="button"
+          aria-label="Add label"
+          disabled={!draft.trim()}
+          onClick={addLabel}
+          className="flex size-11 shrink-0 items-center justify-center rounded-lg border border-input bg-card text-muted-foreground transition-colors hover:border-primary hover:bg-primary hover:text-primary-foreground disabled:pointer-events-none disabled:opacity-50"
+        >
+          <PlusIcon className="size-[18px]" aria-hidden />
+        </button>
       </div>
     </div>
   );

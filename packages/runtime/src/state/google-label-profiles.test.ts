@@ -36,6 +36,7 @@ describe("google label profiles", () => {
       email: "user@example.com",
       status: "ready",
       labels: [{ name: "Receipts", color: "#4277FB", rule: "Order receipts", autoArchive: false }],
+      coveredStandard: ["orders"],
       sourceLabelCount: 3,
       startedAt: "2026-07-13T00:00:00.000Z",
       generatedAt: "2026-07-13T00:00:05.000Z"

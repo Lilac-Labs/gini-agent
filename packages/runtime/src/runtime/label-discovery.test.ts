@@ -5,7 +5,8 @@
 // the user-label filter incl. the routine's own Gini/ output namespace;
 // per-label samples; best-effort enrichment), the digest validator's
 // clamp-never-reject rules (name must match a real input label, bounds,
-// palette colors, auto-archive pinned off), and the ensureLabelProfile guard
+// palette colors, auto-archive pinned off, coveredStandard clamped to the
+// standard catalog names), and the ensureLabelProfile guard
 // (failed profile when every credential path fails, no double fire,
 // ready/fresh-running skips, stale re-run). Hermetic: HOME + GINI_STATE_ROOT
 // point at a per-test scratch dir, the echo provider stubs the digest call,
@@ -204,6 +205,7 @@ describe("label discovery", () => {
       status: "ready",
       email: "me@example.com",
       labels: [{ name: "Receipts", color: "#4277FB", rule: "Receipts and invoices", autoArchive: false }],
+      coveredStandard: [],
       sourceLabelCount: 1
     });
     // Exactly one export spawn, targeted at THIS account's config dir.
@@ -245,6 +247,7 @@ describe("label discovery", () => {
       status: "ready",
       email: "me@example.com",
       labels: [{ name: "Receipts", color: "#4277FB", rule: "Order receipts", autoArchive: false }],
+      coveredStandard: [],
       sourceLabelCount: 2
     });
   });
@@ -256,6 +259,11 @@ describe("label discovery", () => {
     });
     expect(prompt.system).toContain("UNTRUSTED mailbox content");
     expect(prompt.system).toContain("EXACTLY one of the existing label names");
+    // The standard catalog (names + rules) rides in the trusted system half,
+    // with the functional-coverage ask that must never rename user labels.
+    expect(prompt.system).toContain('- "orders": Order confirmations, receipts');
+    expect(prompt.system).toContain("coveredStandard = names from the standard list");
+    expect(prompt.system).toContain("Never rename or merge the existing labels themselves");
     expect(prompt.user).toContain("Name: Receipts");
     expect(prompt.user).toContain("Messages: 42");
     expect(prompt.user).toContain("Sample: From: Amazon | Subject: Order");
@@ -266,7 +274,7 @@ describe("label discovery", () => {
     // Names match case-insensitively but emit the input's exact spelling;
     // invented names, duplicates, junk entries, and over-cap input names
     // drop; rules truncate; colors come from the palette by position.
-    const labels = validateLabelDigest(
+    const digest = validateLabelDigest(
       {
         labels: [
           { name: "receipts", rule: `  ${"r".repeat(600)}` },
@@ -276,18 +284,27 @@ describe("label discovery", () => {
           { name: 5, rule: "wrong type" },
           { name: "x".repeat(61), rule: "over-cap input name" },
           { name: "Clients", rule: "Emails from client contacts", autoArchive: true }
-        ]
+        ],
+        // coveredStandard clamps to the standard catalog the same way: a
+        // non-catalog name, a junk entry, and a duplicate drop; matches emit
+        // the catalog's exact spelling.
+        coveredStandard: ["ORDERS", "Receipts", 5, "promotional", "orders"]
       },
       source
     )!;
-    expect(labels).toEqual([
+    expect(digest.labels).toEqual([
       { name: "Receipts", color: "#4277FB", rule: "r".repeat(500), autoArchive: false },
       { name: "Clients", color: "#12B5C4", rule: "Emails from client contacts", autoArchive: false }
     ]);
+    expect(digest.coveredStandard).toEqual(["orders", "promotional"]);
 
-    // The cap keeps the first twelve matches.
+    // The cap keeps the first twelve matches; a missing coveredStandard
+    // degrades to [] rather than failing the digest.
     const many = Array.from({ length: 20 }, (_, i) => `Label ${i}`);
-    expect(validateLabelDigest({ labels: many.map((name) => ({ name, rule: "" })) }, many)!.length).toBe(12);
+    const capped = validateLabelDigest({ labels: many.map((name) => ({ name, rule: "" })) }, many)!;
+    expect(capped.labels.length).toBe(12);
+    expect(capped.coveredStandard).toEqual([]);
+    expect(validateLabelDigest({ labels: [], coveredStandard: "nope" }, source)!.coveredStandard).toEqual([]);
 
     // A shape violation (no labels array) is a model failure, not a clamp.
     expect(validateLabelDigest({}, source)).toBeUndefined();
@@ -305,18 +322,21 @@ describe("label discovery", () => {
       messageIdsByLabel: {}
     });
     setEchoStructuredResponse("gmail-label-digest", {
-      labels: [{ name: "Receipts", rule: "Order confirmations and payment receipts" }]
+      labels: [{ name: "Receipts", rule: "Order confirmations and payment receipts" }],
+      coveredStandard: ["orders"]
     });
     const outcome = await runLabelDiscovery(echoConfig(), account, { gwsSpawn: neverSpawn, fetchImpl });
     expect(outcome).toEqual({
       status: "ready",
       email: "me@example.com",
       labels: [{ name: "Receipts", color: "#4277FB", rule: "Order confirmations and payment receipts", autoArchive: false }],
+      coveredStandard: ["orders"],
       sourceLabelCount: 2
     });
 
     // A mailbox with no user labels is ready-and-empty without a model call
-    // (the unstubbed echo default {} would fail the validator if reached).
+    // (the unstubbed echo default {} would fail the validator if reached) —
+    // and carries no coveredStandard, since the digest never ran.
     clearEchoStructuredResponses();
     const empty = fakeFetch({ labels: [{ id: "SPAM", name: "SPAM", type: "system" }] });
     expect(await runLabelDiscovery(echoConfig(), account, { gwsSpawn: neverSpawn, fetchImpl: empty.fetchImpl })).toEqual({
@@ -356,7 +376,10 @@ describe("label discovery", () => {
       details: { L1: { messagesTotal: 3 } },
       messageIdsByLabel: { L1: [] }
     });
-    setEchoStructuredResponse("gmail-label-digest", { labels: [{ name: "Receipts", rule: "Receipts" }] });
+    setEchoStructuredResponse("gmail-label-digest", {
+      labels: [{ name: "Receipts", rule: "Receipts" }],
+      coveredStandard: ["orders"]
+    });
 
     const config = echoConfig();
     ensureLabelProfile(config, account, { gwsSpawn: neverSpawn, fetchImpl });
@@ -367,6 +390,7 @@ describe("label discovery", () => {
     await waitForStatus(account.id, "ready");
     const ready = readLabelProfile(account.id)!;
     expect(ready.labels.map((label) => label.name)).toEqual(["Receipts"]);
+    expect(ready.coveredStandard).toEqual(["orders"]);
     expect(ready.sourceLabelCount).toBe(1);
     const mintsAfterFirst = requests.filter((url) => url.includes("oauth2")).length;
     expect(mintsAfterFirst).toBe(1);

@@ -11,7 +11,9 @@
 //     absent-body seeding, the zero-accounts flat fallback), the
 //     multi-account buildSpec prompt, and the accountSettings view join
 //     precedence (saved entry > legacy flat stamp > seeded defaults, where
-//     a ready label-discovery profile seeds the labelList field)
+//     the labelList seed merges a ready label-discovery profile with the
+//     standard catalog — origin-tagged, functionally deduped via the
+//     digest's coveredStandard, capped)
 //   - GET reflects installed state (templateId join, agent scoping)
 //   - install: templateId stamping, settings defaults, idempotent
 //     per-template replace, timezone precedence (payload > onboarding record
@@ -149,6 +151,30 @@ describe("routine templates", () => {
       "- Detect important emails awaiting a response. For each one, spawn a surfaced child task to draft the reply. Only draft replies to these kinds of emails: Only real people I know"
     );
 
+    // Provenance tags are presentation only: an origin-tagged label composes
+    // the IDENTICAL prompt as an untagged one — origin never leaks into the
+    // job prompt.
+    const taggedSpec = template.buildSpec(
+      resolveSettings(template, {
+        labels: [
+          { name: "vip", rule: "Important people", origin: "existing" },
+          { name: "fyi", rule: "", origin: "suggested" }
+        ]
+      }),
+      "UTC"
+    )!;
+    const untaggedSpec = template.buildSpec(
+      resolveSettings(template, {
+        labels: [
+          { name: "vip", rule: "Important people" },
+          { name: "fyi", rule: "" }
+        ]
+      }),
+      "UTC"
+    )!;
+    expect(taggedSpec.prompt).toBe(untaggedSpec.prompt);
+    expect(taggedSpec.prompt as string).not.toContain("origin");
+
     // Without scheduling assist the calendar skill drops off. Labeling
     // contributes a behavior only when the toggle is on AND at least one
     // label exists; with every function off there is no spec at all.
@@ -238,6 +264,25 @@ describe("routine templates", () => {
       { name: "VIP", color: "#ABCDEF", rule: "", autoArchive: true }
     ]);
     expect(resolved.schedulingRules).toBe("mornings only");
+
+    // The seed's provenance tag survives the save round-trip when valid and
+    // is dropped otherwise — never an error (it's presentation only).
+    const tagged = resolveSettings(template, {
+      labels: [
+        { name: "a", origin: "existing" },
+        { name: "b", origin: "suggested" },
+        { name: "c", origin: "invented" },
+        { name: "d", origin: 5 },
+        { name: "e" }
+      ]
+    });
+    expect((tagged.labels as RoutineLabelRule[]).map((label) => label.origin)).toEqual([
+      "existing",
+      "suggested",
+      undefined,
+      undefined,
+      undefined
+    ]);
   });
 
   test("resolveInstallSettings validates the email-keyed map and picks the shape per registry", () => {
@@ -471,22 +516,30 @@ describe("routine templates", () => {
     expect(flatMorning.installed.settings).toEqual({ personalizedNews: true });
   });
 
-  test("a ready label profile seeds an account's defaults; saved entries beat it", async () => {
+  test("seeded defaults merge discovered labels with the standard set; saved entries beat the seed", async () => {
     const config = testConfig(root, "templates-label-profile");
     const handler = createHandler(config);
     await seedWorkspaceSkills(handler, config);
     seedGoogleAccount("gacct_a", "a@x.com");
     seedGoogleAccount("gacct_b", "b@y.com");
-    // a@x.com carries a ready discovery digest of its existing Gmail labels;
-    // b@y.com's discovery failed, so it stays on the catalog starter set.
+    seedGoogleAccount("gacct_c", "c@z.com");
+    seedGoogleAccount("gacct_d", "d@w.com");
+    // a@x.com: a rich digest — two existing labels, one standard label
+    // marked functionally covered, and one name colliding with a standard
+    // label (case-insensitively).
     writeLabelProfile({
       version: 1,
       accountId: "gacct_a",
       email: "a@x.com",
       status: "ready",
-      labels: [{ name: "Clients", color: "#12B5C4", rule: "Emails from client contacts", autoArchive: false }],
+      labels: [
+        { name: "Receipts", color: "#12B5C4", rule: "Order receipts and invoices", autoArchive: false },
+        { name: "Newsletters", color: "#1FA463", rule: "Subscribed digests", autoArchive: false }
+      ],
+      coveredStandard: ["orders"],
       sourceLabelCount: 5
     });
+    // b@y.com's discovery failed: the full standard set seeds, all suggested.
     writeLabelProfile({
       version: 1,
       accountId: "gacct_b",
@@ -495,32 +548,94 @@ describe("routine templates", () => {
       labels: [],
       error: "boom"
     });
+    // c@z.com: a sparse pre-coveredStandard profile (one label, no field) —
+    // its label counts as existing and the full standard set appends.
+    writeLabelProfile({
+      version: 1,
+      accountId: "gacct_c",
+      email: "c@z.com",
+      status: "ready",
+      labels: [{ name: "Clients", color: "#12B5C4", rule: "Emails from client contacts", autoArchive: false }],
+      sourceLabelCount: 3
+    });
+    // d@w.com: thirteen existing labels — the merged seed caps at 20, so the
+    // suggested tail truncates first.
+    writeLabelProfile({
+      version: 1,
+      accountId: "gacct_d",
+      email: "d@w.com",
+      status: "ready",
+      labels: Array.from({ length: 13 }, (_, i) => ({
+        name: `Bucket ${i + 1}`,
+        color: "#4277FB",
+        rule: "",
+        autoArchive: false
+      })),
+      sourceLabelCount: 13
+    });
 
-    // Install with settings absent: the seeded map uses each account's own
-    // defaults — a@x.com's discovered labels flow into its prompt lines.
+    // Install with settings absent: each account's seed is its discovered
+    // labels first (origin "existing", digest order), then the standard
+    // catalog minus covered functions and name collisions (origin
+    // "suggested", catalog order).
     const job = await call(handler, config, "/api/routines/templates/auto-inbox/install", {
       method: "POST",
       body: JSON.stringify({})
     });
     const seeded = job.templateSettings as { accounts: Record<string, RoutineSettings> };
-    expect((seeded.accounts["a@x.com"]!.labels as RoutineLabelRule[]).map((l) => l.name)).toEqual(["Clients"]);
-    expect((seeded.accounts["b@y.com"]!.labels as RoutineLabelRule[]).map((l) => l.name)).toEqual(DEFAULT_LABEL_NAMES);
-    expect(job.prompt).toContain('  - "Clients": Emails from client contacts');
+    expect((seeded.accounts["a@x.com"]!.labels as RoutineLabelRule[]).map((l) => [l.name, l.origin])).toEqual([
+      ["Receipts", "existing"],
+      ["Newsletters", "existing"],
+      ["new sender", "suggested"],
+      ["awaiting reply", "suggested"],
+      ["action needed", "suggested"],
+      ["promotional", "suggested"],
+      ["travel", "suggested"],
+      ["updates", "suggested"]
+    ]);
+    const failedSeed = seeded.accounts["b@y.com"]!.labels as RoutineLabelRule[];
+    expect(failedSeed.map((l) => l.name)).toEqual(DEFAULT_LABEL_NAMES);
+    expect(failedSeed.every((l) => l.origin === "suggested")).toBe(true);
+    const sparseSeed = seeded.accounts["c@z.com"]!.labels as RoutineLabelRule[];
+    expect(sparseSeed.map((l) => l.name)).toEqual(["Clients", ...DEFAULT_LABEL_NAMES]);
+    expect(sparseSeed.map((l) => l.origin)).toEqual(["existing", ...DEFAULT_LABEL_NAMES.map(() => "suggested" as const)]);
+    const cappedSeed = seeded.accounts["d@w.com"]!.labels as RoutineLabelRule[];
+    expect(cappedSeed.length).toBe(20);
+    expect(cappedSeed.filter((l) => l.origin === "existing").length).toBe(13);
+    expect(cappedSeed.slice(13).map((l) => l.name)).toEqual(DEFAULT_LABEL_NAMES.slice(0, 7));
+    // Discovered labels flow into the prompt lines; the provenance tag stays
+    // in templateSettings and never reaches the composed prompt.
+    expect(job.prompt).toContain('  - "Receipts": Order receipts and invoices');
+    expect(job.prompt).not.toContain("origin");
+    expect(job.prompt).not.toContain("suggested");
 
-    // View join for an account OUTSIDE the saved map seeds from its profile;
-    // a saved entry always beats the profile.
+    // View join for an account OUTSIDE the saved map seeds the same merge; a
+    // saved entry always beats the seed — and its origin tags round-trip.
     await call(handler, config, "/api/routines/templates/auto-inbox/install", {
       method: "POST",
       body: JSON.stringify({
-        settings: { "b@y.com": { labels: [{ name: "vip", color: "#4277FB", rule: "Important", autoArchive: false }] } }
+        settings: {
+          "b@y.com": { labels: [{ name: "vip", color: "#4277FB", rule: "Important", autoArchive: false, origin: "existing" }] }
+        }
       })
     });
     const listed = await call(handler, config, "/api/routines/templates");
     const rows = listed.templates.find((t: { id: string }) => t.id === "auto-inbox").installed
       .accountSettings as Array<{ email: string; settings: RoutineSettings }>;
     const byEmail = new Map(rows.map((row) => [row.email, row.settings]));
-    expect((byEmail.get("a@x.com")!.labels as RoutineLabelRule[]).map((l) => l.name)).toEqual(["Clients"]);
-    expect((byEmail.get("b@y.com")!.labels as RoutineLabelRule[]).map((l) => l.name)).toEqual(["vip"]);
+    expect((byEmail.get("a@x.com")!.labels as RoutineLabelRule[]).map((l) => l.name)).toEqual([
+      "Receipts",
+      "Newsletters",
+      "new sender",
+      "awaiting reply",
+      "action needed",
+      "promotional",
+      "travel",
+      "updates"
+    ]);
+    expect(byEmail.get("b@y.com")!.labels).toEqual([
+      { name: "vip", color: "#4277FB", rule: "Important", autoArchive: false, origin: "existing" }
+    ]);
   });
 
   test("GET lists the catalog and reflects installed state per agent", async () => {

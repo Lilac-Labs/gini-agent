@@ -20,7 +20,7 @@ import { resolveEffectiveContext } from "../execution/effective-context";
 import { assertSkillNamesResolve, createScheduledJob, removeJob } from "../jobs";
 import { mutateState, readState, setContainerArchived } from "../state";
 import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../state/google-accounts";
-import { readLabelProfile } from "../state/google-label-profiles";
+import { readLabelProfile, type GoogleLabelProfile } from "../state/google-label-profiles";
 import { readOnboarding } from "../state/onboarding";
 import { ensureLabelProfile } from "./label-discovery";
 import type { GoogleAccount, JobRecord, JobStatus, RuntimeConfig, RuntimeState } from "../types";
@@ -34,6 +34,12 @@ export interface RoutineLabelRule {
   color: string;
   rule: string;
   autoArchive: boolean;
+  // Seed provenance, stamped by defaultSettingsForAccount: "existing" =
+  // discovered from the user's own mailbox, "suggested" = the standard
+  // catalog; absent = hand-added or pre-provenance. Presentation only — the
+  // web renders it as a read-only badge, it survives save round-trips
+  // (resolveLabelRule), and buildSpec NEVER composes it into the job prompt.
+  origin?: "existing" | "suggested";
 }
 
 // One editable field in a settings section, discriminated on `kind`.
@@ -130,8 +136,11 @@ export const ROUTINE_LABEL_NAMESPACE = "Gini/";
 
 // The Auto-inbox starter label set (names, colors, and classification rules
 // from the GiniRoutineDetail design handoff). Every label starts with
-// auto-archive off — archiving is an explicit per-label opt-in.
-const AUTO_INBOX_DEFAULT_LABELS: RoutineLabelRule[] = [
+// auto-archive off — archiving is an explicit per-label opt-in. Exported as
+// the STANDARD catalog label discovery hands the digest call, so the model
+// can mark which standard labels an existing label already functionally
+// covers (src/runtime/label-discovery.ts).
+export const AUTO_INBOX_DEFAULT_LABELS: RoutineLabelRule[] = [
   { name: "new sender", color: "#4277FB", rule: "Direct emails from real people you haven't corresponded with before — potential leads, candidates, or business contacts worth reviewing", autoArchive: false },
   { name: "awaiting reply", color: "#12B5C4", rule: "Threads where you were the last to respond and are waiting for a reply from someone else", autoArchive: false },
   { name: "action needed", color: "#F5820A", rule: "Notifications requiring near-term action: contracts to sign, payments to process, waitlist updates, and time-sensitive status changes", autoArchive: false },
@@ -798,30 +807,50 @@ function resolveAccountSettingsMap(template: RoutineTemplate, raw: Record<string
 }
 
 // One account's seeded default settings: the catalog field defaults, except
-// that a labelList field seeds from the account's discovered Gmail label
-// profile when one is ready and non-empty — the user's own organizational
-// scheme beats the standard starter set (label discovery pulls it on
-// sign-in; see src/runtime/label-discovery.ts). A saved edit beats both:
-// this seeding only applies where no persisted entry exists.
+// that a labelList field always MERGES the account's discovered Gmail label
+// profile (label discovery pulls it on sign-in; see
+// src/runtime/label-discovery.ts) with the standard starter set — the user's
+// own labels first, then the standard labels no existing label already
+// covers. A saved edit beats the seed: this seeding only applies where no
+// persisted entry exists.
 function defaultSettingsForAccount(template: RoutineTemplate, account: GoogleAccount): RoutineSettings {
   const profile = readLabelProfile(account.id);
-  const profileLabels = profile?.status === "ready" && profile.labels.length > 0 ? profile.labels : undefined;
   const resolved: RoutineSettings = {};
   for (const field of settingFields(template)) {
-    if (field.kind === "labelList" && profileLabels) {
-      // Clone per resolution (like defaultSettingValue) and keep the swatch
-      // palette-backed even if a hand-edited profile lost its hexes.
-      resolved[field.key] = profileLabels.map((label, index) => ({
-        name: label.name,
-        color: HEX_COLOR.test(label.color) ? label.color : LABEL_COLOR_PALETTE[index % LABEL_COLOR_PALETTE.length]!,
-        rule: label.rule,
-        autoArchive: label.autoArchive === true
-      }));
-      continue;
-    }
-    resolved[field.key] = defaultSettingValue(field);
+    resolved[field.key] = field.kind === "labelList" ? seededLabelList(field, profile) : defaultSettingValue(field);
   }
   return resolved;
+}
+
+// The merged seed caps below resolveSettings' MAX_LABELS so a full standard
+// append onto a 12-label digest still saves.
+const MAX_SEEDED_LABELS = 20;
+
+// One labelList field's merged seed: the account's discovered labels first
+// (origin "existing", digest order, swatches kept palette-backed even if a
+// hand-edited profile lost its hexes), then the standard catalog labels
+// (origin "suggested", catalog order) — skipping standard labels the digest
+// marked functionally covered (coveredStandard) and case-insensitive name
+// collisions with an existing label. Failed/absent/empty profiles — and
+// pre-coveredStandard profiles' uncovered remainder — seed the full standard
+// set. Suggested labels truncate first when the merged list exceeds the cap
+// (existing lead by construction).
+function seededLabelList(field: RoutineSettingField & { kind: "labelList" }, profile: GoogleLabelProfile | undefined): RoutineLabelRule[] {
+  const ready = profile?.status === "ready" && profile.labels.length > 0 ? profile : undefined;
+  const existing: RoutineLabelRule[] = (ready?.labels ?? []).map((label, index) => ({
+    name: label.name,
+    color: HEX_COLOR.test(label.color) ? label.color : LABEL_COLOR_PALETTE[index % LABEL_COLOR_PALETTE.length]!,
+    rule: label.rule,
+    autoArchive: label.autoArchive === true,
+    origin: "existing" as const
+  }));
+  const skip = new Set<string>();
+  for (const name of ready?.coveredStandard ?? []) skip.add(name.toLowerCase());
+  for (const label of existing) skip.add(label.name.toLowerCase());
+  const suggested = field.defaultValue
+    .filter((label) => !skip.has(label.name.toLowerCase()))
+    .map((label) => ({ ...label, origin: "suggested" as const }));
+  return [...existing, ...suggested].slice(0, MAX_SEEDED_LABELS);
 }
 
 const MAX_LABELS = 24;
@@ -884,7 +913,10 @@ function resolveLabelRule(key: string, entry: unknown, index: number): RoutineLa
   // or malformed hex falls back to the palette by position instead of
   // failing the install.
   const color = typeof raw.color === "string" && HEX_COLOR.test(raw.color) ? raw.color : LABEL_COLOR_PALETTE[index % LABEL_COLOR_PALETTE.length]!;
-  return { name, color, rule, autoArchive: raw.autoArchive === true };
+  // The provenance tag is presentation only too: a valid value survives the
+  // save round-trip, anything else is dropped rather than failing it.
+  const origin = raw.origin === "existing" || raw.origin === "suggested" ? raw.origin : undefined;
+  return { name, color, rule, autoArchive: raw.autoArchive === true, ...(origin ? { origin } : {}) };
 }
 
 // Fill missing field keys from the catalog defaults WITHOUT re-validating

@@ -12,8 +12,10 @@
 //      which is Auto-inbox's product, not the user's scheme — plus, per
 //      label, its message count and a few recent From/Subject samples.
 //   2. Synthesis — ONE `generateStructured` call keeps the labels a human
-//      plainly uses to organize mail and infers each one's plain-language
-//      classification rule.
+//      plainly uses to organize mail, infers each one's plain-language
+//      classification rule, and marks which STANDARD catalog labels an
+//      existing label already functionally covers (coveredStandard), so the
+//      seeding merge never suggests a duplicate function.
 // The digest persists per account (src/state/google-label-profiles.ts) and
 // seeds the per-account settings defaults in routine-templates.ts; the user
 // can edit everything afterwards, and a saved edit always beats the profile.
@@ -41,7 +43,13 @@ import {
   type FetchImpl,
   type GwsSpawn
 } from "./onboarding-scan";
-import { LABEL_COLOR_PALETTE, MAX_LABEL_NAME_CHARS, MAX_LABEL_RULE_CHARS, ROUTINE_LABEL_NAMESPACE } from "./routine-templates";
+import {
+  AUTO_INBOX_DEFAULT_LABELS,
+  LABEL_COLOR_PALETTE,
+  MAX_LABEL_NAME_CHARS,
+  MAX_LABEL_RULE_CHARS,
+  ROUTINE_LABEL_NAMESPACE
+} from "./routine-templates";
 import type { RoutineLabelRule } from "./routine-templates";
 import type { GoogleAccount, RuntimeConfig } from "../types";
 
@@ -190,11 +198,15 @@ export function buildLabelDigestPrompt(bundle: LabelUsageBundle): { system: stri
       "Keep ONLY the labels a human plainly uses to organize their mail. Skip machine, tool, or operational labels (app-managed buckets like \"[Superhuman]/…\", sync or bookkeeping labels) unless the usage shows the user curates them on purpose.",
       "For each kept label, infer a short plain-language rule describing which emails belong under it, from its name, message count, and samples.",
       `Keep at most ${MAX_DIGEST_LABELS} labels, the most clearly used first. Each name must be EXACTLY one of the existing label names — never invent or rename one.`,
+      "The routine also ships this STANDARD label list:",
+      ...AUTO_INBOX_DEFAULT_LABELS.map((label) => `- "${label.name}": ${label.rule}`),
+      "Return coveredStandard = names from the standard list whose function one of the user's existing labels already serves (an existing \"Receipts\" covers \"orders\"; a \"Marketing\" covers \"promotional\"). Never rename or merge the existing labels themselves — coveredStandard only marks redundant standard labels.",
       "Reply with a JSON object and nothing else, matching this shape:",
       "{",
       '  "labels": [',
       '    { "name": "Receipts", "rule": "Order confirmations, invoices, and payment receipts" }',
-      "  ]",
+      "  ],",
+      '  "coveredStandard": ["orders"]',
       "}"
     ].join("\n")
   ].join("\n\n");
@@ -217,18 +229,28 @@ function renderLabelUsage(bundle: LabelUsageBundle): string {
   return lines.join("\n");
 }
 
-// Shape-check + clamp the digest deliverable `{ labels: [{ name, rule }] }`
-// against the REAL input label names, returning the seeded rules or
-// undefined when the shape is invalid (the validator below maps that to a
-// model failure). Clamps, never rejects, on the attacker-controllable
-// content: an entry whose name doesn't match an input label (or whose input
-// name exceeds the settings cap) is dropped, names are matched
-// case-insensitively but emit the input's exact Gmail spelling, rules
-// truncate to the settings bound, duplicates collapse, at most
+// The validated digest deliverable: the seeded rules plus the standard
+// catalog names an existing label already functionally covers.
+export interface LabelDigest {
+  labels: RoutineLabelRule[];
+  coveredStandard: string[];
+}
+
+// Shape-check + clamp the digest deliverable `{ labels: [{ name, rule }],
+// coveredStandard }` against the REAL input label names, returning the
+// digest or undefined when the shape is invalid (the validator below maps
+// that to a model failure). Clamps, never rejects, on the
+// attacker-controllable content: an entry whose name doesn't match an input
+// label (or whose input name exceeds the settings cap) is dropped, names are
+// matched case-insensitively but emit the input's exact Gmail spelling,
+// rules truncate to the settings bound, duplicates collapse, at most
 // MAX_DIGEST_LABELS survive, colors come from the shared palette by
 // position, and auto-archive is ALWAYS off — archiving is a user opt-in,
-// never a model decision.
-export function validateLabelDigest(value: unknown, sourceNames: string[]): RoutineLabelRule[] | undefined {
+// never a model decision. coveredStandard clamps the same way: entries that
+// don't name a standard catalog label are dropped (matched
+// case-insensitively, emitting the catalog's exact spelling), duplicates
+// collapse, and a missing or malformed array degrades to [].
+export function validateLabelDigest(value: unknown, sourceNames: string[]): LabelDigest | undefined {
   if (!value || typeof value !== "object") return undefined;
   const rawLabels = (value as { labels?: unknown }).labels;
   if (!Array.isArray(rawLabels)) return undefined;
@@ -257,13 +279,25 @@ export function validateLabelDigest(value: unknown, sourceNames: string[]): Rout
       autoArchive: false
     });
   }
-  return labels;
+  return { labels, coveredStandard: clampCoveredStandard((value as { coveredStandard?: unknown }).coveredStandard) };
+}
+
+function clampCoveredStandard(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const byLowerName = new Map(AUTO_INBOX_DEFAULT_LABELS.map((label) => [label.name.toLowerCase(), label.name]));
+  const covered: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "string") continue;
+    const name = byLowerName.get(entry.trim().toLowerCase());
+    if (name !== undefined && !covered.includes(name)) covered.push(name);
+  }
+  return covered;
 }
 
 // ── Orchestration ────────────────────────────────────────────────────────────
 
 export type LabelDiscoveryOutcome =
-  | { status: "ready"; email?: string; labels: RoutineLabelRule[]; sourceLabelCount: number }
+  | { status: "ready"; email?: string; labels: RoutineLabelRule[]; coveredStandard?: string[]; sourceLabelCount: number }
   | { status: "failed"; error: string };
 
 // Deliberately generic (never credential material or a token-endpoint body),
@@ -289,11 +323,11 @@ export async function runLabelDiscovery(
       return { status: "ready", ...(bundle.email ? { email: bundle.email } : {}), labels: [], sourceLabelCount: 0 };
     }
     const sourceNames = bundle.labels.map((label) => label.name);
-    const validator: StructuredValidator<RoutineLabelRule[]> = {
+    const validator: StructuredValidator<LabelDigest> = {
       parse(value: unknown) {
-        const labels = validateLabelDigest(value, sourceNames);
-        if (!labels) throw new Error("Label digest did not match the contract.");
-        return labels;
+        const digest = validateLabelDigest(value, sourceNames);
+        if (!digest) throw new Error("Label digest did not match the contract.");
+        return digest;
       }
     };
     const result = await generateStructured(
@@ -304,7 +338,8 @@ export async function runLabelDiscovery(
     return {
       status: "ready",
       ...(bundle.email ? { email: bundle.email } : {}),
-      labels: result.data,
+      labels: result.data.labels,
+      coveredStandard: result.data.coveredStandard,
       sourceLabelCount: bundle.labels.length
     };
   } catch (error) {
@@ -372,6 +407,9 @@ function finalizeLabelProfile(accountId: string, email: string, startedAt: strin
           email: outcome.email ?? email,
           status: "ready",
           labels: outcome.labels,
+          // Only what the digest validated persists — the no-labels shortcut
+          // never ran it and carries no coveredStandard.
+          ...(outcome.coveredStandard ? { coveredStandard: outcome.coveredStandard } : {}),
           sourceLabelCount: outcome.sourceLabelCount,
           startedAt,
           generatedAt: now()

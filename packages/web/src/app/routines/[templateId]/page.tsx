@@ -623,7 +623,8 @@ function SettingField({
 }
 
 // The filtering-label editor: one bordered card per label (swatch, muted
-// name-input pill, Auto-archive mini toggle, remove) with the rule textarea
+// name-input pill, read-only Existing/Suggested provenance badge when the
+// seed tagged one, Auto-archive mini toggle, remove) with the rule textarea
 // in a padded wrapper below — both editable areas share the muted-pill
 // hover/primary-focus treatment — then the 44px Add new label row appending
 // with a cycled palette color.
@@ -667,6 +668,16 @@ function LabelListEditor({
               onChange={(event) => update(index, { ...label, name: event.target.value })}
               className={cn("min-w-0 flex-1 px-[9px] py-1.5 text-sm font-semibold", editablePill)}
             />
+            {label.origin ? (
+              <span
+                className={cn(
+                  "shrink-0 rounded px-1.5 text-[11px] text-muted-foreground",
+                  label.origin === "existing" ? "bg-muted" : "border border-input bg-transparent"
+                )}
+              >
+                {label.origin === "existing" ? "Existing" : "Suggested"}
+              </span>
+            ) : null}
             <span className="ml-1 shrink-0 text-[13px] text-muted-foreground">Auto-archive</span>
             <MiniToggle
               on={label.autoArchive}

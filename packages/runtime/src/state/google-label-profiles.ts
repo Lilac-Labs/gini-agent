@@ -31,6 +31,12 @@ export interface GoogleLabelProfile {
   // means "discovered nothing worth seeding", so consumers fall back to the
   // catalog defaults).
   labels: RoutineLabelRule[];
+  // The standard catalog label names whose FUNCTION one of the digested
+  // labels already serves (validated against the catalog by the digest
+  // validator) — the seeding merge suggests the standard set minus these.
+  // Absent on pre-coveredStandard profiles and on the no-labels shortcut
+  // that never ran the digest: the full standard set is suggested then.
+  coveredStandard?: string[];
   // How many user-created labels the mailbox held when the digest ran.
   sourceLabelCount?: number;
   // When the running record was stamped — the staleness key: a discovery

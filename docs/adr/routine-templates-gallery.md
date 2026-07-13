@@ -22,8 +22,8 @@ emails" / "Assist with scheduling") and a `buildSpec` that composes the
 resolved settings state. Each section holds typed fields discriminated on
 `kind` — `toggle` (boolean), `text` (multiline string, e.g. a draft-replies
 scope or scheduling rules), and `labelList` (editable Gmail filtering labels:
-name, UI-only swatch color, classification rule, per-label auto-archive) —
-each with a catalog default. Field keys are flat across sections (sections
+name, UI-only swatch color, classification rule, per-label auto-archive, and
+an optional seed-provenance `origin` tag) — each with a catalog default. Field keys are flat across sections (sections
 are presentation grouping only), and the resolved state
 (`RoutineSettings`, keyed by field key) is validated server-side by
 `resolveSettings` (unknown keys rejected; per-kind shape checks; label list
@@ -69,7 +69,7 @@ auto-reinstall.
 
 ### Gmail label discovery seeds per-account defaults
 
-An account's *seeded defaults* prefer the user's own labels over the
+An account's *seeded defaults* always MERGE the user's own labels with the
 standard starter set. When a Google account is connected, a fire-and-forget
 background pipeline (`src/runtime/label-discovery.ts`, mirroring the
 onboarding profile scan's discipline) digests the account's EXISTING Gmail
@@ -79,16 +79,20 @@ present, else one `gws auth export --unmasked` spawn for keyring-backed
 logins) minting an in-memory token, then direct Gmail HTTP for the
 user-created label list plus per-label message counts and a few recent
 From/Subject samples — feeds ONE `generateStructured` call that keeps the
-labels a human plainly uses to organize mail and infers each one's
-plain-language classification rule. Labels under the routine's own output
-namespace (`Gini/…`, the labelPrefix composition) are excluded at the fetch
-stage: on a mailbox where Auto-inbox already ran they are the routine's
-product, and re-importing them would circularly seed the profile with our
-own labels. The validator clamps rather than rejects (label names and
-samples are untrusted mailbox content), a digested label must name one of
-the REAL input labels, and auto-archive is always off — archiving stays a
-user opt-in. An account where both credential paths come up empty records
-a clean failure.
+labels a human plainly uses to organize mail, infers each one's
+plain-language classification rule, and — given the standard catalog
+alongside the usage evidence — returns `coveredStandard`: the standard
+label names whose function an existing label already serves (an existing
+"Receipts" covers "orders"), so the seed never suggests a duplicate
+function without renaming or merging the user's own labels. Labels under
+the routine's own output namespace (`Gini/…`, the labelPrefix composition)
+are excluded at the fetch stage: on a mailbox where Auto-inbox already ran
+they are the routine's product, and re-importing them would circularly seed
+the profile with our own labels. The validator clamps rather than rejects
+(label names and samples are untrusted mailbox content), a digested label
+must name one of the REAL input labels, `coveredStandard` must name catalog
+labels, and auto-archive is always off — archiving stays a user opt-in. An
+account where both credential paths come up empty records a clean failure.
 
 The digest persists machine-globally per account at
 `~/.gini/google-accounts/<accountId>/label-profile.json`
@@ -100,9 +104,17 @@ skip) and fires from the connect paths — `POST /api/google/accounts`,
 `POST /api/google/accounts/provision`, and the loopback web login callback —
 plus a backfill on the gallery GET that only targets accounts with no
 profile at all, so a persistent failure never loops on the poll-driven
-read. Seeding precedence per account: a saved settings entry always beats
-the profile, the profile (ready and non-empty) beats the catalog defaults,
-and the user can edit everything in the settings UI afterwards.
+read. An account's seed is the discovered labels first (tagged
+`origin: "existing"`), then the standard catalog labels not functionally
+covered and not name-colliding case-insensitively (tagged
+`origin: "suggested"`, truncating first at the 20-label seed cap); a
+failed, absent, or empty profile seeds the full standard set, all
+suggested, and a pre-`coveredStandard` profile suggests the full standard
+set minus name collisions. The `origin` tag is presentation only — the web
+renders it as a read-only badge, a valid tag survives save round-trips
+(`resolveLabelRule`), and `buildSpec` never composes it into the job
+prompt. A saved settings entry always beats the seed, and the user can edit
+everything in the settings UI afterwards.
 
 Two callers share the catalog:
 

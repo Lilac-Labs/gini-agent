@@ -498,6 +498,10 @@ export interface RoutineLabelRule {
   color: string;
   rule: string;
   autoArchive: boolean;
+  // Seed provenance: "existing" = discovered from the user's mailbox,
+  // "suggested" = the standard catalog; absent = hand-added or
+  // pre-provenance. Rendered as a read-only badge on the label card.
+  origin?: "existing" | "suggested";
 }
 
 // One editable field in a settings section, discriminated on `kind`.

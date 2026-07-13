@@ -10,7 +10,8 @@
 //     email-keyed map, flat-body fan-out to every registered account,
 //     absent-body seeding, the zero-accounts flat fallback), the
 //     multi-account buildSpec prompt, and the accountSettings view join
-//     precedence (saved entry > legacy flat stamp > seeded defaults)
+//     precedence (saved entry > legacy flat stamp > seeded defaults, where
+//     a ready label-discovery profile seeds the labelList field)
 //   - GET reflects installed state (templateId join, agent scoping)
 //   - install: templateId stamping, settings defaults, idempotent
 //     per-template replace, timezone precedence (payload > onboarding record
@@ -44,6 +45,7 @@ import { join } from "node:path";
 import { createHandler } from "../http";
 import { readState } from "../state";
 import { addGoogleAccount, configDirForAccount, setPrimaryGoogleAccountId } from "../state/google-accounts";
+import { writeLabelProfile } from "../state/google-label-profiles";
 import { writeOnboarding } from "../state/onboarding";
 import { ROUTINE_TEMPLATES, resolveInstallSettings, resolveSettings, routineTemplate } from "./routine-templates";
 import type { PerAccountRoutineSettings, RoutineLabelRule, RoutineSettings } from "./routine-templates";
@@ -467,6 +469,58 @@ describe("routine templates", () => {
     const flatMorning = flatListed.templates.find((t: { id: string }) => t.id === "morning-briefing");
     expect(flatMorning.installed.accountSettings).toBeUndefined();
     expect(flatMorning.installed.settings).toEqual({ personalizedNews: true });
+  });
+
+  test("a ready label profile seeds an account's defaults; saved entries beat it", async () => {
+    const config = testConfig(root, "templates-label-profile");
+    const handler = createHandler(config);
+    await seedWorkspaceSkills(handler, config);
+    seedGoogleAccount("gacct_a", "a@x.com");
+    seedGoogleAccount("gacct_b", "b@y.com");
+    // a@x.com carries a ready discovery digest of its existing Gmail labels;
+    // b@y.com's discovery failed, so it stays on the catalog starter set.
+    writeLabelProfile({
+      version: 1,
+      accountId: "gacct_a",
+      email: "a@x.com",
+      status: "ready",
+      labels: [{ name: "Clients", color: "#12B5C4", rule: "Emails from client contacts", autoArchive: false }],
+      sourceLabelCount: 5
+    });
+    writeLabelProfile({
+      version: 1,
+      accountId: "gacct_b",
+      email: "b@y.com",
+      status: "failed",
+      labels: [],
+      error: "boom"
+    });
+
+    // Install with settings absent: the seeded map uses each account's own
+    // defaults — a@x.com's discovered labels flow into its prompt lines.
+    const job = await call(handler, config, "/api/routines/templates/auto-inbox/install", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    const seeded = job.templateSettings as { accounts: Record<string, RoutineSettings> };
+    expect((seeded.accounts["a@x.com"]!.labels as RoutineLabelRule[]).map((l) => l.name)).toEqual(["Clients"]);
+    expect((seeded.accounts["b@y.com"]!.labels as RoutineLabelRule[]).map((l) => l.name)).toEqual(DEFAULT_LABEL_NAMES);
+    expect(job.prompt).toContain('  - "Clients": Emails from client contacts');
+
+    // View join for an account OUTSIDE the saved map seeds from its profile;
+    // a saved entry always beats the profile.
+    await call(handler, config, "/api/routines/templates/auto-inbox/install", {
+      method: "POST",
+      body: JSON.stringify({
+        settings: { "b@y.com": { labels: [{ name: "vip", color: "#4277FB", rule: "Important", autoArchive: false }] } }
+      })
+    });
+    const listed = await call(handler, config, "/api/routines/templates");
+    const rows = listed.templates.find((t: { id: string }) => t.id === "auto-inbox").installed
+      .accountSettings as Array<{ email: string; settings: RoutineSettings }>;
+    const byEmail = new Map(rows.map((row) => [row.email, row.settings]));
+    expect((byEmail.get("a@x.com")!.labels as RoutineLabelRule[]).map((l) => l.name)).toEqual(["Clients"]);
+    expect((byEmail.get("b@y.com")!.labels as RoutineLabelRule[]).map((l) => l.name)).toEqual(["vip"]);
   });
 
   test("GET lists the catalog and reflects installed state per agent", async () => {

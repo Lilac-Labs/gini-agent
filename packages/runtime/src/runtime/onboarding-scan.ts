@@ -119,7 +119,7 @@ function parseGwsJson(stdout: string): Record<string, unknown> | undefined {
 
 // The refresh credentials `gws auth export --unmasked` emits. Held in scan-local
 // variables only — see the SECURITY note in the module header.
-interface ExportedCredentials {
+export interface ExportedCredentials {
   clientId: string;
   clientSecret: string;
   refreshToken: string;
@@ -144,7 +144,11 @@ function parseExportedCredentials(stdout: string): ExportedCredentials | undefin
 // export+mint IS the auth gate, so the caller reports the same
 // no-signed-in-session failure either way. The response body is never
 // surfaced: the token endpoint echoes credential material on some errors.
-async function mintAccessToken(fetchImpl: FetchImpl, credentials: ExportedCredentials): Promise<string | undefined> {
+// Exported (with gmailGet/mapWithConcurrency below) as the shared
+// deterministic-Gmail-pipeline toolkit — label discovery
+// (src/runtime/label-discovery.ts) reuses it rather than duplicating the
+// credential handling.
+export async function mintAccessToken(fetchImpl: FetchImpl, credentials: ExportedCredentials): Promise<string | undefined> {
   try {
     const response = await fetchImpl(TOKEN_URL, {
       method: "POST",
@@ -171,7 +175,7 @@ async function mintAccessToken(fetchImpl: FetchImpl, credentials: ExportedCreden
 // One authorized Gmail GET, parsed as a JSON object. Throws a short generic
 // message on a non-2xx status (never the response body — Gmail error payloads
 // are not for error strings) so profile/list faults fail the scan.
-async function gmailGet(fetchImpl: FetchImpl, accessToken: string, path: string): Promise<Record<string, unknown> | undefined> {
+export async function gmailGet(fetchImpl: FetchImpl, accessToken: string, path: string): Promise<Record<string, unknown> | undefined> {
   const response = await fetchImpl(`${GMAIL_BASE}/${path}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
@@ -313,7 +317,7 @@ function extractBody(doc: Record<string, unknown> | undefined): string {
 }
 
 // Run `fn` over the items with at most `limit` in flight, preserving order.
-async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+export async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {

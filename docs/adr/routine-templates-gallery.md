@@ -67,6 +67,38 @@ map on the next save — but the baked prompt covers only the accounts
 configured at install time until then; connecting an account does not
 auto-reinstall.
 
+### Gmail label discovery seeds per-account defaults
+
+An account's *seeded defaults* prefer the user's own labels over the
+standard starter set. When a Google account is connected, a fire-and-forget
+background pipeline (`src/runtime/label-discovery.ts`, mirroring the
+onboarding profile scan's discipline) digests the account's EXISTING Gmail
+labels: a deterministic fetch stage — the account's plaintext
+`authorized_user` credential minting an in-memory token, then direct Gmail
+HTTP for the user-created label list plus per-label message counts and a
+few recent From/Subject samples — feeds ONE `generateStructured` call that
+keeps the labels a human plainly uses to organize mail and infers each
+one's plain-language classification rule. The validator clamps rather than
+rejects (label names and samples are untrusted mailbox content), a digested
+label must name one of the REAL input labels, and auto-archive is always
+off — archiving stays a user opt-in. There is deliberately no gws-spawn
+fallback: an account without the plaintext credential records a clean
+failure and no subprocess ever spawns from the triggers.
+
+The digest persists machine-globally per account at
+`~/.gini/google-accounts/<accountId>/label-profile.json`
+(`src/state/google-label-profiles.ts`, atomic writes, never-throw reads,
+swept with the account's managed dir on removal; a stale `running` record
+older than five minutes is treated as orphaned and re-runnable).
+`ensureLabelProfile` guards re-entry (in-flight set; ready and fresh-running
+skip) and fires from the connect paths — `POST /api/google/accounts`,
+`POST /api/google/accounts/provision`, and the loopback web login callback —
+plus a backfill on the gallery GET that only targets accounts with no
+profile at all, so a persistent failure never loops on the poll-driven
+read. Seeding precedence per account: a saved settings entry always beats
+the profile, the profile (ready and non-empty) beats the catalog defaults,
+and the user can edit everything in the settings UI afterwards.
+
 Two callers share the catalog:
 
 - the **onboarding starter-routines step** — `routineJobSpecs` in

@@ -30,6 +30,7 @@
 import { createHash, randomBytes } from "node:crypto";
 
 import type { RuntimeConfig } from "../../types";
+import { ensureLabelProfile } from "../../runtime/label-discovery";
 import { readState } from "../../state";
 import { bindingsForCredentials, resolveConnectorSecret } from "./index";
 import { googleAuthMode, provisionAccount } from "./google-accounts";
@@ -240,7 +241,7 @@ export async function handleGoogleLoginWebCallback(
     // The Google sub keys principal idempotency; a blank identity must fail
     // rather than mint an unkeyed row.
     if (!info.sub) return { location: appendGoogleAddError(live.returnTo) };
-    await provisionAccount({
+    const account = await provisionAccount({
       clientId: live.clientId,
       clientSecret: live.clientSecret,
       refreshToken: tokens.refreshToken,
@@ -252,6 +253,10 @@ export async function handleGoogleLoginWebCallback(
       makePrimary: live.intent === "signin",
       instance: config.instance
     });
+    // The credential just landed — digest the account's existing Gmail
+    // labels into per-account Auto-inbox defaults (fire-and-forget; see
+    // src/runtime/label-discovery.ts).
+    ensureLabelProfile(config, account);
     return { location: live.returnTo };
   } catch {
     // Deliberately swallowed without detail: exchange/userinfo errors can

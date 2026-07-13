@@ -118,6 +118,7 @@ import { cookieValue, serializeCookie } from "./lib/cookies";
 import { RateLimiter } from "./lib/rate-limit";
 import { signUploadParams, verifyUploadSignature } from "./lib/upload-signing";
 import { getSetupStatus, removeSetupProvider, setSetupProvider } from "./runtime/setup-api";
+import { ensureLabelProfile } from "./runtime/label-discovery";
 import { applyOnboardingRoutines, autostartCrmForCompletedOnboarding, getOnboarding, patchOnboarding, startOnboardingScan } from "./runtime/onboarding";
 import { installRoutineTemplate, listRoutineTemplates, uninstallRoutineTemplate } from "./runtime/routine-templates";
 import { createSkillFromInput, getSkill, grantConnectorToSkill, installSkillFromBody, listSkills, reloadSkills, rollbackSkill, searchSkills, setSkillStatus, testSkill, updateSkill, validateSkills } from "./capabilities/skills";
@@ -2188,6 +2189,10 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
         // immediately. First-login registration stays quiet until the wizard's
         // final step, after onboarding has primed its recent-thread snapshot.
         autostartCrmForCompletedOnboarding(config);
+        // A fresh sign-in is also the moment to digest the account's existing
+        // Gmail labels into per-account Auto-inbox defaults (fire-and-forget;
+        // see src/runtime/label-discovery.ts).
+        ensureLabelProfile(config, account);
         return json(account, 201);
       } catch (err) {
         return json({ error: err instanceof Error ? err.message : "Failed to register account" }, 400);
@@ -2244,6 +2249,9 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       // provision happens before onboarding's mailbox snapshot, while later
       // account additions should join an already-running People pipeline.
       autostartCrmForCompletedOnboarding(config);
+      // The credential just landed — digest the mailbox's existing labels
+      // into per-account Auto-inbox defaults (fire-and-forget).
+      ensureLabelProfile(config, provisioned);
       return json(provisioned, 201);
     }],
     ["POST", /^\/api\/google\/session\/signout$/, () => {

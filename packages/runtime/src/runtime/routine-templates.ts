@@ -20,7 +20,9 @@ import { resolveEffectiveContext } from "../execution/effective-context";
 import { assertSkillNamesResolve, createScheduledJob, removeJob } from "../jobs";
 import { mutateState, readState, setContainerArchived } from "../state";
 import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../state/google-accounts";
+import { readLabelProfile } from "../state/google-label-profiles";
 import { readOnboarding } from "../state/onboarding";
+import { ensureLabelProfile } from "./label-discovery";
 import type { GoogleAccount, JobRecord, JobStatus, RuntimeConfig, RuntimeState } from "../types";
 
 // One editable Gmail filtering label: the exact label name, a UI-only swatch
@@ -115,8 +117,10 @@ export interface RoutineTemplate {
 
 // The design's eight label swatch hexes, in default-label order. Doubles as
 // the fallback when a caller-supplied color isn't a #rrggbb hex (cycled by
-// list position) and as the web editor's palette for newly added labels.
-const LABEL_COLOR_PALETTE = ["#4277FB", "#12B5C4", "#F5820A", "#1FA463", "#EC6B9E", "#9B7DF0", "#7DA9FB", "#E8A317"];
+// list position), as the web editor's palette for newly added labels, and as
+// the swatches label discovery assigns to digested labels
+// (src/runtime/label-discovery.ts).
+export const LABEL_COLOR_PALETTE = ["#4277FB", "#12B5C4", "#F5820A", "#1FA463", "#EC6B9E", "#9B7DF0", "#7DA9FB", "#E8A317"];
 
 // The Auto-inbox starter label set (names, colors, and classification rules
 // from the GiniRoutineDetail design handoff). Every label starts with
@@ -481,6 +485,15 @@ export function listRoutineTemplates(config: RuntimeConfig, agentId?: string): {
   const jobs = readState(config.instance).jobs;
   const accounts = registeredGmailAccounts();
   const primaryAccountId = effectivePrimaryId(accounts);
+  // Backfill label profiles for accounts that predate discovery (or signed
+  // in through a path without the connect trigger). Fire-and-forget, and
+  // ONLY for accounts with no profile file at all — a failed profile is
+  // retried by a fresh sign-in, never by this poll-driven read.
+  if (ROUTINE_TEMPLATES.some((template) => template.perAccountSettings)) {
+    for (const account of accounts) {
+      if (!readLabelProfile(account.id)) ensureLabelProfile(config, account);
+    }
+  }
   return {
     templates: ROUTINE_TEMPLATES.map((template) => {
       const job = jobs.find((j) => j.templateId === template.id && (!agentId || j.agentId === agentId));
@@ -778,18 +791,38 @@ function resolveAccountSettingsMap(template: RoutineTemplate, raw: Record<string
   return accounts;
 }
 
-// One account's seeded default settings: the catalog field defaults.
-function defaultSettingsForAccount(template: RoutineTemplate, _account: GoogleAccount): RoutineSettings {
+// One account's seeded default settings: the catalog field defaults, except
+// that a labelList field seeds from the account's discovered Gmail label
+// profile when one is ready and non-empty — the user's own organizational
+// scheme beats the standard starter set (label discovery pulls it on
+// sign-in; see src/runtime/label-discovery.ts). A saved edit beats both:
+// this seeding only applies where no persisted entry exists.
+function defaultSettingsForAccount(template: RoutineTemplate, account: GoogleAccount): RoutineSettings {
+  const profile = readLabelProfile(account.id);
+  const profileLabels = profile?.status === "ready" && profile.labels.length > 0 ? profile.labels : undefined;
   const resolved: RoutineSettings = {};
   for (const field of settingFields(template)) {
+    if (field.kind === "labelList" && profileLabels) {
+      // Clone per resolution (like defaultSettingValue) and keep the swatch
+      // palette-backed even if a hand-edited profile lost its hexes.
+      resolved[field.key] = profileLabels.map((label, index) => ({
+        name: label.name,
+        color: HEX_COLOR.test(label.color) ? label.color : LABEL_COLOR_PALETTE[index % LABEL_COLOR_PALETTE.length]!,
+        rule: label.rule,
+        autoArchive: label.autoArchive === true
+      }));
+      continue;
+    }
     resolved[field.key] = defaultSettingValue(field);
   }
   return resolved;
 }
 
 const MAX_LABELS = 24;
-const MAX_LABEL_NAME_CHARS = 60;
-const MAX_LABEL_RULE_CHARS = 500;
+// Exported so label discovery's digest validator clamps to the same label
+// bounds this module's resolveSettings enforces.
+export const MAX_LABEL_NAME_CHARS = 60;
+export const MAX_LABEL_RULE_CHARS = 500;
 const MAX_TEXT_CHARS = 2000;
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 

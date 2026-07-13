@@ -900,6 +900,32 @@ describe("update_job deliverTo rebinding", () => {
     }
   });
 
+  test("update_job dispatch returns the patched job's structured jobId", async () => {
+    const config = testConfig("jobs-update-tool-jobid");
+    const { taskId } = await seedChatTask(config, "upd-jobid");
+    const job = await createScheduledJob(config, {
+      name: "hydration",
+      intervalSeconds: 600,
+      prompt: "Drink water.",
+      parentTaskId: taskId
+    });
+
+    const result = await dispatchToolCall(
+      config,
+      taskId,
+      "update_job",
+      "call_update_jobid",
+      JSON.stringify({ jobId: job.id, intervalSeconds: 300 })
+    );
+    expect(result.kind).toBe("sync");
+    if (result.kind === "sync") {
+      // Structured id mirrors create_job's: the chat-task loop stamps it on
+      // the tool_call block so the routine card renders for update turns too.
+      expect(result.jobId).toBe(job.id);
+      expect(result.result).toContain("Updated job");
+    }
+  });
+
   test("deliverTo \"chat\" sets forwardToChat, keeps the job's Topic (no archive), and no-ops on repeat", async () => {
     const config = testConfig("jobs-rebind-channel-to-chat");
     const { taskId, sessionId } = await seedChatTask(config, "ch2c");

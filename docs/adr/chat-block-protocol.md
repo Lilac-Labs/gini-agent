@@ -109,13 +109,15 @@ remote previews, screen readers) would need the same translation code.
   `wait_for_messaging_pair`, waiting on an inbound Telegram DM up to
   600s) and is cleared automatically when status leaves `running`.
   `ToolCallBlock` also carries an optional `jobId`: the id of the
-  scheduled job a successful `create_job` call created, stamped when
-  the dispatch settles `ok`. It is a structured side channel for the
-  routine-created card — clients open the routine's details from the
-  block without parsing the id back out of the 80-char-truncated
-  `tool_result` preview. The id originates as `DispatchResult.jobId`
-  from the create_job handler (never extracted from the result string)
-  and is absent on failed calls, on every other tool, and on blocks
+  scheduled job a successful `create_job` or `update_job` call
+  created/patched, stamped when the dispatch settles `ok`. It is a
+  structured side channel for the routine card — clients open the
+  routine's details from the block without parsing the id back out of
+  the 80-char-truncated `tool_result` preview. The id originates as
+  `DispatchResult.jobId` from the job-creating/updating tool handlers
+  (never extracted from the result string) and is absent on failed
+  calls, on every other tool — including `delete_job`, whose card
+  could only ever render a deleted-routine tombstone — and on blocks
   predating the field.
   Outbound (agent → user) media rides a DIFFERENT channel than inbound:
   the block schema is unchanged — `AssistantTextBlock` and `ToolResultBlock`

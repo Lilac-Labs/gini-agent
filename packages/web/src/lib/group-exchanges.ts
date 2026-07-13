@@ -7,15 +7,20 @@ export type ProcessStep =
   | { kind: "tool_call"; block: ToolCallBlock }
   | { kind: "narration"; block: AssistantTextBlock };
 
-// A create_job call that actually created a job (the runtime stamps the new
-// job's id on the block — see ADR chat-block-protocol.md). It renders as the
-// standalone RoutineCreatedCard instead of a generic tool row, so grouping
-// excludes it from the collapsed tool_group and passes it through as its own
-// block item. Shared with BlockRenderer's tool_call branch so the two can't
-// disagree about which calls leave the group. Running/failed create_job
-// calls (and legacy blocks without a jobId) keep the generic treatment.
+// A create_job/update_job call that actually created or patched a job (the
+// runtime stamps the job's id on the block — see ADR chat-block-protocol.md).
+// It renders as the standalone RoutineCreatedCard instead of a generic tool
+// row, so grouping excludes it from the collapsed tool_group and passes it
+// through as its own block item. Shared with BlockRenderer's tool_call branch
+// so the two can't disagree about which calls leave the group. Running/failed
+// calls (and legacy blocks without a jobId) keep the generic treatment;
+// delete_job never carries a jobId, so it never cards.
 export function rendersAsRoutineCard(block: ToolCallBlock): block is ToolCallBlock & { jobId: string } {
-  return block.toolName === "create_job" && block.status === "ok" && typeof block.jobId === "string";
+  return (
+    (block.toolName === "create_job" || block.toolName === "update_job") &&
+    block.status === "ok" &&
+    typeof block.jobId === "string"
+  );
 }
 
 // Render-time view of the chat block stream. Whenever a turn makes tool

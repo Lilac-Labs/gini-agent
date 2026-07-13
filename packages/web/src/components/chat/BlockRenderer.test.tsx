@@ -219,6 +219,15 @@ describe("BlockRenderer", () => {
     rerender(<BlockRenderer block={createJob} />);
     expect(screen.getByTestId("tool-call")).not.toBeNull();
     expect(screen.queryByTestId("routine-card")).toBeNull();
+
+    // update_job cards the same way — the runtime stamps the patched job's id.
+    rerender(
+      <BlockRenderer
+        block={{ ...createJob, toolName: "update_job", displayLabel: "Update scheduled job", jobId: "job_2" }}
+      />
+    );
+    expect(screen.getByTestId("routine-card").getAttribute("data-job-id")).toBe("job_2");
+    expect(screen.queryByTestId("tool-call")).toBeNull();
   });
 
   test("an unknown kind throws via the exhaustive guard", () => {

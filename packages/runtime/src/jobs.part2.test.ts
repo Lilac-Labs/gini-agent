@@ -1056,6 +1056,10 @@ describe("cron lifecycle", () => {
     if (result.kind === "sync") {
       expect(result.result).toContain(job.id);
       expect(result.result).toContain("to-delete");
+      // delete_job deliberately carries NO structured jobId (unlike
+      // create_job/update_job) — a routine card pointing at a deleted job
+      // could only ever render its tombstone state.
+      expect(result.jobId).toBeUndefined();
     }
 
     expect(readState(config.instance).jobs.find((j) => j.id === job.id)).toBeUndefined();

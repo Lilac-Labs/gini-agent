@@ -411,6 +411,25 @@ describe("groupExchanges routine card exemption", () => {
     expect(group?.kind === "tool_group" && group.calls.length).toBe(2);
   });
 
+  // update_job turns card exactly like create turns: the runtime stamps the
+  // patched job's id, so a schedule change surfaces the same routine card
+  // while the sibling calls (list_jobs here) still collapse.
+  test("a jobId-stamped update_job renders standalone while sibling calls still group", () => {
+    const items = groupExchanges(
+      [
+        user("change my routine to every 5 minutes", "task_routine_upd"),
+        toolCall({ toolName: "list_jobs", displayLabel: "List scheduled jobs", argsPreview: "", status: "ok", taskId: "task_routine_upd" }),
+        toolCall({ toolName: "update_job", displayLabel: "Update scheduled job", argsPreview: "hello", status: "ok", jobId: "job_upd", taskId: "task_routine_upd" }),
+        assistant("updated", "task_routine_upd")
+      ],
+      new Set(["task_routine_upd"])
+    );
+    const kinds = items.map((i) => (i.kind === "block" ? i.block.kind : i.kind));
+    expect(kinds).toEqual(["user_text", "tool_group", "tool_call", "assistant_text"]);
+    const group = items.find((i) => i.kind === "tool_group");
+    expect(group?.kind === "tool_group" && group.calls.map((c) => c.toolName)).toEqual(["list_jobs"]);
+  });
+
   // A turn whose ONLY call is a card-rendering create_job has nothing left to
   // group: the whole exchange passes through as bubbles with the card in place.
   test("a card-only turn produces no tool_group", () => {

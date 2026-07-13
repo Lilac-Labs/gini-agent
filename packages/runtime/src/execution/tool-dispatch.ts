@@ -109,10 +109,12 @@ export type DispatchResult =
   // reply where the picture belongs — there is no separate image channel. See
   // ADR outbound-chat-attachments.md.
   //
-  // `jobId` is set only by a create_job call that actually created a job: a
-  // structured copy of the new job's id so the chat-task loop can stamp it
-  // onto the tool_call block (the routine card's click target) without
-  // parsing it back out of `result`.
+  // `jobId` is set only by a create_job/update_job call that actually
+  // created or patched a job: a structured copy of the job's id so the
+  // chat-task loop can stamp it onto the tool_call block (the routine
+  // card's click target) without parsing it back out of `result`.
+  // delete_job deliberately never sets it — a card pointing at a deleted
+  // routine could only render its tombstone state.
   | { kind: "sync"; result: string; jobId?: string }
   | { kind: "pending"; approvalId: string };
 
@@ -249,8 +251,10 @@ async function dispatchToolCallInner(
     }
     case "list_jobs":
       return { kind: "sync", result: await listJobsTool(config, taskId, args) };
-    case "update_job":
-      return { kind: "sync", result: await updateJobTool(config, taskId, args) };
+    case "update_job": {
+      const updated = await updateJobTool(config, taskId, args);
+      return { kind: "sync", result: updated.result, jobId: updated.jobId };
+    }
     case "delete_job":
       return { kind: "sync", result: await deleteJobTool(config, taskId, args) };
     case "run_job":
@@ -2231,11 +2235,15 @@ async function listJobsTool(
 // schedule/prompt/status changes — preserves job id, dedicated chat
 // thread, and run history. Validation lives in `updateJob` (typed
 // `Invalid input: …` errors surface back as tool-result errors).
+// Returns the model-facing confirmation string plus, when the patch was
+// actually applied, the job's id as a structured field (see
+// DispatchResult.jobId — the routine card renders for update turns too).
+// The error-string early returns carry no jobId — nothing was changed.
 async function updateJobTool(
   config: RuntimeConfig,
   taskId: string,
   args: Record<string, unknown>
-): Promise<string> {
+): Promise<{ result: string; jobId?: string }> {
   const jobId = requireString(args, "jobId");
 
   // Pre-side-effect terminal check. Mirrors the guard pattern in
@@ -2248,7 +2256,7 @@ async function updateJobTool(
     const state = readState(config.instance);
     const task = state.tasks.find((item) => item.id === taskId);
     if (task && isTerminalTaskStatus(task.status)) {
-      return `Error: update_job skipped because task is already ${task.status}.`;
+      return { result: `Error: update_job skipped because task is already ${task.status}.` };
     }
   }
 
@@ -2341,7 +2349,7 @@ async function updateJobTool(
     // Watcher / fan-out jobs (email-watch etc.) bind routing state to their
     // sessions — a rebind would orphan dedupe anchors and concern channels.
     if (before.preRunHook || (before.routes && Object.keys(before.routes).length > 0)) {
-      return `Error: update_job deliverTo is not supported for jobs with a preRunHook or fan-out routes — their sessions carry routing state.`;
+      return { result: `Error: update_job deliverTo is not supported for jobs with a preRunHook or fan-out routes — their sessions carry routing state.` };
     }
     if (deliverTo === "chat") {
       // Same task → run → conversation derivation as create_job: "chat"
@@ -2355,7 +2363,7 @@ async function updateJobTool(
         }
       }
       if (originatingSessionId === undefined) {
-        return `Error: update_job deliverTo "chat" requires invocation from a chat conversation, and this task has no originating chat session.`;
+        return { result: `Error: update_job deliverTo "chat" requires invocation from a chat conversation, and this task has no originating chat session.` };
       }
     }
   }
@@ -2477,7 +2485,10 @@ async function updateJobTool(
       : after.nextRunAt
         ? `next fires at ${after.nextRunAt}`
         : "next-fire moment pending";
-  return `Updated job ${after.id} (\"${after.name}\"): ${appliedFields.join(", ")}. Now ${after.status}, ${cadence}, ${firingClause}.${deliveryClause ? ` ${deliveryClause}` : ""}`;
+  return {
+    result: `Updated job ${after.id} (\"${after.name}\"): ${appliedFields.join(", ")}. Now ${after.status}, ${cadence}, ${firingClause}.${deliveryClause ? ` ${deliveryClause}` : ""}`,
+    jobId: after.id
+  };
 }
 
 // Delete a job and cascade-remove its run history. Low-risk for symmetry

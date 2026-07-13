@@ -246,9 +246,9 @@ function IdList({ ids, hint }: { ids: string[]; hint: string }) {
 }
 
 function extractFilesChanged(trace: TraceRecord[]): Array<{ path: string; kind: "write" | "patch" }> {
-  // The agent emits trace.type === "tool" with messages "File written" / "File
+  // The agent emits trace.type === "tool" with text "File written" / "File
   // patched" when an approval is granted (see src/agent.ts:438/462). We pick
-  // those out by message rather than tool-name (which isn't in `data`) — the
+  // those out by text rather than tool-name (which isn't in `data`) — the
   // path lives on `data.path`. De-dupe by path+kind to avoid double counting.
   const seen = new Set<string>();
   const out: Array<{ path: string; kind: "write" | "patch" }> = [];

@@ -44,15 +44,15 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Gini uses your photo library to attach images to chat messages.",
-          "cameraPermission": "Gini uses the camera to capture images to attach to chat messages."
+          "photosPermission": "Gini uses your photo library to attach images to chat.",
+          "cameraPermission": "Gini uses the camera to capture images for chat."
         }
       ],
       "expo-updates",
       [
         "expo-audio",
         {
-          "microphonePermission": "Allow Gini to record voice messages."
+          "microphonePermission": "Allow Gini to record voice for chat."
         }
       ],
       "expo-web-browser"

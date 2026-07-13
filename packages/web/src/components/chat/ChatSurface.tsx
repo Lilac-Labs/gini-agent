@@ -441,8 +441,7 @@ export function ChatSurface({
           />
         )}
         {/* Topics and channels only expose Chat, so the tab bar is a
-            redundant single tab. The transcript still renders since `tab`
-            defaults to "messages". */}
+            redundant single tab. The transcript still renders by default. */}
         {panel || isTopic ? null : (
           <ChatTabBar
             active={tab}

@@ -43,13 +43,13 @@ describe("isEmailWatchJob", () => {
     ).toBe(false);
   });
 
-  test("never matches by name — an ordinary job titled 'Email watch' stays visible", () => {
+  test("never matches by name — an ordinary routine titled 'Email watch' stays visible", () => {
     expect(isEmailWatchJob(job({ name: "Email watch" }))).toBe(false);
   });
 });
 
 describe("customRoutineJobs", () => {
-  test("keeps chat-created jobs (incl. paused), drops template installs and the shared detector", () => {
+  test("keeps chat-created routines (incl. paused), drops template installs and the shared detector", () => {
     const custom = job({ id: "job_a" });
     const paused = job({ id: "job_b", status: "paused" });
     const templated = job({ id: "job_c", templateId: "auto-inbox" });

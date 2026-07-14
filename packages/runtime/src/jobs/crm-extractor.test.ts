@@ -29,7 +29,9 @@ import { clearEchoToolCallingResponses, normalizeProvider, setEchoToolCallingFai
 import { install } from "../runtime";
 import type { RuntimeConfig } from "../types";
 
-const ROOT = "/tmp/gini-crm-extractor-test";
+// Process-unique because parallel test processes can run this file at once;
+// deleting a shared SQLite root underneath another process yields IOERR_VNODE.
+const ROOT = `/tmp/gini-crm-extractor-test-${process.pid}`;
 const SELF = "me@corp.io";
 
 beforeAll(() => {

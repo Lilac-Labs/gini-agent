@@ -33,7 +33,7 @@
 // for back-compat with existing test imports.
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { Instance } from "../types";
@@ -171,6 +171,19 @@ export interface ResolveLaunchOptions {
   // spend up to 3s spawning the user's shell just to compute metadata
   // they don't need. The enable / write paths pass true.
   mergeShellPath?: boolean;
+  // Explicit home (plist WorkingDirectory) for the generated specs. Set by
+  // `gini autostart enable --home <dir>` and by `gini update`'s re-home
+  // onto the installed runtime. Must be a usable gini-agent checkout —
+  // resolveLaunchSpecPair throws otherwise, because silently homing the
+  // instance somewhere else instead would be exactly the bug the sticky
+  // home exists to prevent. When omitted, an existing gateway plist's
+  // WorkingDirectory is preserved (see resolveLaunchSpecPair).
+  homeDir?: string;
+  // Test seam: override how the existing gateway plist's WorkingDirectory
+  // is read for the sticky-home preservation, mirroring the fileExists
+  // seam so unit tests stay hermetic. Defaults to readPlistWorkingDirectory
+  // against the on-disk plist.
+  readPlistWorkingDirectory?: (plistPath: string) => string | null;
 }
 
 // Build the launchd command line. We exec the Bun-driven runtime *directly*
@@ -182,13 +195,24 @@ export interface ResolveLaunchOptions {
 // runtime — `launchctl bootout` / `kickstart -k` target the right process,
 // and KeepAlive respawns that single process reliably on any exit.
 //
-// Source-flow vs installed-flow decision: if we're invoked from a gini-agent
-// source checkout (cwd has package.json with name "gini-agent"), prefer
-// that. Otherwise, fall back to `~/.gini/runtime` when it's a usable
-// checkout, then to the resolved project root. Without the cwd-aware
-// check, a developer running `bun run gini autostart enable` from a
-// worktree would silently supervise the installed runtime instead of
-// their checkout — surprising and wrong.
+// WorkingDirectory resolution: a supervised instance's home is STICKY.
+// Plists are regenerated from many different cwds — the startup reconcile,
+// the provider-key refresh, `gini start`'s bootstrap of a not-loaded kind,
+// `gini update`'s restart — so deciding the home from the invoking
+// process's cwd would let any one of those silently MOVE the instance onto
+// whatever checkout the caller happened to be in. Once that happens the
+// instance executes that checkout's code on every respawn, and `gini
+// update`'s work on ~/.gini/runtime never reaches it (worse, the startup
+// reconcile then cements the wrong home: the running gateway's own project
+// root IS the plist's WorkingDirectory). So an existing gateway plist's
+// WorkingDirectory is preserved whenever it still points at a usable
+// checkout; moving requires explicit intent — `--home <dir>` /
+// enable({homeDir}) — and `gini update` re-homes a wrongly-homed instance
+// onto the installed runtime. Only the FIRST enable (no plist yet), or a
+// self-heal when the recorded home is gone (a deleted worktree), decides
+// fresh: a gini-agent source checkout at cwd/projectRoot wins (a developer
+// enabling from a worktree means that worktree), then `~/.gini/runtime`
+// when usable, then the resolved project root.
 export function resolveLaunchSpec(options: ResolveLaunchOptions): LaunchSpec {
   const pair = resolveLaunchSpecPair(options);
   return pair.gateway;
@@ -205,18 +229,62 @@ export function resolveLaunchSpecPair(options: ResolveLaunchOptions): LaunchSpec
   const runtimeUsable = fileExists(join(runtimeDir, "package.json"))
     && fileExists(join(runtimeDir, "packages", "runtime", "src", "server.ts"));
 
-  // Source-flow detection: cwd is a gini-agent checkout (package.json
-  // declares name "gini-agent"). We check both cwd and repoRoot because
-  // someone could `bun run gini autostart enable` with cwd in a sub-dir
-  // and projectRoot() would still be the repo root.
-  const cwdIsSource = isGiniAgentCheckout(cwd, fileExists);
-  const repoRootIsSource = isGiniAgentCheckout(repoRoot, fileExists);
-  // Prefer source flow when invoked from a source checkout — that's the
-  // developer's intent. Fall back to installed flow otherwise.
-  const preferSource = cwdIsSource || repoRootIsSource;
-  const useSource = preferSource || !runtimeUsable;
-  const resolution: "installed" | "source" = useSource ? "source" : "installed";
-  const workingDirectory = useSource ? (cwdIsSource ? cwd : repoRoot) : runtimeDir;
+  // Home resolution, in priority order (the home is STICKY — see the
+  // comment block above resolveLaunchSpec):
+  //
+  //   1. An explicit homeDir (`--home` / a programmatic enable({homeDir}),
+  //      how `gini update` converges a wrongly-homed instance onto the
+  //      installed runtime). A bad value fails loudly instead of silently
+  //      homing the instance somewhere the caller didn't ask for.
+  //   2. The existing gateway plist's WorkingDirectory, when it still
+  //      points at a usable checkout. Preserving it means regenerating a
+  //      plist can never move the instance to a different checkout as a
+  //      side effect of the invoking process's cwd — and because this
+  //      lives HERE, the stamp's write side (generatePlist via enable) and
+  //      check side (the startup reconcile via supervisedServices) agree
+  //      by construction.
+  //   3. First-enable defaults (no plist, or its recorded home is no
+  //      longer usable — a deleted checkout self-heals through here): a
+  //      source checkout at cwd/projectRoot wins, then the installed
+  //      runtime, then the resolved project root.
+  let workingDirectory: string;
+  if (options.homeDir !== undefined) {
+    if (!isUsableGiniCheckout(options.homeDir, fileExists)) {
+      throw new Error(
+        `autostart: homeDir '${options.homeDir}' is not a usable gini-agent checkout ` +
+        `(needs a package.json with name "gini-agent" and packages/runtime/src/server.ts).`
+      );
+    }
+    workingDirectory = options.homeDir;
+  } else {
+    // The gateway plist is the canonical record of the instance's home
+    // (all three kinds share one WorkingDirectory). The path is derived
+    // from the resolved `home` rather than plistPathFor() so
+    // homeOverride-driven unit tests stay hermetic; in production `home`
+    // IS $HOME, so the two derivations agree.
+    const readWorkingDirectory = options.readPlistWorkingDirectory ?? readPlistWorkingDirectory;
+    const gatewayPlist = join(home, "Library", "LaunchAgents", `${labelForKind(options.instance, "gateway")}.plist`);
+    const preservedHome = readWorkingDirectory(gatewayPlist);
+    if (preservedHome !== null && isUsableGiniCheckout(preservedHome, fileExists)) {
+      workingDirectory = preservedHome;
+    } else {
+      // Source-flow detection: cwd is a gini-agent checkout (package.json
+      // declares name "gini-agent"). We check both cwd and repoRoot because
+      // someone could `bun run gini autostart enable` with cwd in a sub-dir
+      // and projectRoot() would still be the repo root.
+      const cwdIsSource = isGiniAgentCheckout(cwd, fileExists);
+      const repoRootIsSource = isGiniAgentCheckout(repoRoot, fileExists);
+      // Prefer source flow when invoked from a source checkout — that's the
+      // developer's intent. Fall back to installed flow otherwise.
+      const preferSource = cwdIsSource || repoRootIsSource;
+      const useSource = preferSource || !runtimeUsable;
+      workingDirectory = useSource ? (cwdIsSource ? cwd : repoRoot) : runtimeDir;
+    }
+  }
+  // `resolution` stays a two-value union external consumers (install.sh)
+  // read: "installed" iff the resolved home IS the installed runtime,
+  // whichever branch above picked it.
+  const resolution: "installed" | "source" = sameDir(workingDirectory, runtimeDir) ? "installed" : "source";
 
   // Always make bun's directory available on PATH so child invocations
   // (e.g. `bun install` triggers from inside the runtime) can resolve it.
@@ -465,6 +533,29 @@ function isGiniAgentCheckout(dir: string, fileExists: (path: string) => boolean)
     return typeof parsed.name === "string" && parsed.name === "gini-agent";
   } catch {
     return false;
+  }
+}
+
+// A directory usable as a supervised instance's home: a gini-agent checkout
+// (package.json name "gini-agent") that actually carries the runtime entry
+// the gateway plist execs. Both the explicit homeDir validation and the
+// preserved-home check in resolveLaunchSpecPair gate on this, so a home
+// pointing at a deleted or gutted checkout is never written into a plist —
+// launchd would spawn-fail it in a loop.
+export function isUsableGiniCheckout(dir: string, fileExists: (path: string) => boolean = existsSync): boolean {
+  return isGiniAgentCheckout(dir, fileExists)
+    && fileExists(join(dir, "packages", "runtime", "src", "server.ts"));
+}
+
+// Realpath-compare two directories so a symlinked spelling of the installed
+// runtime still reads as "installed". Falls back to string equality when
+// either path can't be resolved (a not-yet-existing dir, synthetic test
+// paths) — a missing dir can only equal the installed runtime textually.
+function sameDir(left: string, right: string): boolean {
+  try {
+    return realpathSync(left) === realpathSync(right);
+  } catch {
+    return left === right;
   }
 }
 
@@ -779,6 +870,30 @@ export function readPlistStamp(plistPath: string): string | null {
   return match && match[1] !== undefined ? match[1] : null;
 }
 
+// Parse the WorkingDirectory out of an on-disk plist — the record of a
+// supervised instance's home that resolveLaunchSpecPair preserves across
+// plist regenerations (and that `gini update` compares against the
+// installed runtime). Written by generatePlist as <key>WorkingDirectory</key>
+// immediately followed by its <string>VALUE</string>, so we match that pair
+// directly (same shape as readPlistStamp above). Unlike the stamp (hex), the
+// value is a path that escapeXml may have entity-encoded at write time, so
+// it is unescaped on the way out to round-trip. Returns null when the file
+// is missing, unreadable, or carries no WorkingDirectory.
+export function readPlistWorkingDirectory(plistPath: string): string | null {
+  if (!existsSync(plistPath)) return null;
+  let body: string;
+  try {
+    body = readFileSync(plistPath, "utf8");
+  } catch {
+    return null;
+  }
+  const match = body.match(
+    /<key>WorkingDirectory<\/key>\s*<string>([^<]*)<\/string>/
+  );
+  if (!match || match[1] === undefined || match[1] === "") return null;
+  return unescapeXml(match[1]);
+}
+
 export interface PlistOptions {
   instance: Instance;
   spec: LaunchSpec;
@@ -934,6 +1049,18 @@ function escapeXml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
+}
+
+// Inverse of escapeXml for values read back out of a generated plist
+// (readPlistWorkingDirectory). &amp; is decoded LAST — escapeXml encoded it
+// first, so decoding it earlier would double-decode e.g. "&amp;lt;".
+function unescapeXml(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
 }
 
 export interface WritePlistOptions {

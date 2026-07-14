@@ -19,7 +19,9 @@ import {
   plistStampInput,
   plistPathFor,
   readPlistStamp,
+  readPlistWorkingDirectory,
   resolveLaunchSpec,
+  resolveLaunchSpecPair,
   serviceTarget,
   supervisedServices,
   supervisor,
@@ -616,6 +618,191 @@ describe("resolveLaunchSpecPair", () => {
       readSecretsFile: () => null
     });
     expect(pair.web.environment.GINI_DIST_DIR).toBe(".next-feat_x");
+  });
+});
+
+// The home of a supervised instance is STICKY: an existing gateway plist's
+// WorkingDirectory is preserved across regenerations regardless of the
+// invoking process's cwd/projectRoot. Without this, any plist-writing path
+// invoked from the wrong directory (reconcile, refresh, a stray `autostart
+// enable`) silently re-homes the instance onto that directory — after which
+// `gini update`'s work on ~/.gini/runtime never reaches the running services.
+describe("resolveLaunchSpecPair (sticky home)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = makeTempHome("sticky-home");
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  // A usable gini-agent checkout: package.json with name "gini-agent" AND
+  // the runtime entry the gateway plist execs.
+  function makeUsableCheckout(root: string, name = "gini-agent"): string {
+    mkdirSync(join(root, "packages", "runtime", "src"), { recursive: true });
+    writeFileSync(join(root, "package.json"), `{"name":"${name}"}`);
+    writeFileSync(join(root, "packages", "runtime", "src", "server.ts"), "// stub\n");
+    return root;
+  }
+
+  test("preserves an existing usable plist home regardless of cwd/projectRoot (the re-homing regression)", () => {
+    const previousHome = makeUsableCheckout(join(home, "previous-home"));
+    // The caller sits in a DIFFERENT source checkout — the exact situation
+    // that used to re-home the instance onto the caller's worktree.
+    const callerWorktree = makeUsableCheckout(join(home, "caller-worktree"));
+
+    const pair = resolveLaunchSpecPair({
+      instance: "main",
+      homeOverride: home,
+      bunPathOverride: "/opt/bun/bin/bun",
+      projectRootOverride: callerWorktree,
+      cwdOverride: callerWorktree,
+      readPlistWorkingDirectory: () => previousHome
+    });
+
+    expect(pair.gateway.workingDirectory).toBe(previousHome);
+    expect(pair.web.workingDirectory).toBe(previousHome);
+    expect(pair.watchdog.workingDirectory).toBe(previousHome);
+    expect(pair.resolution).toBe("source");
+  });
+
+  test("a preserved home equal to the installed runtime reports resolution 'installed'", () => {
+    const runtimeDir = makeUsableCheckout(join(home, ".gini", "runtime"));
+    const callerWorktree = makeUsableCheckout(join(home, "caller-worktree"));
+
+    const pair = resolveLaunchSpecPair({
+      instance: "main",
+      homeOverride: home,
+      bunPathOverride: "/opt/bun/bin/bun",
+      projectRootOverride: callerWorktree,
+      cwdOverride: callerWorktree,
+      readPlistWorkingDirectory: () => runtimeDir
+    });
+
+    expect(pair.gateway.workingDirectory).toBe(runtimeDir);
+    expect(pair.resolution).toBe("installed");
+  });
+
+  test("an explicit homeDir overrides a preserved home (the sanctioned mover)", () => {
+    const previousHome = makeUsableCheckout(join(home, "previous-home"));
+    const newHome = makeUsableCheckout(join(home, "new-home"));
+
+    const pair = resolveLaunchSpecPair({
+      instance: "main",
+      homeOverride: home,
+      bunPathOverride: "/opt/bun/bin/bun",
+      projectRootOverride: "/tmp/gini-sticky-neutral",
+      cwdOverride: "/tmp/gini-sticky-neutral",
+      homeDir: newHome,
+      readPlistWorkingDirectory: () => previousHome
+    });
+
+    expect(pair.gateway.workingDirectory).toBe(newHome);
+    expect(pair.web.workingDirectory).toBe(newHome);
+    expect(pair.watchdog.workingDirectory).toBe(newHome);
+  });
+
+  test("an invalid homeDir throws instead of silently homing elsewhere", () => {
+    // Missing entirely.
+    expect(() => resolveLaunchSpecPair({
+      instance: "main",
+      homeOverride: home,
+      bunPathOverride: "/opt/bun/bin/bun",
+      projectRootOverride: "/tmp/gini-sticky-neutral",
+      cwdOverride: "/tmp/gini-sticky-neutral",
+      homeDir: join(home, "does-not-exist")
+    })).toThrow(/not a usable gini-agent checkout/);
+    // Present but a different package (not a gini-agent checkout).
+    const otherPackage = makeUsableCheckout(join(home, "other-package"), "some-other-app");
+    expect(() => resolveLaunchSpecPair({
+      instance: "main",
+      homeOverride: home,
+      bunPathOverride: "/opt/bun/bin/bun",
+      projectRootOverride: "/tmp/gini-sticky-neutral",
+      cwdOverride: "/tmp/gini-sticky-neutral",
+      homeDir: otherPackage
+    })).toThrow(/not a usable gini-agent checkout/);
+  });
+
+  test("an unusable preserved home falls back to the installed runtime (self-heal)", () => {
+    // The plist records a home that no longer exists (a deleted worktree —
+    // the crash-loop case this fallback heals). The installed runtime is
+    // usable and the caller sits in a neutral cwd.
+    makeUsableCheckout(join(home, ".gini", "runtime"));
+
+    const pair = resolveLaunchSpecPair({
+      instance: "main",
+      homeOverride: home,
+      bunPathOverride: "/opt/bun/bin/bun",
+      projectRootOverride: "/tmp/gini-sticky-neutral",
+      cwdOverride: "/tmp/gini-sticky-neutral",
+      readPlistWorkingDirectory: () => join(home, "deleted-worktree")
+    });
+
+    expect(pair.gateway.workingDirectory).toBe(join(home, ".gini", "runtime"));
+    expect(pair.resolution).toBe("installed");
+  });
+
+  test("first enable (no plist) keeps the source-flow preference unchanged", () => {
+    const sourceCwd = makeUsableCheckout(join(home, "Dev", "gini-agent"));
+    makeUsableCheckout(join(home, ".gini", "runtime"));
+
+    const pair = resolveLaunchSpecPair({
+      instance: "main",
+      homeOverride: home,
+      bunPathOverride: "/opt/bun/bin/bun",
+      projectRootOverride: "/some/other/repo/root",
+      cwdOverride: sourceCwd,
+      readPlistWorkingDirectory: () => null
+    });
+
+    expect(pair.gateway.workingDirectory).toBe(sourceCwd);
+    expect(pair.resolution).toBe("source");
+  });
+});
+
+describe("readPlistWorkingDirectory", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = makeTempHome("read-wd");
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("round-trips the WorkingDirectory generatePlist wrote, including XML-escaped characters", () => {
+    // '&' in the path exercises the escape/unescape pair — escapeXml
+    // entity-encodes it at write time, so the reader must decode it or a
+    // preserved home would drift on every regeneration.
+    const workingDirectory = join(home, "checkouts", "gini & co");
+    const xml = generatePlist({
+      instance: "main",
+      kind: "gateway" as PlistKind,
+      spec: {
+        programArguments: ["/opt/bun/bin/bun", "run", "packages/runtime/src/server.ts", "--instance", "main"],
+        workingDirectory,
+        environment: { PATH: "/usr/bin", HOME: home, GINI_INSTANCE: "main" }
+      },
+      stdoutPath: "/tmp/out.log",
+      stderrPath: "/tmp/err.log"
+    });
+    const path = join(home, "gateway.plist");
+    writeFileSync(path, xml);
+    expect(readPlistWorkingDirectory(path)).toBe(workingDirectory);
+  });
+
+  test("returns null for a missing file or a plist without a WorkingDirectory", () => {
+    expect(readPlistWorkingDirectory("/tmp/does-not-exist-gini-wd.plist")).toBeNull();
+    const noWd = join(home, "no-wd.plist");
+    writeFileSync(
+      noWd,
+      "<plist><dict><key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin</string></dict></dict></plist>"
+    );
+    expect(readPlistWorkingDirectory(noWd)).toBeNull();
   });
 });
 

@@ -219,6 +219,38 @@ describe("provider", () => {
     }
   });
 
+  test("openai tool-calling does not surface an upstream HTML error page", async () => {
+    const original = process.env.OPENAI_API_KEY;
+    const originalFetch = globalThis.fetch;
+    process.env.OPENAI_API_KEY = "test-key";
+    globalThis.fetch = (() => Promise.resolve(new Response(
+      "<!doctype html><html><body>internal database stack trace</body></html>",
+      { status: 500, headers: { "content-type": "text/html; charset=utf-8" } }
+    ))) as unknown as typeof fetch;
+
+    try {
+      const provider = normalizeProvider({ name: "openai", model: "gpt-test" });
+      let message = "";
+      try {
+        await generateToolCallingResponse(
+          config(provider),
+          [{ role: "user", content: "stream me" }],
+          [],
+          () => undefined
+        );
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toBe("Tool-calling stream failed with HTTP 500");
+      expect(message).not.toContain("<!doctype html>");
+      expect(message).not.toContain("database stack trace");
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (original === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = original;
+    }
+  });
+
   test("detects Codex auth.json without exposing token values", () => {
     const root = mkdtempSync(join(tmpdir(), "gini-provider-codex-test-"));
     const authPath = `${root}/auth.json`;

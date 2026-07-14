@@ -1457,8 +1457,8 @@ async function callToolCallingChatCompletions(
   const rawPayload = await response.text();
   const payload = parseJsonObject(rawPayload);
   if (!response.ok) {
-    const fallback = rawPayload.slice(0, 500) || `Tool-calling request failed with HTTP ${response.status}`;
-    throw new ProviderHttpError(response.status, readOpenAIError(payload) ?? fallback);
+    const fallback = `Tool-calling request failed with HTTP ${response.status}`;
+    throw new ProviderHttpError(response.status, readOpenAIHttpError(response, rawPayload, payload, fallback));
   }
   return extractToolCallingResult(payload, provider);
 }
@@ -1564,8 +1564,8 @@ async function readToolCallingStream(
   if (!response.ok) {
     const raw = await response.text();
     const payload = parseJsonObject(raw);
-    const fallback = raw.slice(0, 500) || `Tool-calling stream failed with HTTP ${response.status}`;
-    throw new ProviderHttpError(response.status, readOpenAIError(payload) ?? fallback);
+    const fallback = `Tool-calling stream failed with HTTP ${response.status}`;
+    throw new ProviderHttpError(response.status, readOpenAIHttpError(response, raw, payload, fallback));
   }
   const body = response.body;
   if (!body) throw new Error("Tool-calling stream returned no response body.");
@@ -4799,6 +4799,26 @@ function extractOutputText(payload: Record<string, unknown>): string {
 function readOpenAIError(payload: Record<string, unknown>): string | undefined {
   if (!isRecord(payload.error)) return undefined;
   return typeof payload.error.message === "string" ? payload.error.message : undefined;
+}
+
+function readOpenAIHttpError(
+  response: Response,
+  raw: string,
+  payload: Record<string, unknown>,
+  fallback: string
+): string {
+  const structured = readOpenAIError(payload);
+  if (structured) return structured;
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  const trimmed = raw.trimStart().toLowerCase();
+  if (
+    contentType.includes("text/html") ||
+    trimmed.startsWith("<!doctype html") ||
+    trimmed.startsWith("<html")
+  ) {
+    return fallback;
+  }
+  return raw.slice(0, 500) || fallback;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

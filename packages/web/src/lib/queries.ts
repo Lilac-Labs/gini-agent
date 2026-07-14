@@ -998,6 +998,8 @@ export function useHome() {
 // Direct container start (POST /api/containers) — both home composer modes.
 // `startedAs` records the creation gesture ("task" stays a home work item;
 // "message" lists the conversation in the sidebar Messages section).
+// An optional product-authored title lets flows such as suggested-routine
+// setup keep the Home row compact while sending a fuller first-turn brief.
 // Optimistically prepends a working row so the list responds instantly; on
 // success the optimistic id is swapped for the real container id so the row's
 // deep link works before the refetch lands. Error toasts live at call sites.
@@ -1008,21 +1010,22 @@ export function useStartTask() {
   return useMutation<
     { containerId: string; taskId: string; status: string },
     Error,
-    { content: string; images?: UploadRef[]; startedAs?: "task" | "message" },
+    { content: string; title?: string; images?: UploadRef[]; startedAs?: "task" | "message" },
     { previous?: HomeView; optimisticId: string }
   >({
-    mutationFn: ({ content, images, startedAs }) =>
+    mutationFn: ({ content, title, images, startedAs }) =>
       api<{ containerId: string; taskId: string; status: string }>("/containers", {
         method: "POST",
         body: JSON.stringify({
           content,
           client: "web",
           ...(agentId ? { agentId } : {}),
+          ...(title ? { title } : {}),
           ...(images && images.length > 0 ? { images } : {}),
           ...(startedAs ? { startedAs } : {})
         })
       }),
-    onMutate: async ({ content }) => {
+    onMutate: async ({ content, title }) => {
       await qc.cancelQueries({ queryKey: homeKey });
       const previous = qc.getQueryData<HomeView>(homeKey);
       const optimisticId = `optimistic-${crypto.randomUUID()}`;
@@ -1031,7 +1034,7 @@ export function useStartTask() {
         // An attachment-only send has empty content; the server titles the
         // minted container "Untitled chat" (createChatSession fallback), so
         // the optimistic row matches what the refetch will serve.
-        title: content || "Untitled chat",
+        title: title || content || "Untitled chat",
         attention: "working",
         acknowledged: false,
         startedBy: "user",

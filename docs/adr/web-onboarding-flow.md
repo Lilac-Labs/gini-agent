@@ -213,21 +213,22 @@ model only where it authors prose:
    else first provisioned, else first row; `~/.config/gws` / the hosted baked
    credential when there is no registered account), the same account the
    scheduled google jobs target.
-2. **Synthesize** — TWO parallel `generateStructured` calls turn the fetched
-   bundle into `{ profile: { displayName, sections[] } }` and
-   `{ suggestedTasks[] }`; generation is output-token-bound, so splitting the
-   deliverables roughly halves synthesis wall clock. The content rules are
-   server-owned and carried verbatim, split by deliverable (person-centric
-   durable-fact sections in a fixed order, forbidden transactional content, and
-   the displayName legal-name form on the profile call; the suggestedTasks
-   shapes/ranking on the tasks call); both calls read the SAME rendered mailbox
-   (as untrusted quoted evidence — the tasks call needs who-wrote-last
-   evidence, the profile call needs sent mail for voice). Outputs are
-   shape-checked and clamped by `validateScanProfile` / `validateScanTasks`
-   before they land. The profile call is load-bearing: its failure fails the
-   scan. A failed tasks call degrades to a `ready` scan with no
-   `suggestedTasks` — the web's tasks step then falls back to its static
-   suggestions.
+2. **Synthesize** — THREE parallel `generateStructured` calls turn the fetched
+   bundle into `{ profile: { displayName, sections[] } }`,
+   `{ suggestedTasks[] }`, and
+   `{ suggestedRoutines: [{ name, description, usesEmail }] }`; generation is
+   output-token-bound, so splitting the deliverables keeps their work
+   concurrent. The content rules are server-owned and carried verbatim, split
+   by deliverable (person-centric durable-fact sections in a fixed order,
+   forbidden transactional content, and the displayName legal-name form on the
+   profile call; concrete one-off task shapes/ranking on the tasks call;
+   evidence-backed recurring work on the routines call). All three calls read
+   the SAME rendered mailbox as untrusted quoted evidence. Outputs are
+   shape-checked and clamped by `validateScanProfile`, `validateScanTasks`, and
+   `validateScanRoutines` before they land. The profile call is load-bearing:
+   its failure fails the scan. Either suggestion call may fail independently;
+   the scan still lands `ready`, the tasks step falls back to its static task
+   seeds, and the Routines page simply omits personalized suggestions.
 
 The runtime must own the model call regardless: skill scripts receive only
 Google OAuth connector secrets, never model API keys — so keeping the fetch in
@@ -303,4 +304,4 @@ chat-topics-tasks-subagents.md).
   task-containers-and-runs.md).
 - The scan's quality is bounded by the model + the mailbox evidence; the
   contract only guarantees the transport (deterministic Gmail HTTP fetch in,
-  two parallel structured synthesis calls, shape-checked + clamped out).
+  three parallel structured synthesis calls, shape-checked + clamped out).

@@ -150,7 +150,7 @@ export function patchOnboarding(config: RuntimeConfig, payload: Record<string, u
 // all (re)submit, so a retry after connecting an account just works.
 //
 // The deterministic pipeline (mint a Gmail token via gws auth export →
-// parallel HTTP mailbox fetch → two parallel structured model calls) runs in
+// parallel HTTP mailbox fetch → three parallel structured model calls) runs in
 // the BACKGROUND: the record is flipped to "running" and returned immediately,
 // and finalizeScan writes the terminal record + pushes an `onboarding` event
 // when it settles.

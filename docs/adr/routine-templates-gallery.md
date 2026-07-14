@@ -206,6 +206,25 @@ as toasts;
 the install endpoint's skill-resolve 400 is the connector-readiness signal
 (no pre-flight on the card).
 
+### Personalized suggestions start as setup tasks
+
+The onboarding Gmail scan also persists a small `suggestedRoutines` list of
+evidence-backed recurring automations. My routines renders those separately
+from the fixed catalog in a horizontal Suggestions rail; a ready scan with no
+suggestions (including records written before this field existed) simply omits
+the rail. The fixed starter catalog remains in Explore and is never presented
+as personalized advice.
+
+A suggestion's **Add** button does not silently install a guessed schedule.
+It starts a surfaced Home task through `POST /api/containers`, gives the
+container a compact `Create a routine: …` title, and opens that task in the
+Home side panel. The task brief requires the agent to collect the cadence and,
+when the suggestion uses Gmail, the connected email account(s) through the
+existing `ask_user` choice-card flow before calling `create_job`. The resulting
+job is therefore an ordinary custom scheduled routine and appears in My
+routines through the existing custom-job partition; no suggestion-only job or
+installer state is added.
+
 ### My routines is the agent's full routine surface
 
 My routines lists every routine the effective agent owns, partitioned into
@@ -224,9 +243,9 @@ three card kinds:
 
 The routines page — its `PageHeader` action and the "No routines yet" empty
 state — offers a **Create routine** entry point that seeds the Home composer
-in Message mode with `Create a routine that …` (`/?compose=message&prompt=`,
+in Task mode with `Create a routine that …` (`/?compose=task&prompt=`,
 consumed by `HomeComposer`). A custom routine therefore starts as an ordinary
-chat turn the agent fulfills with `create_job`; there is deliberately no
+Home task the agent fulfills with `create_job`; there is deliberately no
 dedicated create form — authoring stays conversational, the same path email
 watchers and other chat-created jobs already take.
 
@@ -267,3 +286,6 @@ label, the calendar views, `EditJobDialog`) live in
 - The gallery reflects onboarding-created installs (same `templateId`
   stamp), so a user who enabled routines during onboarding sees them as
   installed on /routines.
+- Personalized suggestions are inert until the user clicks Add and completes
+  the task's setup choices; model-generated scan text alone never creates a
+  job or selects an account on the user's behalf.

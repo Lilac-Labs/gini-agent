@@ -21,14 +21,17 @@ import {
   useInstallRoutineTemplate,
   useInvalidate,
   useJobs,
+  useOnboarding,
   useRemoveEmailWatcher,
   useRoutineTemplates,
+  useStartTask,
   useUninstallRoutineTemplate,
   type RoutineTemplateView
 } from "@/lib/queries";
 import type { EmailWatcherRecord, JobRecord } from "@runtime/types";
 import { chipFor, CUSTOM_JOB_CHIP, WATCHER_CHIP } from "./chips";
 import { customRoutineJobs, jobDescription, jobDisplayName } from "./custom-jobs";
+import { routineSetupTask, suggestedRoutinesFrom } from "./suggestions";
 import { watcherChannelId, watcherDescription, watcherTitle } from "./watchers";
 
 // The composer seed for conversational routine creation. Trailing space so
@@ -44,8 +47,10 @@ export default function RoutinesPage() {
       "/?compose=task&highlight=routine&prompt=" + encodeURIComponent(CREATE_ROUTINE_PROMPT)
     );
   const templates = useRoutineTemplates();
+  const onboarding = useOnboarding();
   const install = useInstallRoutineTemplate();
   const uninstall = useUninstallRoutineTemplate();
+  const startTask = useStartTask();
   const [view, setView] = useState<"mine" | "explore">("mine");
 
   // Email watchers (created conversationally, e.g. "watch this refund thread")
@@ -62,7 +67,8 @@ export default function RoutinesPage() {
 
   const all = templates.data?.templates ?? [];
   const mine = all.filter((template) => template.installed);
-  const pending = install.isPending || uninstall.isPending;
+  const suggestions = suggestedRoutinesFrom(onboarding.data?.scan);
+  const pending = install.isPending || uninstall.isPending || startTask.isPending;
 
   // One-click Add installs with the catalog's default options; prompts/crons
   // are composed server-side. Only the browser timezone rides along.
@@ -81,6 +87,17 @@ export default function RoutinesPage() {
       onSuccess: () => toast.success(`Removed ${template.name}`),
       onError: (error) => toast.error(error.message)
     });
+  };
+
+  const submitSuggestion = (suggestion: (typeof suggestions)[number]) => {
+    const task = routineSetupTask(suggestion);
+    startTask.mutate(
+      { ...task, startedAs: "task" },
+      {
+        onSuccess: ({ containerId }) => router.push(`/?panel=${encodeURIComponent(containerId)}`),
+        onError: (error) => toast.error(error.message)
+      }
+    );
   };
 
   return (
@@ -187,6 +204,40 @@ export default function RoutinesPage() {
                 ))}
               </div>
             )}
+            {suggestions.length > 0 ? (
+              <section className="mt-[52px]">
+                <h2 className="text-[17px] font-semibold">Suggestions</h2>
+                <div className="mt-[18px] flex gap-[18px] overflow-x-auto pb-1">
+                  {suggestions.map((suggestion, index) => {
+                    const task = routineSetupTask(suggestion);
+                    const isStarting = startTask.isPending && startTask.variables?.title === task.title;
+                    return (
+                      <article
+                        key={`${suggestion.name}-${index}`}
+                        className="flex w-[262px] shrink-0 flex-col rounded-xl border border-border bg-card p-5"
+                      >
+                        <span className="flex size-10 items-center justify-center rounded-[11px] bg-[#F5820A] text-[19px] font-semibold text-white">
+                          {suggestion.name.charAt(0).toUpperCase()}
+                        </span>
+                        <h3 className="mt-4 line-clamp-1 text-sm font-semibold leading-snug">{suggestion.name}</h3>
+                        <p className="mt-1 text-xs text-muted-foreground">Suggested for you</p>
+                        <p className="mt-3 line-clamp-2 text-[14px] leading-normal text-muted-foreground">
+                          {suggestion.description}
+                        </p>
+                        <button
+                          type="button"
+                          disabled={pending}
+                          onClick={() => submitSuggestion(suggestion)}
+                          className="mt-[18px] h-10 w-full rounded-lg bg-foreground text-[14px] font-semibold text-background transition-opacity hover:opacity-90 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {isStarting ? "Starting…" : "Add"}
+                        </button>
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            ) : null}
           </>
         ) : (
           <>

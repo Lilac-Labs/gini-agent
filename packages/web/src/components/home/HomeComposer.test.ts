@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { highlightedTextParts } from "./HomeComposer";
+import { composerHighlightWord, highlightedTextParts } from "./HomeComposerHighlight";
 
 describe("highlightedTextParts", () => {
   test("splits the routine creation seed around the highlighted word", () => {
@@ -20,5 +20,11 @@ describe("highlightedTextParts", () => {
 
   test("returns null when no requested word is present", () => {
     expect(highlightedTextParts("Create a task that ", "routine")).toBeNull();
+  });
+
+  test("allowlists only the routine highlight token", () => {
+    expect(composerHighlightWord("routine")).toBe("routine");
+    expect(composerHighlightWord("task")).toBeNull();
+    expect(composerHighlightWord(null)).toBeNull();
   });
 });

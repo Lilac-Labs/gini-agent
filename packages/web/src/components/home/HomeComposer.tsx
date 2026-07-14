@@ -19,18 +19,11 @@ import {
 } from "@/components/chat/attachments";
 import { useTopicPanel } from "@/components/chat/TopicPanelContext";
 import { useStartTask, useStatus } from "@/lib/queries";
+import { composerHighlightWord, highlightedTextParts } from "./HomeComposerHighlight";
 
 type ComposerMode = "task" | "message";
 
 const MODE_STORAGE_KEY = "gini.home.composerMode";
-const COMPOSER_HIGHLIGHT_WORDS = new Set(["routine"]);
-
-export function highlightedTextParts(text: string, word: string | null): [string, string, string] | null {
-  if (!word) return null;
-  const index = text.toLowerCase().indexOf(word.toLowerCase());
-  if (index < 0) return null;
-  return [text.slice(0, index), text.slice(index, index + word.length), text.slice(index + word.length)];
-}
 
 // The "Give Gini a task" composer. Deliberately NOT the chat Composer —
 // no stop/queue affordances here — but it copies its autosize,
@@ -98,7 +91,7 @@ export function HomeComposer() {
     if (compose !== "message" && compose !== "task" && !seed) return;
     setMode(compose === "task" ? "task" : "message");
     if (seed) setText(seed);
-    if (highlight && COMPOSER_HIGHLIGHT_WORDS.has(highlight)) setHighlightWord(highlight);
+    setHighlightWord(composerHighlightWord(highlight));
     const el = textareaRef.current;
     el?.focus();
     // The controlled value only picks up `seed` on the next render, so move

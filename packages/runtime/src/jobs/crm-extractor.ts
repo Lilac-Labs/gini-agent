@@ -68,6 +68,10 @@ const CURATOR_SYSTEM_PROMPT = [
 interface ExtractorHandle {
   loop?: Promise<void>;
   stopRequested: boolean;
+  // Set to cut a watcher sleep short so a manual "sync now" (start on an
+  // already-running pipeline) polls for new mail immediately instead of
+  // waiting out the interval. Consumed by sleepUnlessStopped.
+  wakeRequested?: boolean;
   inFlightTurns: number;
   lastError?: string;
   lastActivityAt?: number;
@@ -235,9 +239,10 @@ function owningAgentId(config: RuntimeConfig): string {
 
 async function sleepUnlessStopped(handle: ExtractorHandle, ms: number): Promise<void> {
   const until = Date.now() + ms;
-  while (Date.now() < until && !handle.stopRequested) {
+  while (Date.now() < until && !handle.stopRequested && !handle.wakeRequested) {
     await Bun.sleep(Math.min(1_000, until - Date.now()));
   }
+  handle.wakeRequested = false; // consume a manual-sync wake
 }
 
 async function mapPool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
@@ -607,9 +612,11 @@ export function crmExtractionStatus(config: RuntimeConfig): CrmExtractionStatus 
   };
 }
 
-// Start (or resume). Idempotent: an already-running loop is left alone.
-// A disabled pipeline refuses to start — the master switch must be flipped
-// back via enableCrmExtraction first.
+// Start, resume, or manually sync. On an idle/paused pipeline this launches
+// (or resumes) the loop; on an already-running one it wakes the watcher for an
+// immediate mail poll — the "Sync now" the People page offers. A disabled
+// pipeline refuses to start — the master switch must be flipped back via
+// enableCrmExtraction first.
 export async function startCrmExtraction(config: RuntimeConfig): Promise<CrmExtractionStatus> {
   const instance = config.instance;
   if (getCrmRunState(instance) === "disabled") {
@@ -632,6 +639,9 @@ export async function startCrmExtraction(config: RuntimeConfig): Promise<CrmExtr
   const handle = handleFor(instance);
   handle.stopRequested = false;
   handle.lastError = undefined;
+  // Wake a running loop's watcher sleep so this call syncs new mail now; a
+  // fresh loop (below) polls immediately anyway and simply clears the flag.
+  handle.wakeRequested = true;
   if (!handle.loop) {
     appendLog(instance, "crm.extraction.started", {
       source: primary.source.kind,

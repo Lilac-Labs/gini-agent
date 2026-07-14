@@ -213,6 +213,63 @@ describe("crm-extractor", () => {
     await __awaitCrmLoopExitForTests(instance);
   }, 60_000);
 
+  test("start on a running pipeline wakes the watcher for an immediate sync", async () => {
+    const instance = "crmx-sync-wake";
+    const config = makeConfig(instance);
+    await install(config);
+    const provider = normalizeProvider(config.provider);
+    setEchoToolCallingResponse({ provider, text: "CRM updated.", toolCalls: [], finishReason: "stop" });
+
+    const messages: CrmMail[] = [
+      mail({ id: "w1", threadId: "T-a", date: 1_000, from: { address: "pal@x.com" }, to: [{ address: SELF }] }),
+      mail({ id: "w2", threadId: "T-a", date: 2_000, from: { address: SELF }, to: [{ address: "pal@x.com" }] }),
+    ];
+    // Count list polls so the assertion can prove the wake — not the periodic
+    // timer — is what re-scanned the mailbox.
+    let listCalls = 0;
+    const source: CrmMailSource = {
+      kind: "fixture",
+      async listMessages(afterMs?: number) {
+        listCalls += 1;
+        return messages
+          .filter((m) => !afterMs || m.date > afterMs)
+          .map((m) => ({ id: m.id, threadId: m.threadId, internalDate: m.date }));
+      },
+      async fetchThread(threadId: string) {
+        return messages.filter((m) => m.threadId === threadId);
+      },
+    };
+    setCrmMeta(instance, "self_email", SELF);
+    __setCrmMailSourceForTests(instance, source);
+
+    // A watcher interval long enough that the periodic poll cannot be what
+    // picks up the second thread within the test window — only a manual wake can.
+    const prev = process.env.GINI_CRM_WATCH_INTERVAL_MS;
+    process.env.GINI_CRM_WATCH_INTERVAL_MS = "600000";
+    try {
+      await startCrmExtraction(config);
+      // Backfill (list #1) then the first idle watcher poll (list #2): the loop
+      // is now asleep for 10 minutes with the first thread done.
+      await until("first thread done and watcher settled", () => crmQueueCounts(instance).done === 1 && listCalls >= 2);
+      const callsBeforeSync = listCalls;
+
+      // New engaged mail arrives; the sleeping watcher won't poll again on its own.
+      messages.push(
+        mail({ id: "w3", threadId: "T-b", date: Date.now(), from: { address: SELF }, to: [{ address: "newpal@z.com" }] }),
+      );
+      // Manual "Sync": start on the already-running pipeline wakes the watcher now.
+      await startCrmExtraction(config);
+      await until("wake forced a fresh poll that ingests the new thread", () => crmQueueCounts(instance).done === 2, 15_000);
+      expect(listCalls).toBeGreaterThan(callsBeforeSync);
+    } finally {
+      if (prev === undefined) delete process.env.GINI_CRM_WATCH_INTERVAL_MS;
+      else process.env.GINI_CRM_WATCH_INTERVAL_MS = prev;
+      await pauseCrmExtraction(config);
+      await __awaitCrmLoopExitForTests(instance);
+      __setCrmMailSourceForTests(instance, undefined);
+    }
+  }, 60_000);
+
   test("start works against a legacy email-PK contacts table (no id column)", async () => {
     // Real-world hazard: an agent database created before the id-PK schema
     // still has the retired email-PK contacts shape. Opening it migrates the

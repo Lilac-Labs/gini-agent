@@ -1,9 +1,11 @@
 "use client";
 
-// The People-page extraction indicator + manual control. Presentational: it
-// renders the view model from extractionView() and calls onStart when the user
-// asks to kick (or resume) the pipeline. Kept separate from page.tsx so the
-// dot/label/button rendering is unit-testable without the DOM-heavy page.
+// The People-page extraction indicator + manual Sync control. Presentational:
+// it renders the view model from extractionView() and calls onSync when the
+// user asks to sync (which starts an idle pipeline, resumes a paused one, or
+// forces an immediate poll on a running one). Kept separate from page.tsx so
+// the dot/label/button rendering is unit-testable without the DOM-heavy page.
+import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { ExtractionTone, ExtractionView } from "./_lib";
 
@@ -19,11 +21,11 @@ const STATIC_DOT: Record<ExtractionTone, string> = {
 export function ExtractionBar({
   view,
   pending,
-  onStart,
+  onSync,
 }: {
   view: ExtractionView;
   pending: boolean;
-  onStart: () => void;
+  onSync: () => void;
 }) {
   return (
     <div className="flex items-center gap-2.5">
@@ -35,9 +37,10 @@ export function ExtractionBar({
         )}
         {view.label}
       </span>
-      {view.canStart ? (
-        <Button variant="outline" size="sm" disabled={pending} onClick={onStart}>
-          {pending ? "Starting…" : view.startLabel}
+      {view.canSync ? (
+        <Button variant="outline" size="sm" disabled={pending} onClick={onSync}>
+          <RefreshCw className={pending ? "animate-spin" : ""} />
+          {pending ? "Syncing…" : "Sync"}
         </Button>
       ) : null}
     </div>

@@ -81,7 +81,7 @@ export function sortContacts(
 
 // ---------------------------------------------------------------------------
 // Extraction status — the "is the CRM going through my email?" indicator and
-// the manual Start control. Both the toolbar line and the empty state read the
+// the manual Sync control. Both the toolbar line and the empty state read the
 // same view model so they can never disagree about what the pipeline is doing.
 // ---------------------------------------------------------------------------
 
@@ -91,9 +91,8 @@ export interface ExtractionView {
   tone: ExtractionTone;
   live: boolean; // animate the dot — a run is actively working
   label: string;
-  hasAccount: boolean; // a mailbox is connected (start would not 400)
-  canStart: boolean; // offer the manual Start/Resume/Refresh control
-  startLabel: string; // "" when canStart is false
+  hasAccount: boolean; // a mailbox is connected (sync would not 400)
+  canSync: boolean; // offer the manual Sync control (mailbox present, not disabled)
 }
 
 // Threads the pipeline has fully handled (done + skipped + error) — what the
@@ -109,6 +108,12 @@ export function extractionRefetchMs(status: CrmExtractionStatus | undefined): nu
   return status?.runState === "running" ? 3000 : 30_000;
 }
 
+// The contacts list itself: refresh briskly while a run is active so people a
+// manual Sync just found appear within seconds, not after the ambient minute.
+export function contactsRefetchMs(status: CrmExtractionStatus | undefined): number {
+  return status?.runState === "running" ? 5000 : 60_000;
+}
+
 // The single view model behind both the toolbar status line and the empty
 // state. Returns null before the first status resolves (nothing to show yet).
 export function extractionView(
@@ -117,6 +122,10 @@ export function extractionView(
 ): ExtractionView | null {
   if (!status) return null;
   const hasAccount = status.source !== null;
+  // Sync is offered whenever a mailbox is connected and extraction isn't
+  // disabled: it starts an idle pipeline, resumes a paused one, and forces an
+  // immediate poll on a running one.
+  const canSync = hasAccount && status.runState !== "disabled";
   const processed = processedCount(status);
   const suffix = processed > 0 ? ` · ${processed.toLocaleString()} processed` : "";
 
@@ -126,37 +135,22 @@ export function extractionView(
       live: true,
       label: processed > 0 ? `Scanning your mail — ${processed.toLocaleString()} processed` : "Scanning your mail…",
       hasAccount,
-      canStart: false,
-      startLabel: "",
+      canSync,
     };
   }
   if (status.runState === "paused") {
-    return { tone: "paused", live: false, label: `Paused${suffix}`, hasAccount, canStart: hasAccount, startLabel: "Resume" };
+    return { tone: "paused", live: false, label: `Paused${suffix}`, hasAccount, canSync };
   }
   if (status.runState === "disabled") {
-    return { tone: "disabled", live: false, label: "Extraction off", hasAccount, canStart: false, startLabel: "" };
+    return { tone: "disabled", live: false, label: "Extraction off", hasAccount, canSync };
   }
-  // idle — never started this session (the pipeline stays "running" once it is,
-  // so idle almost always means "has not run for this user yet").
+  // idle — the pipeline stays "running" once it is, so idle almost always means
+  // "has not run for this user yet".
   if (!hasAccount) {
-    return {
-      tone: "idle",
-      live: false,
-      label: "Connect a Google account to build your directory",
-      hasAccount: false,
-      canStart: false,
-      startLabel: "",
-    };
+    return { tone: "idle", live: false, label: "Connect a Google account to build your directory", hasAccount, canSync };
   }
   if (status.lastActivityAt) {
-    return {
-      tone: "idle",
-      live: false,
-      label: `Updated ${relativeTime(status.lastActivityAt, nowMs)}${suffix}`,
-      hasAccount,
-      canStart: true,
-      startLabel: "Refresh",
-    };
+    return { tone: "idle", live: false, label: `Updated ${relativeTime(status.lastActivityAt, nowMs)}${suffix}`, hasAccount, canSync };
   }
-  return { tone: "idle", live: false, label: "Not started yet", hasAccount, canStart: true, startLabel: "Scan my mail" };
+  return { tone: "idle", live: false, label: "Not started yet", hasAccount, canSync };
 }

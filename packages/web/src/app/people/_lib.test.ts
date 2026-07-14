@@ -4,6 +4,7 @@ import type { CrmExtractionStatus } from "@runtime/jobs/crm-extractor";
 import {
   CATEGORY_ITEMS,
   SORT_ITEMS,
+  contactsRefetchMs,
   extractionRefetchMs,
   extractionView,
   filterContacts,
@@ -126,20 +127,26 @@ describe("people/_lib extraction status", () => {
     expect(extractionRefetchMs(status({ runState: "disabled" }))).toBe(30_000);
   });
 
+  test("contactsRefetchMs refreshes the list briskly only while running", () => {
+    expect(contactsRefetchMs(undefined)).toBe(60_000);
+    expect(contactsRefetchMs(status({ runState: "running" }))).toBe(5000);
+    expect(contactsRefetchMs(status({ runState: "idle" }))).toBe(60_000);
+    expect(contactsRefetchMs(status({ runState: "paused" }))).toBe(60_000);
+  });
+
   const NOW = 1_700_000_000_000;
 
   test("no status yet → null (nothing to render)", () => {
     expect(extractionView(undefined, NOW)).toBeNull();
   });
 
-  test("running: live dot, scanning label, no start control", () => {
+  test("running: live dot, scanning label, sync still offered (poll now)", () => {
     expect(extractionView(status({ runState: "running" }), NOW)).toEqual({
       tone: "running",
       live: true,
       label: "Scanning your mail…",
       hasAccount: true,
-      canStart: false,
-      startLabel: "",
+      canSync: true,
     });
   });
 
@@ -152,14 +159,13 @@ describe("people/_lib extraction status", () => {
     expect(v?.live).toBe(true);
   });
 
-  test("paused: amber, resumable, keeps the processed suffix", () => {
+  test("paused: amber, syncable, keeps the processed suffix", () => {
     expect(extractionView(status({ runState: "paused", counts: { pending: 0, ingested: 0, done: 5, skipped: 0, error: 0 } }), NOW)).toEqual({
       tone: "paused",
       live: false,
       label: "Paused · 5 processed",
       hasAccount: true,
-      canStart: true,
-      startLabel: "Resume",
+      canSync: true,
     });
   });
 
@@ -167,40 +173,37 @@ describe("people/_lib extraction status", () => {
     expect(extractionView(status({ runState: "paused" }), NOW)?.label).toBe("Paused");
   });
 
-  test("disabled: off, no start control", () => {
+  test("disabled: off, no sync control", () => {
     expect(extractionView(status({ runState: "disabled" }), NOW)).toEqual({
       tone: "disabled",
       live: false,
       label: "Extraction off",
       hasAccount: true,
-      canStart: false,
-      startLabel: "",
+      canSync: false,
     });
   });
 
-  test("idle without a mailbox: connect prompt, no start control", () => {
+  test("idle without a mailbox: connect prompt, no sync control", () => {
     expect(extractionView(status({ runState: "idle", source: null }), NOW)).toEqual({
       tone: "idle",
       live: false,
       label: "Connect a Google account to build your directory",
       hasAccount: false,
-      canStart: false,
-      startLabel: "",
+      canSync: false,
     });
   });
 
-  test("idle with a mailbox, never run: 'Not started yet' + 'Scan my mail'", () => {
+  test("idle with a mailbox, never run: 'Not started yet' + syncable", () => {
     expect(extractionView(status({ runState: "idle" }), NOW)).toEqual({
       tone: "idle",
       live: false,
       label: "Not started yet",
       hasAccount: true,
-      canStart: true,
-      startLabel: "Scan my mail",
+      canSync: true,
     });
   });
 
-  test("idle with prior activity: shows relative update time and offers Refresh", () => {
+  test("idle with prior activity: shows relative update time and stays syncable", () => {
     const v = extractionView(
       status({ runState: "idle", lastActivityAt: NOW - 3 * 3_600_000, counts: { pending: 0, ingested: 0, done: 42, skipped: 0, error: 0 } }),
       NOW,
@@ -210,8 +213,7 @@ describe("people/_lib extraction status", () => {
       live: false,
       label: "Updated 3h ago · 42 processed",
       hasAccount: true,
-      canStart: true,
-      startLabel: "Refresh",
+      canSync: true,
     });
   });
 

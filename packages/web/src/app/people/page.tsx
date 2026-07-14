@@ -39,6 +39,7 @@ import {
 import {
   CATEGORY_ITEMS,
   SORT_ITEMS,
+  contactsRefetchMs,
   extractionRefetchMs,
   extractionView,
   filterContacts,
@@ -90,7 +91,7 @@ export default function PeoplePage() {
   const contacts = useQuery<{ contacts: CrmContactSummary[] }>({
     queryKey: ["crm-contacts"],
     queryFn: () => api<{ contacts: CrmContactSummary[] }>("/crm/contacts"),
-    refetchInterval: 60_000,
+    refetchInterval: () => contactsRefetchMs(queryClient.getQueryData<CrmExtractionStatus>(["crm-extraction"])),
   });
   const extraction = useQuery<CrmExtractionStatus>({
     queryKey: ["crm-extraction"],
@@ -115,10 +116,12 @@ export default function PeoplePage() {
   });
 
   // Manual kick for the extraction pipeline: idle/legacy users (onboarded
-  // before autostart, or never connected mail at onboarding) have a "running"
-  // pipeline only once something calls start. The returned status seeds the
-  // cache so the indicator flips to "Scanning…" without waiting for the poll.
-  const startExtraction = useMutation({
+  // Manual sync. Posts /crm/extraction/start, which starts an idle pipeline
+  // (users onboarded before autostart, or who connected mail later), resumes a
+  // paused one, or wakes a running one to poll for new mail now instead of
+  // waiting out the watcher interval. The returned status seeds the cache so
+  // the indicator reflects the new state without waiting for the poll.
+  const syncExtraction = useMutation({
     mutationFn: () => api<CrmExtractionStatus>("/crm/extraction/start", { method: "POST" }),
     onSuccess: (status) => queryClient.setQueryData(["crm-extraction"], status),
     onError: (error) => toast.error((error as Error).message),
@@ -146,7 +149,6 @@ export default function PeoplePage() {
   );
   const selected = rows.find((c) => c.id === selectedId) ?? contacts.data?.contacts.find((c) => c.id === selectedId) ?? null;
   const view = extractionView(extraction.data, Date.now());
-  const startButtonLabel = startExtraction.isPending ? "Starting…" : view?.startLabel ?? "";
 
   return (
     <div className="flex flex-1 overflow-hidden">
@@ -195,7 +197,7 @@ export default function PeoplePage() {
                   </DropdownMenuContent>
                 </DropdownMenu>
                 {view ? (
-                  <ExtractionBar view={view} pending={startExtraction.isPending} onStart={() => startExtraction.mutate()} />
+                  <ExtractionBar view={view} pending={syncExtraction.isPending} onSync={() => syncExtraction.mutate()} />
                 ) : null}
               </div>
               <DropdownMenu>
@@ -230,22 +232,17 @@ export default function PeoplePage() {
               {contacts.isLoading ? (
                 <div className="border-t border-border px-4 py-8 text-center text-sm text-muted-foreground">Loading…</div>
               ) : rows.length === 0 ? (
-                <div className="flex flex-col items-center gap-3 border-t border-border p-6">
+                <div className="border-t border-border p-6">
                   {view?.live ? (
                     <EmptyState
                       title="Scanning your mail…"
                       description="Your assistant is reading your recent threads. People will appear here as they're found."
                     />
-                  ) : view?.canStart ? (
-                    <>
-                      <EmptyState
-                        title="No people yet"
-                        description="Build your directory from your mail — your assistant reads your threads and adds the people you actually engage with."
-                      />
-                      <Button disabled={startExtraction.isPending} onClick={() => startExtraction.mutate()}>
-                        {startButtonLabel}
-                      </Button>
-                    </>
+                  ) : view?.hasAccount ? (
+                    <EmptyState
+                      title="No people yet"
+                      description="Your assistant builds this from your mail as you exchange messages — new mail syncs automatically, or hit Sync above to check now."
+                    />
                   ) : (
                     <EmptyState
                       title="No people yet"

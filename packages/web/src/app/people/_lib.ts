@@ -112,9 +112,9 @@ export function sortContacts(
   });
 }
 
-// Fixed page size for the People table — enough to fill the viewport without a
-// long scroll, small enough that paging is meaningful on a large directory.
-export const PAGE_SIZE = 25;
+// Fixed page size for the People table — kept small so the list fits without
+// scrolling (rows are tall: avatar, company, multi-line description).
+export const PAGE_SIZE = 10;
 
 export interface Page<T> {
   items: T[];

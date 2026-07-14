@@ -149,6 +149,15 @@ describe("people/_lib", () => {
     // Default page size is applied when omitted.
     expect(paginate(Array.from({ length: PAGE_SIZE + 1 }, (_, i) => i)).pageCount).toBe(2);
   });
+
+  test("default page size is 10 so tall rows fit without scrolling", () => {
+    expect(PAGE_SIZE).toBe(10);
+    // 11 contacts → 2 pages of 10 + 1 at the default size.
+    const items = Array.from({ length: 11 }, (_, i) => i);
+    expect(paginate(items).items).toHaveLength(10);
+    expect(paginate(items).pageCount).toBe(2);
+    expect(paginate(items, 2).items).toEqual([10]);
+  });
 });
 
 function status(over: Partial<CrmExtractionStatus> = {}): CrmExtractionStatus {

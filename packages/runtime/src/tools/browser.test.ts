@@ -468,7 +468,63 @@ describe("browser disconnect lifecycle", () => {
     browserTest.clearPendingSharedForTest();
     browserTest.resetTeardownCloseTimeoutForTest();
     browserTest.resetChromeKillerForTest();
+    browserTest.setBrowserConsoleTimeoutForTest(null);
     browserTest.resetBrowserInstanceForTest();
+  });
+
+  test("a timed-out navigation resets the shared browser before another tool reuses the page", async () => {
+    let contextCloseCalled = false;
+    browserTest.installFakeSpawnedHandleForTest(9400, {
+      close: async () => {
+        contextCloseCalled = true;
+      }
+    });
+    browserTest.installFakeSessionWithPageForTest("navigation-timeout-reset", {
+      goto: async () => {
+        throw new Error("page.goto: Timeout 30000ms exceeded.");
+      },
+      close: async () => undefined,
+      url: () => "about:blank"
+    });
+
+    const result = JSON.parse(
+      await browserNavigate("navigation-timeout-reset", { url: "https://1.1.1.1/" })
+    ) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Timeout 30000ms exceeded");
+    expect(result.error).toContain("browser session was reset");
+    expect(contextCloseCalled).toBe(true);
+    expect(browserTest.getFakeSessionForTest("navigation-timeout-reset")).toBeUndefined();
+  });
+
+  test("a wedged browser_console call times out and resets the shared browser", async () => {
+    browserTest.setBrowserConsoleTimeoutForTest(10);
+    let contextCloseCalled = false;
+    browserTest.installFakeSpawnedHandleForTest(9400, {
+      close: async () => {
+        contextCloseCalled = true;
+      }
+    });
+    browserTest.installFakeSessionWithPageForTest("console-timeout-reset", {
+      evaluate: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return [];
+      },
+      on: (() => undefined) as unknown as import("playwright-core").Page["on"],
+      close: async () => undefined,
+      url: () => "https://example.com/"
+    });
+
+    const result = JSON.parse(
+      await browserConsole("console-timeout-reset", { expression: "location.href" })
+    ) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Browser console timed out after 10ms");
+    expect(result.error).toContain("browser session was reset");
+    expect(contextCloseCalled).toBe(true);
+    expect(browserTest.getFakeSessionForTest("console-timeout-reset")).toBeUndefined();
   });
 
   test("in-flight disconnect rejects new browser_navigate admissions", async () => {

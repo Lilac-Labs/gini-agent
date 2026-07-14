@@ -23,6 +23,14 @@ import { useStartTask, useStatus } from "@/lib/queries";
 type ComposerMode = "task" | "message";
 
 const MODE_STORAGE_KEY = "gini.home.composerMode";
+const COMPOSER_HIGHLIGHT_WORDS = new Set(["routine"]);
+
+export function highlightedTextParts(text: string, word: string | null): [string, string, string] | null {
+  if (!word) return null;
+  const index = text.toLowerCase().indexOf(word.toLowerCase());
+  if (index < 0) return null;
+  return [text.slice(0, index), text.slice(index, index + word.length), text.slice(index + word.length)];
+}
 
 // The "Give Gini a task" composer. Deliberately NOT the chat Composer —
 // no stop/queue affordances here — but it copies its autosize,
@@ -38,6 +46,7 @@ export function HomeComposer() {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [text, setText] = useState("");
   const [mode, setMode] = useState<ComposerMode>("task");
+  const [highlightWord, setHighlightWord] = useState<string | null>(null);
   const {
     attachments,
     anyUploading,
@@ -85,9 +94,11 @@ export function HomeComposer() {
   useEffect(() => {
     const compose = params?.get("compose");
     const seed = params?.get("prompt");
+    const highlight = params?.get("highlight");
     if (compose !== "message" && compose !== "task" && !seed) return;
     setMode(compose === "task" ? "task" : "message");
     if (seed) setText(seed);
+    if (highlight && COMPOSER_HIGHLIGHT_WORDS.has(highlight)) setHighlightWord(highlight);
     const el = textareaRef.current;
     el?.focus();
     // The controlled value only picks up `seed` on the next render, so move
@@ -147,6 +158,7 @@ export function HomeComposer() {
           // Task mode stays on home and opens the new container in the
           // right-side topic panel so the user watches the turn in place
           // (the optimistic Tasks row lands alongside).
+          setHighlightWord(null);
           if (messageMode) router.push(`/chat?session=${data.containerId}`);
           else panel?.openTopic(data.containerId);
         },
@@ -165,6 +177,8 @@ export function HomeComposer() {
     }
   };
 
+  const highlightParts = highlightedTextParts(text, highlightWord);
+
   return (
     // suppressHydrationWarning (shell + textarea): password-manager extensions
     // (e.g. Dashlane's data-dashlane-rid) stamp attributes here before React
@@ -180,21 +194,39 @@ export function HomeComposer() {
     >
       <AttachmentDropOverlay active={dragActive} />
       <AttachmentTray attachments={attachments} onRemove={removeAttachment} />
-      <textarea
-        ref={textareaRef}
-        rows={1}
-        value={text}
-        onChange={(event) => setText(event.target.value)}
-        onKeyDown={handleKeyDown}
-        onPaste={handlePaste}
-        placeholder={mode === "task" ? "Give Gini a task" : "Ask Gini anything"}
-        suppressHydrationWarning
-        data-1p-ignore=""
-        data-lpignore="true"
-        data-bwignore=""
-        data-form-type="other"
-        className="block max-h-32 w-full resize-none border-0 bg-transparent text-sm leading-snug outline-none placeholder:text-muted-foreground"
-      />
+      <div className="relative">
+        {highlightParts ? (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 top-0 whitespace-pre-wrap break-words text-sm leading-snug text-foreground"
+          >
+            {highlightParts[0]}
+            <span className="inline-flex items-center gap-1 rounded-full bg-[#E7F0FF] px-2 py-0.5 font-medium text-[#1769FF]">
+              <span className="size-1.5 rounded-full bg-current" />
+              {highlightParts[1]}
+            </span>
+            {highlightParts[2]}
+          </div>
+        ) : null}
+        <textarea
+          ref={textareaRef}
+          rows={1}
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+          placeholder={mode === "task" ? "Give Gini a task" : "Ask Gini anything"}
+          suppressHydrationWarning
+          data-1p-ignore=""
+          data-lpignore="true"
+          data-bwignore=""
+          data-form-type="other"
+          className={cn(
+            "relative block max-h-32 w-full resize-none border-0 bg-transparent text-sm leading-snug outline-none placeholder:text-muted-foreground",
+            highlightParts && "text-transparent caret-foreground"
+          )}
+        />
+      </div>
       <div className="mt-3.5 flex items-center gap-3.5">
         <input
           ref={fileInputRef}

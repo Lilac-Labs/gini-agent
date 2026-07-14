@@ -40,7 +40,9 @@ export default function RoutinesPage() {
   // compose=task: routine creation is a home TASK (it appears in the Tasks
   // queue and runs in the right-side panel), not a Messages conversation.
   const goCreateRoutine = () =>
-    router.push("/?compose=task&prompt=" + encodeURIComponent(CREATE_ROUTINE_PROMPT));
+    router.push(
+      "/?compose=task&highlight=routine&prompt=" + encodeURIComponent(CREATE_ROUTINE_PROMPT)
+    );
   const templates = useRoutineTemplates();
   const install = useInstallRoutineTemplate();
   const uninstall = useUninstallRoutineTemplate();

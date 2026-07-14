@@ -13,6 +13,7 @@ import { ArrowUpDown, Building2, ListFilter, Maximize2, UserRoundPlus, X } from 
 import type { CrmContactDetail, CrmContactSummary } from "@runtime/capabilities/crm-contacts";
 import type { CrmExtractionStatus } from "@runtime/jobs/crm-extractor";
 import type { ChatSession } from "@/lib/view-types";
+import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { dossierDisplayMarkdown } from "@/lib/dossier";
 import { MarkdownContent } from "@/components/chat/MarkdownContent";
@@ -38,6 +39,8 @@ import {
 import {
   CATEGORY_ITEMS,
   SORT_ITEMS,
+  extractionRefetchMs,
+  extractionView,
   filterContacts,
   fullName,
   initials,
@@ -47,6 +50,7 @@ import {
   type PeopleCategory,
   type PeopleSort,
 } from "./_lib";
+import { ExtractionBar } from "./_ExtractionBar";
 
 const ROW_GRID = "grid-cols-[minmax(220px,1.1fr)_minmax(190px,0.9fr)_minmax(260px,1.6fr)_92px]";
 
@@ -91,7 +95,7 @@ export default function PeoplePage() {
   const extraction = useQuery<CrmExtractionStatus>({
     queryKey: ["crm-extraction"],
     queryFn: () => api<CrmExtractionStatus>("/crm/extraction"),
-    refetchInterval: 60_000,
+    refetchInterval: (query) => extractionRefetchMs(query.state.data),
   });
   const detail = useQuery<CrmContactDetail>({
     queryKey: ["crm-contact", selectedId],
@@ -108,6 +112,16 @@ export default function PeoplePage() {
       void queryClient.invalidateQueries({ queryKey: ["crm-contacts"] });
       setSelectedId(created.id);
     },
+  });
+
+  // Manual kick for the extraction pipeline: idle/legacy users (onboarded
+  // before autostart, or never connected mail at onboarding) have a "running"
+  // pipeline only once something calls start. The returned status seeds the
+  // cache so the indicator flips to "Scanning…" without waiting for the poll.
+  const startExtraction = useMutation({
+    mutationFn: () => api<CrmExtractionStatus>("/crm/extraction/start", { method: "POST" }),
+    onSuccess: (status) => queryClient.setQueryData(["crm-extraction"], status),
+    onError: (error) => toast.error((error as Error).message),
   });
 
   // "Update with Gini": hand the person to the assistant in a fresh chat —
@@ -131,8 +145,8 @@ export default function PeoplePage() {
     [contacts.data, category, sort],
   );
   const selected = rows.find((c) => c.id === selectedId) ?? contacts.data?.contacts.find((c) => c.id === selectedId) ?? null;
-  const status = extraction.data;
-  const processed = status ? status.counts.done + status.counts.skipped + status.counts.error : 0;
+  const view = extractionView(extraction.data, Date.now());
+  const startButtonLabel = startExtraction.isPending ? "Starting…" : view?.startLabel ?? "";
 
   return (
     <div className="flex flex-1 overflow-hidden">
@@ -180,14 +194,8 @@ export default function PeoplePage() {
                     ))}
                   </DropdownMenuContent>
                 </DropdownMenu>
-                {status ? (
-                  <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <span
-                      className={`size-[7px] rounded-full ${status.runState === "running" ? "bg-emerald-500" : "bg-muted-foreground/50"}`}
-                    />
-                    {status.lastActivityAt ? `Updated ${relativeTime(status.lastActivityAt, Date.now())}` : `Extraction ${status.runState}`}
-                    {processed > 0 ? ` · ${processed.toLocaleString()} threads processed` : ""}
-                  </span>
+                {view ? (
+                  <ExtractionBar view={view} pending={startExtraction.isPending} onStart={() => startExtraction.mutate()} />
                 ) : null}
               </div>
               <DropdownMenu>
@@ -222,11 +230,28 @@ export default function PeoplePage() {
               {contacts.isLoading ? (
                 <div className="border-t border-border px-4 py-8 text-center text-sm text-muted-foreground">Loading…</div>
               ) : rows.length === 0 ? (
-                <div className="border-t border-border p-6">
-                  <EmptyState
-                    title="No people yet"
-                    description="Connect a Google account and the assistant will build your directory from your mail."
-                  />
+                <div className="flex flex-col items-center gap-3 border-t border-border p-6">
+                  {view?.live ? (
+                    <EmptyState
+                      title="Scanning your mail…"
+                      description="Your assistant is reading your recent threads. People will appear here as they're found."
+                    />
+                  ) : view?.canStart ? (
+                    <>
+                      <EmptyState
+                        title="No people yet"
+                        description="Build your directory from your mail — your assistant reads your threads and adds the people you actually engage with."
+                      />
+                      <Button disabled={startExtraction.isPending} onClick={() => startExtraction.mutate()}>
+                        {startButtonLabel}
+                      </Button>
+                    </>
+                  ) : (
+                    <EmptyState
+                      title="No people yet"
+                      description="Connect a Google account and the assistant will build your directory from your mail."
+                    />
+                  )}
                 </div>
               ) : (
                 rows.map((c) => (

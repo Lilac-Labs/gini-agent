@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { CrmContactSummary } from "@runtime/capabilities/crm-contacts";
+import type { CrmExtractionStatus } from "@runtime/jobs/crm-extractor";
 import {
   CATEGORY_ITEMS,
   SORT_ITEMS,
+  extractionRefetchMs,
+  extractionView,
   filterContacts,
   fullName,
   initials,
+  processedCount,
   relativeTime,
   roleLine,
   sortContacts,
@@ -85,5 +89,133 @@ describe("people/_lib", () => {
   test("menu item catalogs are stable", () => {
     expect(SORT_ITEMS.map((s) => s.id)).toEqual(["name", "recent"]);
     expect(CATEGORY_ITEMS.map((c) => c.id)).toEqual(["all", "Work", "Personal"]);
+  });
+});
+
+function status(over: Partial<CrmExtractionStatus> = {}): CrmExtractionStatus {
+  return {
+    runState: "idle",
+    counts: { pending: 0, ingested: 0, done: 0, skipped: 0, error: 0 },
+    backfillSeeded: false,
+    mailCursor: null,
+    inFlightTurns: 0,
+    selfEmail: null,
+    selfAddresses: [],
+    accounts: [],
+    agentId: null,
+    subagentId: null,
+    turnModel: null,
+    source: "gmail",
+    lastError: null,
+    lastActivityAt: null,
+    ...over,
+  };
+}
+
+describe("people/_lib extraction status", () => {
+  test("processedCount sums done+skipped+error, ignoring in-flight rows", () => {
+    expect(processedCount(status({ counts: { pending: 9, ingested: 7, done: 1000, skipped: 200, error: 34 } }))).toBe(1234);
+    expect(processedCount(status())).toBe(0);
+  });
+
+  test("extractionRefetchMs polls fast only while running", () => {
+    expect(extractionRefetchMs(undefined)).toBe(30_000);
+    expect(extractionRefetchMs(status({ runState: "running" }))).toBe(3000);
+    expect(extractionRefetchMs(status({ runState: "idle" }))).toBe(30_000);
+    expect(extractionRefetchMs(status({ runState: "paused" }))).toBe(30_000);
+    expect(extractionRefetchMs(status({ runState: "disabled" }))).toBe(30_000);
+  });
+
+  const NOW = 1_700_000_000_000;
+
+  test("no status yet → null (nothing to render)", () => {
+    expect(extractionView(undefined, NOW)).toBeNull();
+  });
+
+  test("running: live dot, scanning label, no start control", () => {
+    expect(extractionView(status({ runState: "running" }), NOW)).toEqual({
+      tone: "running",
+      live: true,
+      label: "Scanning your mail…",
+      hasAccount: true,
+      canStart: false,
+      startLabel: "",
+    });
+  });
+
+  test("running with progress: label carries the localized processed count", () => {
+    const v = extractionView(
+      status({ runState: "running", counts: { pending: 0, ingested: 0, done: 1200, skipped: 30, error: 4 } }),
+      NOW,
+    );
+    expect(v?.label).toBe("Scanning your mail — 1,234 processed");
+    expect(v?.live).toBe(true);
+  });
+
+  test("paused: amber, resumable, keeps the processed suffix", () => {
+    expect(extractionView(status({ runState: "paused", counts: { pending: 0, ingested: 0, done: 5, skipped: 0, error: 0 } }), NOW)).toEqual({
+      tone: "paused",
+      live: false,
+      label: "Paused · 5 processed",
+      hasAccount: true,
+      canStart: true,
+      startLabel: "Resume",
+    });
+  });
+
+  test("paused with nothing processed drops the suffix", () => {
+    expect(extractionView(status({ runState: "paused" }), NOW)?.label).toBe("Paused");
+  });
+
+  test("disabled: off, no start control", () => {
+    expect(extractionView(status({ runState: "disabled" }), NOW)).toEqual({
+      tone: "disabled",
+      live: false,
+      label: "Extraction off",
+      hasAccount: true,
+      canStart: false,
+      startLabel: "",
+    });
+  });
+
+  test("idle without a mailbox: connect prompt, no start control", () => {
+    expect(extractionView(status({ runState: "idle", source: null }), NOW)).toEqual({
+      tone: "idle",
+      live: false,
+      label: "Connect a Google account to build your directory",
+      hasAccount: false,
+      canStart: false,
+      startLabel: "",
+    });
+  });
+
+  test("idle with a mailbox, never run: 'Not started yet' + 'Scan my mail'", () => {
+    expect(extractionView(status({ runState: "idle" }), NOW)).toEqual({
+      tone: "idle",
+      live: false,
+      label: "Not started yet",
+      hasAccount: true,
+      canStart: true,
+      startLabel: "Scan my mail",
+    });
+  });
+
+  test("idle with prior activity: shows relative update time and offers Refresh", () => {
+    const v = extractionView(
+      status({ runState: "idle", lastActivityAt: NOW - 3 * 3_600_000, counts: { pending: 0, ingested: 0, done: 42, skipped: 0, error: 0 } }),
+      NOW,
+    );
+    expect(v).toEqual({
+      tone: "idle",
+      live: false,
+      label: "Updated 3h ago · 42 processed",
+      hasAccount: true,
+      canStart: true,
+      startLabel: "Refresh",
+    });
+  });
+
+  test("fixture source still counts as a connected mailbox", () => {
+    expect(extractionView(status({ runState: "idle", source: "fixture" }), NOW)?.hasAccount).toBe(true);
   });
 });

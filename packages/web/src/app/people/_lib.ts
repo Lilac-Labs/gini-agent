@@ -1,5 +1,6 @@
 // Pure helpers for the People directory screen (testable without the DOM).
 import type { CrmContactSummary } from "@runtime/capabilities/crm-contacts";
+import type { CrmExtractionStatus } from "@runtime/jobs/crm-extractor";
 
 export type PeopleSort = "name" | "recent";
 export type PeopleCategory = "all" | "Work" | "Personal";
@@ -76,4 +77,86 @@ export function sortContacts(
     if (a.isSelf !== b.isSelf) return Number(b.isSelf) - Number(a.isSelf);
     return (b.lastSpokeAt ?? 0) - (a.lastSpokeAt ?? 0);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Extraction status — the "is the CRM going through my email?" indicator and
+// the manual Start control. Both the toolbar line and the empty state read the
+// same view model so they can never disagree about what the pipeline is doing.
+// ---------------------------------------------------------------------------
+
+export type ExtractionTone = "running" | "idle" | "paused" | "disabled";
+
+export interface ExtractionView {
+  tone: ExtractionTone;
+  live: boolean; // animate the dot — a run is actively working
+  label: string;
+  hasAccount: boolean; // a mailbox is connected (start would not 400)
+  canStart: boolean; // offer the manual Start/Resume/Refresh control
+  startLabel: string; // "" when canStart is false
+}
+
+// Threads the pipeline has fully handled (done + skipped + error) — what the
+// user reads as progress. pending/ingested are still in flight, not counted.
+export function processedCount(status: CrmExtractionStatus): number {
+  return status.counts.done + status.counts.skipped + status.counts.error;
+}
+
+// Poll fast while a run is active so the indicator feels live; fall back to the
+// list's ambient cadence otherwise. Undefined (first load) polls at the idle
+// rate. Feeds react-query's refetchInterval.
+export function extractionRefetchMs(status: CrmExtractionStatus | undefined): number {
+  return status?.runState === "running" ? 3000 : 30_000;
+}
+
+// The single view model behind both the toolbar status line and the empty
+// state. Returns null before the first status resolves (nothing to show yet).
+export function extractionView(
+  status: CrmExtractionStatus | undefined,
+  nowMs: number,
+): ExtractionView | null {
+  if (!status) return null;
+  const hasAccount = status.source !== null;
+  const processed = processedCount(status);
+  const suffix = processed > 0 ? ` · ${processed.toLocaleString()} processed` : "";
+
+  if (status.runState === "running") {
+    return {
+      tone: "running",
+      live: true,
+      label: processed > 0 ? `Scanning your mail — ${processed.toLocaleString()} processed` : "Scanning your mail…",
+      hasAccount,
+      canStart: false,
+      startLabel: "",
+    };
+  }
+  if (status.runState === "paused") {
+    return { tone: "paused", live: false, label: `Paused${suffix}`, hasAccount, canStart: hasAccount, startLabel: "Resume" };
+  }
+  if (status.runState === "disabled") {
+    return { tone: "disabled", live: false, label: "Extraction off", hasAccount, canStart: false, startLabel: "" };
+  }
+  // idle — never started this session (the pipeline stays "running" once it is,
+  // so idle almost always means "has not run for this user yet").
+  if (!hasAccount) {
+    return {
+      tone: "idle",
+      live: false,
+      label: "Connect a Google account to build your directory",
+      hasAccount: false,
+      canStart: false,
+      startLabel: "",
+    };
+  }
+  if (status.lastActivityAt) {
+    return {
+      tone: "idle",
+      live: false,
+      label: `Updated ${relativeTime(status.lastActivityAt, nowMs)}${suffix}`,
+      hasAccount,
+      canStart: true,
+      startLabel: "Refresh",
+    };
+  }
+  return { tone: "idle", live: false, label: "Not started yet", hasAccount, canStart: true, startLabel: "Scan my mail" };
 }

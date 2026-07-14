@@ -4,11 +4,10 @@
 //   1. fetchMailbox — `gws` is the ONLY credential holder but not the data
 //      path: one `gws auth export --unmasked` spawn yields the refresh
 //      credentials, an access token is minted in-memory, and the mailbox is
-//      read over direct Gmail HTTP with the per-message gets running in
-//      parallel (a gws subprocess costs ~0.45s of process startup per call;
-//      one shared token over HTTPS reads the same window in a fraction of it).
-//      Pure given an injected `gwsSpawn` + `fetchImpl`, so it unit-tests with
-//      fakes.
+//      read over direct Gmail HTTP with recent-thread gets running in parallel.
+//      The prompt sees the same capped evidence while the normalized thread
+//      snapshot can be handed to People without downloading the mail twice.
+//      Pure given an injected `gwsSpawn` + `fetchImpl`, so it unit-tests with fakes.
 //   2. Synthesis — TWO parallel `generateStructured` calls turn the bundle
 //      into the profile and the suggestedTasks (generation is
 //      output-token-bound, so splitting the deliverables roughly halves wall
@@ -30,6 +29,8 @@ import { spawn } from "bun";
 
 import { generateStructured, type StructuredValidator } from "../provider";
 import { providerOverrideForRuntime } from "../execution/effective-context";
+import { gmailMessageToCrmMail } from "../integrations/crm-mail";
+import type { CrmMail } from "../jobs/crm-extraction-pipeline";
 import type { OnboardingProfile, RuntimeConfig } from "../types";
 import { validateScanProfile, validateScanTasks } from "./onboarding";
 
@@ -92,7 +93,8 @@ const GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 const MAX_INBOX_MESSAGES = 50;
 // How many recent sent messages to sample for voice/style.
 const MAX_SENT_MESSAGES = 15;
-// How many of the most-recent inbox messages to fetch full bodies for.
+// How many of the most-recent inbox messages expose bodies to synthesis. The
+// reusable thread snapshot remains complete for the later People handoff.
 const MAX_BODY_MESSAGES = 15;
 // Per-message body excerpt cap (chars).
 const MAX_BODY_CHARS = 2000;
@@ -179,18 +181,25 @@ async function gmailGet(fetchImpl: FetchImpl, accessToken: string, path: string)
   return doc && typeof doc === "object" ? (doc as Record<string, unknown>) : undefined;
 }
 
-// Parse a `messages list` response into the ordered id window (newest-first, as
-// Gmail returns them).
-function messageIdsFrom(doc: Record<string, unknown> | undefined): string[] {
+interface GmailMessageRef {
+  id: string;
+  threadId: string;
+}
+
+// Parse a `messages list` response into the ordered reference window
+// (newest-first, as Gmail returns it). Keeping threadId is what lets one full
+// thread download serve both onboarding and the later People backfill.
+function messageRefsFrom(doc: Record<string, unknown> | undefined): GmailMessageRef[] {
   const messages = doc?.messages;
   if (!Array.isArray(messages)) return [];
-  const ids: string[] = [];
+  const refs: GmailMessageRef[] = [];
   for (const m of messages) {
     if (m && typeof m === "object" && typeof (m as { id?: unknown }).id === "string") {
-      ids.push((m as { id: string }).id);
+      const { id, threadId } = m as { id: string; threadId?: unknown };
+      refs.push({ id, threadId: typeof threadId === "string" && threadId ? threadId : id });
     }
   }
-  return ids;
+  return refs;
 }
 
 // One matched message's compact metadata + optional body excerpt — the untrusted
@@ -209,6 +218,15 @@ export interface MailboxBundle {
   selfEmail?: string;
   inbox: MailboxMessage[];
   sent: MailboxMessage[];
+}
+
+// Complete, normalized recent Gmail threads fetched while assembling the
+// onboarding bundle. They are deliberately separate from the prompt-facing
+// bundle: profile/tasks still see the same capped evidence, while People can
+// consume the full normalized thread without downloading it again. The
+// snapshot is process-local handoff data and is never written to onboarding.
+export interface OnboardingMailboxSnapshot {
+  threads: Array<{ threadId: string; messages: CrmMail[] }>;
 }
 
 // Map one `messages get format=metadata` doc onto MailboxMessage.
@@ -310,52 +328,115 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T,
   return results;
 }
 
-// Fetch the metadata (all ids) + full body (the first `bodyCount` ids) for a
-// listed message window into MailboxMessages, FETCH_CONCURRENCY messages at a
-// time (each message's metadata + body gets stay sequential inside its worker
-// slot, so at most FETCH_CONCURRENCY requests are in flight). Best-effort per
-// message: a fetch/parse fault drops that message rather than failing the
-// scan; a body fault keeps the metadata-only message.
-async function fetchMessages(fetchImpl: FetchImpl, accessToken: string, ids: string[], bodyCount: number): Promise<MailboxMessage[]> {
-  const fetched = await mapWithConcurrency(ids, FETCH_CONCURRENCY, async (id, index): Promise<MailboxMessage | undefined> => {
-    let message: MailboxMessage | undefined;
+async function fallbackMessage(
+  fetchImpl: FetchImpl,
+  accessToken: string,
+  id: string,
+  includeBody: boolean,
+): Promise<MailboxMessage | undefined> {
+  if (includeBody) {
     try {
-      const doc = await gmailGet(
-        fetchImpl,
-        accessToken,
-        `messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`
-      );
-      if (doc) message = metadataMessage(doc);
-    } catch {
-      message = undefined;
-    }
-    if (!message) return undefined;
-    if (index < bodyCount) {
-      try {
-        const body = extractBody(await gmailGet(fetchImpl, accessToken, `messages/${id}?format=full`));
+      const doc = await gmailGet(fetchImpl, accessToken, `messages/${id}?format=full`);
+      if (doc) {
+        const message = metadataMessage(doc);
+        const body = extractBody(doc);
         if (body) message.body = body;
-      } catch {
-        // Body fetch failed — keep the metadata-only message.
+        return message;
       }
+    } catch {
+      // Preserve the old best-effort behavior: a full-body fault still gets a
+      // metadata-only retry instead of dropping the evidence entirely.
+    }
+  }
+  try {
+    const doc = await gmailGet(
+      fetchImpl,
+      accessToken,
+      `messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`,
+    );
+    return doc ? metadataMessage(doc) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function fetchRecentThreads(
+  fetchImpl: FetchImpl,
+  accessToken: string,
+  refs: GmailMessageRef[],
+): Promise<{
+  documents: Map<string, Record<string, unknown>>;
+  failedThreads: Set<string>;
+  snapshot: OnboardingMailboxSnapshot;
+}> {
+  const threadIds = [...new Set(refs.map((ref) => ref.threadId))];
+  const fetched = await mapWithConcurrency(threadIds, FETCH_CONCURRENCY, async (threadId) => {
+    try {
+      const doc = await gmailGet(fetchImpl, accessToken, `threads/${encodeURIComponent(threadId)}?format=full`);
+      const messages = Array.isArray(doc?.messages)
+        ? doc.messages.filter((message): message is Record<string, unknown> => !!message && typeof message === "object")
+        : [];
+      return { threadId, messages, failed: false };
+    } catch {
+      return { threadId, messages: [], failed: true };
+    }
+  });
+  const documents = new Map<string, Record<string, unknown>>();
+  const failedThreads = new Set<string>();
+  const snapshot: OnboardingMailboxSnapshot = { threads: [] };
+  for (const thread of fetched) {
+    if (thread.failed) {
+      failedThreads.add(thread.threadId);
+      continue;
+    }
+    for (const message of thread.messages) {
+      if (typeof message.id === "string") documents.set(message.id, message);
+    }
+    const messages = thread.messages.map(gmailMessageToCrmMail).filter((message) => message.id.length > 0);
+    if (messages.length > 0) snapshot.threads.push({ threadId: thread.threadId, messages });
+  }
+  return { documents, failedThreads, snapshot };
+}
+
+async function projectMessages(
+  fetchImpl: FetchImpl,
+  accessToken: string,
+  refs: GmailMessageRef[],
+  documents: Map<string, Record<string, unknown>>,
+  failedThreads: Set<string>,
+  bodyCount: number,
+): Promise<MailboxMessage[]> {
+  const projected = await mapWithConcurrency(refs, FETCH_CONCURRENCY, async (ref, index) => {
+    const doc = documents.get(ref.id);
+    if (!doc) {
+      return failedThreads.has(ref.threadId)
+        ? await fallbackMessage(fetchImpl, accessToken, ref.id, index < bodyCount)
+        : undefined;
+    }
+    const message = metadataMessage(doc);
+    if (index < bodyCount) {
+      const body = extractBody(doc);
+      if (body) message.body = body;
     }
     return message;
   });
-  return fetched.filter((message): message is MailboxMessage => message !== undefined);
+  return projected.filter((message): message is MailboxMessage => message !== undefined);
 }
 
 // Assemble the deterministic mailbox bundle. One `gws auth export --unmasked`
 // spawn + one token mint is the auth gate: a missing/garbled export or a
 // refused mint returns `{ tokenValid: false }` so the caller can map it to the
 // no-signed-in-session failure without a synthesis call. With a token in hand,
-// everything is direct Gmail HTTP: resolve the self email, list ~7d inbox
-// (metadata for all, bodies for the most-recent handful) and a sent sample
-// (metadata only — sent mail evidences voice, not content), message gets in
-// parallel. Token/list/profile faults throw (the scan fails); a single message
-// get failing drops just that message.
+// everything is direct Gmail HTTP: resolve the self email, list ~7d inbox and
+// a sent sample, then fetch every UNIQUE referenced thread once in parallel.
+// The prompt projection still exposes bodies for only the most-recent inbox
+// handful and metadata-only sent mail; the complete normalized threads form a
+// process-local handoff for People. Token/list/profile faults throw (the scan
+// fails); a failed thread read falls back to the prior per-message path.
 export async function fetchMailbox(
   gwsSpawn: GwsSpawn,
   opts: { configDir?: string; fetchImpl?: FetchImpl } = {}
-): Promise<{ tokenValid: true; bundle: MailboxBundle } | { tokenValid: false }> {
+): Promise<{ tokenValid: true; bundle: MailboxBundle; snapshot: OnboardingMailboxSnapshot } | { tokenValid: false }> {
   const fetchImpl: FetchImpl = opts.fetchImpl ?? globalThis.fetch;
   const credentials = parseExportedCredentials(await gwsSpawn(["auth", "export", "--unmasked"], opts.configDir));
   if (!credentials) return { tokenValid: false };
@@ -364,15 +445,22 @@ export async function fetchMailbox(
   const profileDoc = await gmailGet(fetchImpl, accessToken, "profile");
   const email = profileDoc?.emailAddress;
   const selfEmail = typeof email === "string" && email.length > 0 ? email : undefined;
-  const inboxIds = messageIdsFrom(
+  const inboxRefs = messageRefsFrom(
     await gmailGet(fetchImpl, accessToken, `messages?q=${encodeURIComponent(`in:inbox newer_than:${INBOX_WINDOW}`)}&maxResults=${MAX_INBOX_MESSAGES}`)
   ).slice(0, MAX_INBOX_MESSAGES);
-  const sentIds = messageIdsFrom(
+  const sentRefs = messageRefsFrom(
     await gmailGet(fetchImpl, accessToken, `messages?q=${encodeURIComponent("in:sent")}&maxResults=${MAX_SENT_MESSAGES}`)
   ).slice(0, MAX_SENT_MESSAGES);
-  const inbox = await fetchMessages(fetchImpl, accessToken, inboxIds, MAX_BODY_MESSAGES);
-  const sent = await fetchMessages(fetchImpl, accessToken, sentIds, 0);
-  return { tokenValid: true, bundle: { ...(selfEmail ? { selfEmail } : {}), inbox, sent } };
+  const { documents, failedThreads, snapshot } = await fetchRecentThreads(
+    fetchImpl,
+    accessToken,
+    [...inboxRefs, ...sentRefs],
+  );
+  const [inbox, sent] = await Promise.all([
+    projectMessages(fetchImpl, accessToken, inboxRefs, documents, failedThreads, MAX_BODY_MESSAGES),
+    projectMessages(fetchImpl, accessToken, sentRefs, documents, failedThreads, 0),
+  ]);
+  return { tokenValid: true, bundle: { ...(selfEmail ? { selfEmail } : {}), inbox, sent }, snapshot };
 }
 
 // ── Synthesis prompts ────────────────────────────────────────────────────────
@@ -512,7 +600,12 @@ const tasksValidator: StructuredValidator<string[]> = {
 // unit-tests without a gws binary or network.
 export async function runProfileScan(
   config: RuntimeConfig,
-  opts: { gwsSpawn?: GwsSpawn; fetchImpl?: FetchImpl; configDir?: string } = {}
+  opts: {
+    gwsSpawn?: GwsSpawn;
+    fetchImpl?: FetchImpl;
+    configDir?: string;
+    onMailboxFetched?: (snapshot: OnboardingMailboxSnapshot) => void;
+  } = {}
 ): Promise<ProfileScanOutcome> {
   const gwsSpawn = opts.gwsSpawn ?? defaultGwsSpawn;
   try {
@@ -520,6 +613,7 @@ export async function runProfileScan(
     if (!fetched.tokenValid) {
       return { status: "failed", error: NO_SESSION_ERROR };
     }
+    opts.onMailboxFetched?.(fetched.snapshot);
     const providerOverride = providerOverrideForRuntime(config);
     const profilePrompt = buildProfilePrompt(fetched.bundle);
     const tasksPrompt = buildTasksPrompt(fetched.bundle);

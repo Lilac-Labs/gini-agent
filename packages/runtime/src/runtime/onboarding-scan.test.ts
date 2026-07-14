@@ -46,10 +46,12 @@ function fakeFetch(opts: {
   selfEmail?: string;
   inboxIds?: string[];
   sentIds?: string[];
+  threadIds?: Record<string, string>;
   metadata?: Record<string, { from?: string; to?: string; subject?: string; date?: string; snippet?: string }>;
   bodies?: Record<string, string>;
   failMetadataIds?: string[];
   failBodyIds?: string[];
+  failThreadIds?: string[];
   failList?: "inbox" | "sent";
   delayMs?: number;
 }): {
@@ -83,17 +85,58 @@ function fakeFetch(opts: {
         const isSent = q.includes("in:sent");
         if (opts.failList === (isSent ? "sent" : "inbox")) return new Response("boom", { status: 500 });
         const ids = (isSent ? opts.sentIds : opts.inboxIds) ?? [];
-        return Response.json({ messages: ids.map((id) => ({ id })) });
+        return Response.json({ messages: ids.map((id) => ({ id, threadId: opts.threadIds?.[id] ?? id })) });
+      }
+      const threadMatch = url.match(/\/users\/me\/threads\/([^?]+)\?/);
+      if (threadMatch) {
+        const threadId = decodeURIComponent(threadMatch[1]!);
+        if (opts.failThreadIds?.includes(threadId)) return new Response("boom", { status: 500 });
+        const ids = [...(opts.inboxIds ?? []), ...(opts.sentIds ?? [])].filter(
+          (id) => (opts.threadIds?.[id] ?? id) === threadId && !opts.failMetadataIds?.includes(id)
+        );
+        return Response.json({
+          id: threadId,
+          messages: ids.map((id) => {
+            const meta = opts.metadata?.[id] ?? {};
+            const headers = [
+              meta.from ? { name: "From", value: meta.from } : undefined,
+              meta.to ? { name: "To", value: meta.to } : undefined,
+              meta.subject ? { name: "Subject", value: meta.subject } : undefined,
+              meta.date ? { name: "Date", value: meta.date } : undefined
+            ].filter(Boolean);
+            const body = opts.failBodyIds?.includes(id) ? undefined : opts.bodies?.[id];
+            return {
+              id,
+              threadId,
+              internalDate: String(Date.parse(meta.date ?? "") || 0),
+              snippet: meta.snippet,
+              payload: {
+                headers,
+                ...(body ? { mimeType: "text/plain", body: { data: b64(body) } } : {})
+              }
+            };
+          })
+        });
       }
       const match = url.match(/\/users\/me\/messages\/([^?]+)\?(.*)$/);
       if (match) {
         const id = match[1]!;
         if (match[2]!.includes("format=full")) {
           if (opts.failBodyIds?.includes(id)) return new Response("boom", { status: 500 });
+          const meta = opts.metadata?.[id] ?? {};
+          const headers = [
+            meta.from ? { name: "From", value: meta.from } : undefined,
+            meta.to ? { name: "To", value: meta.to } : undefined,
+            meta.subject ? { name: "Subject", value: meta.subject } : undefined,
+            meta.date ? { name: "Date", value: meta.date } : undefined
+          ].filter(Boolean);
           const body = opts.bodies?.[id];
           return Response.json({
             snippet: opts.metadata?.[id]?.snippet,
-            payload: body ? { mimeType: "text/plain", body: { data: b64(body) } } : {}
+            payload: {
+              headers,
+              ...(body ? { mimeType: "text/plain", body: { data: b64(body) } } : {})
+            }
           });
         }
         if (opts.failMetadataIds?.includes(id)) return new Response("boom", { status: 500 });
@@ -173,6 +216,10 @@ describe("onboarding scan pipeline", () => {
     expect(result.bundle.sent[0]?.subject).toBe("Re: Q3 plan");
     // Sent messages are metadata-only (voice evidence, not content).
     expect(result.bundle.sent[0]?.body).toBeUndefined();
+    // Inbox + sent messages sharing a Gmail thread are downloaded once, and
+    // the complete normalized thread is handed to the later People backfill.
+    expect(gmailRequests.filter((r) => r.url.includes("/threads/")).length).toBe(3);
+    expect(result.snapshot.threads.map((thread) => thread.threadId)).toEqual(["i1", "i2", "s1"]);
   });
 
   test("fetchMailbox treats a garbled or credential-less export as signed out without touching the network", async () => {
@@ -206,7 +253,8 @@ describe("onboarding scan pipeline", () => {
     const inboxIds = Array.from({ length: 80 }, (_, i) => `i${i}`);
     const metadata = Object.fromEntries(inboxIds.map((id) => [id, { from: `${id}@x.com`, subject: id }]));
     const { spawn } = fakeExportSpawn();
-    const { fetchImpl, gmailRequests } = fakeFetch({ selfEmail: "me@example.com", inboxIds, sentIds: [], metadata });
+    const bodies = Object.fromEntries(inboxIds.map((id) => [id, `body ${id}`]));
+    const { fetchImpl, gmailRequests } = fakeFetch({ selfEmail: "me@example.com", inboxIds, sentIds: [], metadata, bodies });
 
     const result = await fetchMailbox(spawn, { fetchImpl });
 
@@ -217,9 +265,12 @@ describe("onboarding scan pipeline", () => {
     expect(listUrls[0]?.url).toContain("maxResults=50");
     // The inbox is capped at 50 messages regardless of how many were listed.
     expect(result.bundle.inbox).toHaveLength(50);
-    // Full-body fetches (format=full) are capped at 15, not one per message.
-    const fullGets = gmailRequests.filter((r) => r.url.includes("format=full"));
-    expect(fullGets).toHaveLength(15);
+    // Each unique recent thread is fetched once. Only the first 15 inbox
+    // messages expose bodies to the synthesis prompt even though the reusable
+    // thread snapshot contains normalized content for People.
+    const fullGets = gmailRequests.filter((r) => r.url.includes("/threads/") && r.url.includes("format=full"));
+    expect(fullGets).toHaveLength(50);
+    expect(result.bundle.inbox.filter((message) => message.body !== undefined)).toHaveLength(15);
   });
 
   test("fetchMailbox runs message gets in parallel with at most 8 in flight", async () => {
@@ -236,6 +287,31 @@ describe("onboarding scan pipeline", () => {
     // The worker pool overlaps requests but never exceeds the concurrency cap.
     expect(maxInFlight()).toBeGreaterThan(1);
     expect(maxInFlight()).toBeLessThanOrEqual(8);
+  });
+
+  test("fetchMailbox downloads a shared inbox/sent thread once and snapshots every message in it", async () => {
+    const { spawn } = fakeExportSpawn();
+    const { fetchImpl, gmailRequests } = fakeFetch({
+      selfEmail: "me@example.com",
+      inboxIds: ["i1"],
+      sentIds: ["s1"],
+      threadIds: { i1: "t-shared", s1: "t-shared" },
+      metadata: {
+        i1: { from: "boss@corp.com", to: "me@example.com", subject: "Plan", date: "2026-07-13T10:00:00Z" },
+        s1: { from: "me@example.com", to: "boss@corp.com", subject: "Re: Plan", date: "2026-07-13T11:00:00Z" }
+      },
+      bodies: { i1: "Can we review this?", s1: "Yes, this afternoon." }
+    });
+
+    const result = await fetchMailbox(spawn, { fetchImpl });
+
+    expect(result.tokenValid).toBe(true);
+    if (!result.tokenValid) throw new Error("unreachable");
+    expect(gmailRequests.filter((request) => request.url.includes("/threads/t-shared?format=full"))).toHaveLength(1);
+    expect(result.bundle.inbox[0]?.body).toBe("Can we review this?");
+    expect(result.bundle.sent[0]?.body).toBeUndefined();
+    expect(result.snapshot.threads).toHaveLength(1);
+    expect(result.snapshot.threads[0]?.messages.map((message) => message.id)).toEqual(["i1", "s1"]);
   });
 
   test("fetchMailbox drops a message whose get fails and keeps a metadata-only message on a body failure", async () => {
@@ -265,6 +341,28 @@ describe("onboarding scan pipeline", () => {
     expect(result.bundle.inbox[1]?.body).toBe("body three");
   });
 
+  test("fetchMailbox falls back to the prior per-message path when a full thread read fails", async () => {
+    const { spawn } = fakeExportSpawn();
+    const { fetchImpl, gmailRequests } = fakeFetch({
+      selfEmail: "me@example.com",
+      inboxIds: ["i1"],
+      sentIds: [],
+      metadata: {
+        i1: { from: "boss@corp.com", to: "me@example.com", subject: "Fallback", date: "2026-07-13T10:00:00Z" }
+      },
+      bodies: { i1: "Still available through messages.get." },
+      failThreadIds: ["i1"]
+    });
+
+    const result = await fetchMailbox(spawn, { fetchImpl });
+
+    expect(result.tokenValid).toBe(true);
+    if (!result.tokenValid) throw new Error("unreachable");
+    expect(result.bundle.inbox[0]).toMatchObject({ subject: "Fallback", body: "Still available through messages.get." });
+    expect(result.snapshot.threads).toEqual([]);
+    expect(gmailRequests.some((request) => request.url.includes("/messages/i1?format=full"))).toBe(true);
+  });
+
   test("a list-level failure fails the scan", async () => {
     const { spawn } = fakeExportSpawn();
     const { fetchImpl } = fakeFetch({ selfEmail: "me@example.com", inboxIds: ["i1"], failList: "inbox" });
@@ -290,12 +388,18 @@ describe("onboarding scan pipeline", () => {
     });
     setEchoStructuredResponse("onboarding-scan-tasks", { suggestedTasks: ["Reply to boss about the plan"] });
 
-    const outcome = await runProfileScan(echoConfig(), { gwsSpawn: spawn, fetchImpl });
+    const snapshots: string[][] = [];
+    const outcome = await runProfileScan(echoConfig(), {
+      gwsSpawn: spawn,
+      fetchImpl,
+      onMailboxFetched: (snapshot) => snapshots.push(snapshot.threads.map((thread) => thread.threadId))
+    });
 
     expect(outcome.status).toBe("ready");
     if (outcome.status !== "ready") throw new Error("unreachable");
     expect(outcome.profile.displayName).toBe("Ada Lovelace");
     expect(outcome.suggestedTasks).toEqual(["Reply to boss about the plan"]);
+    expect(snapshots).toEqual([["i1"]]);
   });
 
   test("runProfileScan lands ready without suggestions when the tasks call fails", async () => {

@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import {
   closeAllCrmExtractionDbs,
   closeCrmExtractionDb,
+  clearCrmCachedMessages,
   crmBroadcastSenders,
   crmExtractionDbPath,
   crmQueueCounts,
@@ -100,6 +101,7 @@ describe("crm-extraction-db", () => {
       primarySender: "friend@x.com",
       chars: 4000,
       senders: [{ sender: "friend@x.com", multiMessage: true, selfWrote: true }],
+      messagesJson: JSON.stringify([{ id: "m1", threadId: "d", date: 40 }]),
     });
     expect(crmBroadcastSenders(inst).has("friend@x.com")).toBe(false);
     const [d] = listCrmThreads(inst, ["ingested"]).filter((r) => r.thread_id === "d");
@@ -107,6 +109,21 @@ describe("crm-extraction-db", () => {
     expect(d!.has_human).toBe(1);
     expect(d!.primary_sender).toBe("friend@x.com");
     expect(d!.chars).toBe(4000);
+    expect(JSON.parse(d!.messages_json!)).toEqual([{ id: "m1", threadId: "d", date: 40 }]);
+    expect(clearCrmCachedMessages(inst)).toBe(1);
+    expect(listCrmThreads(inst, ["ingested"]).find((row) => row.thread_id === "d")!.messages_json).toBeNull();
+    // Restore the transient payload so the terminal-state clearing assertion
+    // below independently covers that path too.
+    markCrmThreadIngested(inst, "d", {
+      messageCount: 4,
+      newestDate: 40,
+      engaged: true,
+      hasHuman: true,
+      primarySender: "friend@x.com",
+      chars: 4000,
+      senders: [{ sender: "friend@x.com", multiMessage: true, selfWrote: true }],
+      messagesJson: JSON.stringify([{ id: "m1", threadId: "d", date: 40 }]),
+    });
     // hasHuman persists independently of engagement: the self-to-machine
     // shape (engaged, no human) must survive to the decide phase.
     const [a] = listCrmThreads(inst, ["ingested"]).filter((r) => r.thread_id === "a");
@@ -148,6 +165,12 @@ describe("crm-extraction-db", () => {
     expect(requeueCrmErrors(inst)).toBe(1);
     drip("b");
     expect(rawStats("drip@vendor.com")).toEqual({ threads: 3, multi_threads: 0, self_wrote_threads: 0 });
+
+    // Terminal states discard the transient normalized email payload. A
+    // restart can resume an ingested row, but completed/skipped/error work
+    // never leaves a second raw mailbox copy in the queue database.
+    markCrmThreads(inst, ["d"], { status: "done" });
+    expect(listCrmThreads(inst, ["done"]).find((row) => row.thread_id === "d")!.messages_json).toBeNull();
   });
 
   test("marking updates status/error/attempts; counts add up; errors requeue", () => {
@@ -198,6 +221,7 @@ describe("crm-extraction-db", () => {
     expect(byId.get("h1")!.has_human).toBe(1); // human sender → human
     expect(byId.get("h2")!.has_human).toBe(1); // engaged (old proxy) → human
     expect(byId.get("h3")!.has_human).toBe(0);
+    expect(byId.get("h1")!.messages_json).toBeNull();
     // Rows that ever left 'pending' already contributed to sender_stats.
     for (const id of ["h1", "h2", "h3"]) expect(byId.get(id)!.senders_counted).toBe(1);
   });

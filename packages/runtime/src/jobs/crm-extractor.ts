@@ -17,6 +17,7 @@ import { readState, mutateState, createSubagentRecord } from "../state";
 import { dbExecute, dbQuery } from "../state/agent-data-db";
 import {
   crmBroadcastSenders,
+  clearCrmCachedMessages,
   crmQueueCounts,
   enqueueCrmThreads,
   getCrmMeta,
@@ -38,6 +39,7 @@ import {
   buildTurnMessage,
   decideThread,
   makeSelfMatcher,
+  type CrmMail,
 } from "./crm-extraction-pipeline";
 import { submitTask } from "../agent";
 import { projectRoot } from "../paths";
@@ -78,6 +80,53 @@ interface ExtractorHandle {
 }
 
 const handles = new Map<Instance, ExtractorHandle>();
+
+// Recent complete threads fetched by onboarding before the People backfill
+// starts. Process-local by design: a restart simply falls back to Gmail, while
+// the normal path avoids persisting a second bootstrap mailbox. Keys include
+// account id because Gmail thread ids are only account-scoped.
+const onboardingThreads = new Map<Instance, Map<string, CrmMail[]>>();
+
+function onboardingThreadKey(accountId: string, threadId: string): string {
+  return `${accountId}\0${threadId}`;
+}
+
+export function primeCrmExtractionThreads(
+  instance: Instance,
+  accountId: string,
+  threads: Array<{ threadId: string; messages: CrmMail[] }>,
+): void {
+  if (threads.length === 0) return;
+  let cache = onboardingThreads.get(instance);
+  if (!cache) {
+    cache = new Map();
+    onboardingThreads.set(instance, cache);
+  }
+  for (const thread of threads) {
+    if (thread.messages.length > 0) cache.set(onboardingThreadKey(accountId, thread.threadId), thread.messages);
+  }
+}
+
+function takeOnboardingThread(
+  instance: Instance,
+  accountId: string,
+  threadId: string,
+  newestDate: number,
+): CrmMail[] | undefined {
+  const cache = onboardingThreads.get(instance);
+  if (!cache) return undefined;
+  const key = onboardingThreadKey(accountId, threadId);
+  const messages = cache.get(key);
+  cache.delete(key);
+  if (cache.size === 0) onboardingThreads.delete(instance);
+  if (!messages) return undefined;
+  // A message may arrive while the user is still in the wizard. The full
+  // mailbox list is authoritative: a snapshot older than its queue row must
+  // never hide that arrival, so discard it and refetch the current thread.
+  let snapshotNewest = 0;
+  for (const message of messages) snapshotNewest = Math.max(snapshotNewest, message.date);
+  return snapshotNewest >= newestDate ? messages : undefined;
+}
 
 function handleFor(instance: Instance): ExtractorHandle {
   let h = handles.get(instance);
@@ -324,6 +373,7 @@ async function runTurn(
   subagentId: string,
   accounts: CrmMailAccount[],
   accountByThread: Map<string, string>,
+  messagesByThread: Map<string, CrmMail[]>,
   selfEmail: string,
   threadIds: string[],
 ): Promise<void> {
@@ -332,7 +382,7 @@ async function runTurn(
     const batch: { threadId: string; msgs: Awaited<ReturnType<CrmMailSource["fetchThread"]>> }[] = [];
     for (const threadId of threadIds) {
       const account = accountFor(accounts, accountByThread.get(threadId) ?? "");
-      const msgs = await account.source.fetchThread(threadId);
+      const msgs = messagesByThread.get(threadId) ?? await account.source.fetchThread(threadId);
       if (msgs.length > 0) batch.push({ threadId, msgs });
     }
     if (batch.length === 0) {
@@ -471,13 +521,21 @@ async function runLoopIteration(config: RuntimeConfig, handle: ExtractorHandle):
     await mapPool(pending, INGEST_CONCURRENCY, async (row) => {
       if (handle.stopRequested) return;
       try {
-        const msgs = await accountFor(accounts, row.account).source.fetchThread(row.thread_id);
+        const account = accountFor(accounts, row.account);
+        const msgs = takeOnboardingThread(instance, account.accountId, row.thread_id, row.newest_date)
+          ?? await account.source.fetchThread(row.thread_id);
         if (msgs.length === 0) {
           markCrmThreads(instance, [row.thread_id], { status: "skipped", error: "thread vanished from source" });
           return;
         }
         const analysis = analyzeThread(msgs, isSelf);
-        markCrmThreadIngested(instance, row.thread_id, analysis);
+        markCrmThreadIngested(instance, row.thread_id, {
+          ...analysis,
+          // Only plausible curator candidates need to cross the phase boundary.
+          // Definite skips retain no raw payload; broadcast candidates are
+          // cleared if the phase-2 aggregate later rejects them.
+          messagesJson: analysis.engaged && analysis.hasHuman ? JSON.stringify(msgs) : null,
+        });
       } catch (error) {
         markCrmThreads(instance, [row.thread_id], {
           status: "error",
@@ -507,13 +565,28 @@ async function runLoopIteration(config: RuntimeConfig, handle: ExtractorHandle):
       const subagent = await ensureCuratorSubagent(config, agentId);
       seedSelfRow(instance, agentId, primary.email);
       const accountByThread = new Map(keeps.map((r) => [r.thread_id, r.account]));
+      const messagesByThread = new Map<string, CrmMail[]>();
+      for (const row of keeps) {
+        const messages = parseCachedMessages(row.messages_json);
+        if (messages) messagesByThread.set(row.thread_id, messages);
+      }
       const batches = batchByPrimary(
         keeps.map((r) => ({ threadId: r.thread_id, primarySender: r.primary_sender, chars: r.chars })),
       );
       appendLog(instance, "crm.extraction.wave", { threads: keeps.length, turns: batches.length });
       await mapPool(batches, TURN_WORKERS, async (batch) => {
         if (handle.stopRequested) return;
-        await runTurn(config, handle, agentId, subagent.id, accounts, accountByThread, primary.email, batch);
+        await runTurn(
+          config,
+          handle,
+          agentId,
+          subagent.id,
+          accounts,
+          accountByThread,
+          messagesByThread,
+          primary.email,
+          batch,
+        );
       });
     }
     return;
@@ -672,8 +745,34 @@ export async function disableCrmExtraction(config: RuntimeConfig): Promise<CrmEx
   const instance = config.instance;
   setCrmRunState(instance, "disabled");
   handleFor(instance).stopRequested = true;
+  onboardingThreads.delete(instance);
+  clearCrmCachedMessages(instance);
   appendLog(instance, "crm.extraction.disabled", {});
   return crmExtractionStatus(config);
+}
+
+function parseCachedMessages(raw: string | null): CrmMail[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return undefined;
+    const messages = parsed.filter((value): value is CrmMail => {
+      if (!value || typeof value !== "object") return false;
+      const message = value as Partial<CrmMail>;
+      return (
+        typeof message.id === "string"
+        && typeof message.threadId === "string"
+        && typeof message.date === "number"
+        && Array.isArray(message.to)
+        && Array.isArray(message.cc)
+        && typeof message.subject === "string"
+        && typeof message.body === "string"
+      );
+    });
+    return messages.length === parsed.length && messages.length > 0 ? messages : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // Master switch back on: returns a disabled pipeline to idle (it does NOT

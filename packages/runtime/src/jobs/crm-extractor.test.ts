@@ -14,12 +14,13 @@ import {
   disableCrmExtraction,
   enableCrmExtraction,
   pauseCrmExtraction,
+  primeCrmExtractionThreads,
   reconcileCrmExtraction,
   startCrmExtraction,
 } from "./crm-extractor";
 import type { CrmMail } from "./crm-extraction-pipeline";
 import type { CrmMailSource } from "../integrations/crm-mail";
-import { crmQueueCounts, enqueueCrmThreads, getCrmMeta, listCrmThreads, markCrmThreads, setCrmMeta, setCrmRunState, closeAllCrmExtractionDbs, getCrmRunState } from "../state/crm-extraction-db";
+import { crmQueueCounts, enqueueCrmThreads, getCrmMeta, listCrmThreads, markCrmThreadIngested, markCrmThreads, setCrmMeta, setCrmRunState, closeAllCrmExtractionDbs, getCrmRunState } from "../state/crm-extraction-db";
 import { closeAllAgentDataDbs, dbExecute, dbQuery } from "../state/agent-data-db";
 import { closeAllMemoryDbs, mutateState, readState, readTrace } from "../state";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -107,7 +108,15 @@ describe("crm-extractor", () => {
       mail({ id: "m3", threadId: "T-cold", date: 3_000, from: { address: "sdr@pitch.io" }, to: [{ address: SELF }] }),
     ];
     setCrmMeta(instance, "self_email", SELF);
-    __setCrmMailSourceForTests(instance, mutableSource(messages));
+    const inner = mutableSource(messages);
+    const fetchCounts = new Map<string, number>();
+    __setCrmMailSourceForTests(instance, {
+      ...inner,
+      async fetchThread(threadId) {
+        fetchCounts.set(threadId, (fetchCounts.get(threadId) ?? 0) + 1);
+        return inner.fetchThread(threadId);
+      },
+    });
 
     const status = await startCrmExtraction(config);
     expect(status.runState).toBe("running");
@@ -125,6 +134,9 @@ describe("crm-extractor", () => {
     const [doneRow] = listCrmThreads(instance, ["done"]);
     expect(doneRow!.thread_id).toBe("T-eng");
     expect(doneRow!.task_id).toBeTruthy();
+    expect(fetchCounts.get("T-eng")).toBe(1);
+    expect(fetchCounts.get("T-cold")).toBe(1);
+    expect(doneRow!.messages_json).toBeNull();
 
     // Curator persona: constrained, memory-off, owned by the default agent.
     const state = readState(instance);
@@ -316,6 +328,86 @@ describe("crm-extractor", () => {
       process.env.HOME = prevHome;
     }
   });
+
+  test("a fresh onboarding snapshot feeds People without another thread download", async () => {
+    const instance = "crmx-onboarding-snapshot";
+    const config = makeConfig(instance);
+    await install(config);
+    setEchoToolCallingResponse({ provider: normalizeProvider(config.provider), text: "ok", toolCalls: [], finishReason: "stop" });
+    const cached = mail({
+      id: "snap-1",
+      threadId: "T-snapshot",
+      date: 2_000,
+      from: { address: SELF },
+      to: [{ address: "friend@x.com" }],
+      body: "Downloaded during onboarding.",
+    });
+    let fetches = 0;
+    __setCrmMailSourcesForTests(instance, [{
+      accountId: "gacct_primary",
+      email: SELF,
+      source: {
+        kind: "fixture",
+        async listMessages(afterMs?: number) {
+          return !afterMs || cached.date > afterMs
+            ? [{ id: cached.id, threadId: cached.threadId, internalDate: cached.date }]
+            : [];
+        },
+        async fetchThread() {
+          fetches += 1;
+          throw new Error("fresh snapshot should satisfy the thread read");
+        },
+      },
+    }]);
+    primeCrmExtractionThreads(instance, "gacct_primary", [{ threadId: cached.threadId, messages: [cached] }]);
+
+    await startCrmExtraction(config);
+    await until("snapshot-backed thread completes", () => crmQueueCounts(instance).done === 1);
+
+    expect(fetches).toBe(0);
+    const task = readState(instance).tasks.find((row) => row.subagentId && row.input.includes("Downloaded during onboarding."));
+    expect(task).toBeDefined();
+    await pauseCrmExtraction(config);
+    await __awaitCrmLoopExitForTests(instance);
+    __setCrmMailSourcesForTests(instance, undefined);
+  }, 90_000);
+
+  test("People refetches a thread when the onboarding snapshot predates the mailbox list", async () => {
+    const instance = "crmx-stale-onboarding-snapshot";
+    const config = makeConfig(instance);
+    await install(config);
+    setEchoToolCallingResponse({ provider: normalizeProvider(config.provider), text: "ok", toolCalls: [], finishReason: "stop" });
+    const stale = mail({ id: "old", threadId: "T-stale", date: 1_000, from: { address: SELF }, to: [{ address: "friend@x.com" }] });
+    const current = mail({ id: "new", threadId: "T-stale", date: 2_000, from: { address: "friend@x.com" }, to: [{ address: SELF }], body: "Arrived during onboarding." });
+    let fetches = 0;
+    __setCrmMailSourcesForTests(instance, [{
+      accountId: "gacct_primary",
+      email: SELF,
+      source: {
+        kind: "fixture",
+        async listMessages(afterMs?: number) {
+          return [stale, current]
+            .filter((message) => !afterMs || message.date > afterMs)
+            .map((message) => ({ id: message.id, threadId: message.threadId, internalDate: message.date }));
+        },
+        async fetchThread() {
+          fetches += 1;
+          return [stale, current];
+        },
+      },
+    }]);
+    primeCrmExtractionThreads(instance, "gacct_primary", [{ threadId: stale.threadId, messages: [stale] }]);
+
+    await startCrmExtraction(config);
+    await until("stale snapshot thread completes", () => crmQueueCounts(instance).done === 1);
+
+    expect(fetches).toBe(1);
+    const task = readState(instance).tasks.find((row) => row.subagentId && row.input.includes("Arrived during onboarding."));
+    expect(task).toBeDefined();
+    await pauseCrmExtraction(config);
+    await __awaitCrmLoopExitForTests(instance);
+    __setCrmMailSourcesForTests(instance, undefined);
+  }, 90_000);
 
   test("boot reconcile resumes a pipeline that was running when the process died", async () => {
     const instance = "crmx-reconcile";
@@ -631,9 +723,10 @@ describe("crm-extractor", () => {
     __setCrmMailSourceForTests(instance, undefined);
   }, 30_000);
 
-  test("a turn-time fetch failure costs one batch, not the loop", async () => {
-    // Phase-2 prefetch errors mark the batch error and the loop stays alive
-    // — a thrown turn would strand the other workers headless.
+  test("a fallback turn-time fetch failure costs one batch, not the loop", async () => {
+    // An ingested row from before the transient-payload column (or a corrupt
+    // cache entry) still falls back to the source. A phase-2 fetch error marks
+    // only that batch and leaves the loop alive.
     const instance = "crmx-turn-fetch-fail";
     const config = makeConfig(instance);
     await install(config);
@@ -641,18 +734,30 @@ describe("crm-extractor", () => {
     setCrmMeta(instance, "self_email", SELF);
     const good = mail({ id: "g1", threadId: "T-good", date: 1_000, from: { address: SELF }, to: [{ address: "pal@z.com" }] });
     const doomed = mail({ id: "x1", threadId: "T-doomed", date: 2_000, from: { address: SELF }, to: [{ address: "other@z.com" }] });
-    const fetches = new Map<string, number>();
+    setCrmMeta(instance, "backfill_seeded", "1");
+    setCrmMeta(instance, "mail_cursor", "2000");
+    enqueueCrmThreads(instance, [
+      { threadId: good.threadId, newestDate: good.date },
+      { threadId: doomed.threadId, newestDate: doomed.date },
+    ]);
+    const ingest = (message: CrmMail): void => markCrmThreadIngested(instance, message.threadId, {
+      messageCount: 1,
+      newestDate: message.date,
+      engaged: true,
+      hasHuman: true,
+      primarySender: message.to[0]?.address ?? null,
+      chars: message.body.length,
+      senders: [],
+      // Deliberately absent: this exercises the compatibility fallback.
+      messagesJson: null,
+    });
+    ingest(good);
+    ingest(doomed);
     __setCrmMailSourceForTests(instance, {
       kind: "fixture",
-      async listMessages(afterMs?: number) {
-        return [good, doomed]
-          .filter((m) => !afterMs || m.date > afterMs)
-          .map((m) => ({ id: m.id, threadId: m.threadId, internalDate: m.date }));
-      },
+      async listMessages() { return []; },
       async fetchThread(threadId: string) {
-        fetches.set(threadId, (fetches.get(threadId) ?? 0) + 1);
-        // T-doomed ingests fine, then explodes at turn time (second fetch).
-        if (threadId === "T-doomed" && fetches.get(threadId)! > 1) throw new Error("fetch died mid-turn");
+        if (threadId === "T-doomed") throw new Error("fetch died mid-turn");
         return [good, doomed].filter((m) => m.threadId === threadId);
       },
     });

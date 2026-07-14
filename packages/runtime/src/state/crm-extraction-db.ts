@@ -36,6 +36,10 @@ export interface CrmQueueRow {
   task_id: string | null;
   error: string | null;
   processed_at: number | null;
+  // Transient normalized messages for an ingested candidate. This bridges the
+  // deterministic filter to the curator turn without a second Gmail read and
+  // is cleared as soon as the row reaches any terminal state.
+  messages_json: string | null;
 }
 
 const cache = new Map<string, Database>();
@@ -65,7 +69,8 @@ export function getCrmExtractionDb(instance: Instance): Database {
     attempts INTEGER NOT NULL DEFAULT 0,
     task_id TEXT,
     error TEXT,
-    processed_at INTEGER
+    processed_at INTEGER,
+    messages_json TEXT
   )`);
   // Queues created before these columns existed: add them and approximate.
   // has_human: a human primary sender, or engagement, was the old
@@ -86,6 +91,9 @@ export function getCrmExtractionDb(instance: Instance): Database {
   }
   if (!queueCols.has("account")) {
     db.exec("ALTER TABLE thread_queue ADD COLUMN account TEXT NOT NULL DEFAULT ''");
+  }
+  if (!queueCols.has("messages_json")) {
+    db.exec("ALTER TABLE thread_queue ADD COLUMN messages_json TEXT");
   }
   // Sender behavior accumulated at ingest time; the behavioral broadcast
   // filter (≥3 threads, all single-message, user never wrote) reads these
@@ -165,7 +173,7 @@ export function enqueueCrmThreads(
     "INSERT OR IGNORE INTO thread_queue (thread_id, account, newest_date) VALUES (?, ?, ?)",
   );
   const reopen = db.prepare(
-    `UPDATE thread_queue SET status = 'pending', account = ?, newest_date = ?, error = NULL
+    `UPDATE thread_queue SET status = 'pending', account = ?, newest_date = ?, error = NULL, messages_json = NULL
      WHERE thread_id = ? AND status IN ('done', 'skipped', 'error') AND newest_date < ?`,
   );
   let added = 0;
@@ -212,6 +220,7 @@ export function markCrmThreadIngested(
     primarySender: string | null;
     chars: number;
     senders: { sender: string; multiMessage: boolean; selfWrote: boolean }[];
+    messagesJson?: string | null;
   },
 ): void {
   const db = getCrmExtractionDb(instance);
@@ -221,8 +230,17 @@ export function markCrmThreadIngested(
   const tx = db.transaction(() => {
     db.run(
       `UPDATE thread_queue SET status = 'ingested', message_count = ?, newest_date = ?, engaged = ?,
-        has_human = ?, senders_counted = 1, primary_sender = ?, chars = ? WHERE thread_id = ?`,
-      [info.messageCount, info.newestDate, info.engaged ? 1 : 0, info.hasHuman ? 1 : 0, info.primarySender, info.chars, threadId],
+        has_human = ?, senders_counted = 1, primary_sender = ?, chars = ?, messages_json = ? WHERE thread_id = ?`,
+      [
+        info.messageCount,
+        info.newestDate,
+        info.engaged ? 1 : 0,
+        info.hasHuman ? 1 : 0,
+        info.primarySender,
+        info.chars,
+        info.messagesJson ?? null,
+        threadId,
+      ],
     );
     // Sender aggregates: only the first ingest of a thread contributes —
     // refining a reopened thread's counts is not worth the bookkeeping (the
@@ -251,7 +269,7 @@ export function markCrmThreads(
   const db = getCrmExtractionDb(instance);
   const stmt = db.prepare(
     `UPDATE thread_queue SET status = ?, task_id = COALESCE(?, task_id), error = ?,
-       processed_at = ?, attempts = attempts + ? WHERE thread_id = ?`,
+       processed_at = ?, attempts = attempts + ?, messages_json = NULL WHERE thread_id = ?`,
   );
   const at = Date.now();
   const tx = db.transaction(() => {
@@ -260,6 +278,15 @@ export function markCrmThreads(
     }
   });
   tx();
+}
+
+// Disabling extraction discards any not-yet-consumed normalized email payloads
+// while preserving the compact queue analyses needed to resume from pending
+// source reads if the user enables it again later.
+export function clearCrmCachedMessages(instance: Instance): number {
+  return getCrmExtractionDb(instance).run(
+    "UPDATE thread_queue SET messages_json = NULL WHERE messages_json IS NOT NULL",
+  ).changes;
 }
 
 export interface CrmQueueCounts {

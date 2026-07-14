@@ -25,8 +25,8 @@ import {
 import { print, printStartBanner } from "../output";
 import { COLOR, header, footer, step, info, warn, tildify } from "../styling";
 import { disableForUninstall, enable, stopViaBootout } from "./autostart";
-import { isLaunchdManaged, isLoaded, kickstart, plistPathFor, supervisor, type LaunchdManagedDeps, type PlistKind } from "../autostart";
-import { installedRuntimeDir, updateRuntime } from "../../runtime/update";
+import { isLaunchdManaged, isLoaded, kickstart, plistPathFor, readPlistWorkingDirectory, supervisor, type LaunchdManagedDeps, type PlistKind } from "../autostart";
+import { installedRuntimeDir, sameRealPath, updateRuntime } from "../../runtime/update";
 import { api, url } from "../api";
 
 // How long the foreground parent waits for a runtime child to exit on its own
@@ -311,11 +311,130 @@ export async function update(ctx: CliContext): Promise<void> {
   refreshInstalledWrapper();
   step(formatUpdateSummary(result));
 
-  if (await runningRuntimeNeedsRestart(ctx.config, result)) {
+  await convergeUpdatedInstance(ctx.config, ctx.web, result);
+}
+
+// Injectable seams for convergeUpdatedInstance so the rehome-vs-restart
+// ordering is unit-testable without real launchctl, git, or waits.
+// Defaults are the real impls.
+export interface UpdateConvergeDeps {
+  rehomeUpdatedInstance: (config: RuntimeConfig, web: WebOptions) => Promise<boolean>;
+  runningRuntimeNeedsRestart: (config: RuntimeConfig, result: UpdateRestartInput) => Promise<boolean>;
+  restartUpdatedInstance: (config: RuntimeConfig, web: WebOptions) => Promise<void>;
+}
+
+const DEFAULT_UPDATE_CONVERGE_DEPS: UpdateConvergeDeps = {
+  rehomeUpdatedInstance,
+  runningRuntimeNeedsRestart,
+  restartUpdatedInstance
+};
+
+// After the installed runtime is updated, converge the running instance onto
+// it. Two legs, in order:
+//
+//   1. Re-home: a launchd instance whose gateway plist home is not the
+//      installed runtime is re-homed onto it (which restarts its services on
+//      the new home). This is deliberately INDEPENDENT of the sha comparison
+//      below — a wrongly-homed checkout can sit at the very same sha as the
+//      freshly updated runtime (so `upToDate` and the /api/status sha both
+//      look clean) while every future respawn keeps executing the wrong
+//      checkout. `gini update`'s contract is "run the latest installed
+//      runtime", so the home converges even when no code changed. A re-home
+//      already restarted everything; the second leg is skipped.
+//   2. Restart: the existing sha-based check — restart the running instance
+//      when the update changed code or the runtime can't prove it's on the
+//      new sha.
+export async function convergeUpdatedInstance(
+  config: RuntimeConfig,
+  web: WebOptions,
+  result: UpdateRestartInput,
+  deps: UpdateConvergeDeps = DEFAULT_UPDATE_CONVERGE_DEPS
+): Promise<void> {
+  if (await deps.rehomeUpdatedInstance(config, web)) return;
+  if (await deps.runningRuntimeNeedsRestart(config, result)) {
     step("Restarting running instance");
-    await restartUpdatedInstance(ctx.config, ctx.web);
+    await deps.restartUpdatedInstance(config, web);
     step("Running instance restarted");
   }
+}
+
+// Injectable seams for rehomeUpdatedInstance so a unit test runs instantly
+// without real plists, launchctl, fetch, or wall-clock waits. Defaults are
+// the real impls.
+export interface RehomeUpdatedInstanceDeps {
+  // Reads the instance's gateway plist WorkingDirectory; null when the
+  // instance has no gateway plist (foreground / `gini run` / conductor —
+  // never re-homed).
+  gatewayPlistHome: (instance: string) => string | null;
+  installedRuntimeDir: typeof installedRuntimeDir;
+  enable: (options: { instance: string; kinds: PlistKind[]; homeDir: string }) => Promise<{ ok: boolean; error?: string }>;
+  isRunning: typeof isRunning;
+  existingWebUrl: typeof existingWebUrl;
+  sleep: (ms: number) => Promise<void>;
+  // Health-wait budget after the re-home's restart, mirroring
+  // startViaLaunchd's gate.
+  healthDeadlineMs: number;
+  healthIntervalMs: number;
+}
+
+const DEFAULT_REHOME_UPDATED_INSTANCE_DEPS: RehomeUpdatedInstanceDeps = {
+  gatewayPlistHome: (instance) => readPlistWorkingDirectory(plistPathFor(instance, "gateway")),
+  installedRuntimeDir,
+  enable,
+  isRunning,
+  existingWebUrl,
+  sleep: (ms) => Bun.sleep(ms),
+  healthDeadlineMs: 45_000,
+  healthIntervalMs: 500
+};
+
+// Re-home a launchd instance whose plists point anywhere other than the
+// installed runtime. `gini update` mutates ~/.gini/runtime, but a plist
+// homed on some other checkout keeps executing THAT checkout's code across
+// every respawn — the update never reaches the running instance. The plist
+// home is sticky by design (see resolveLaunchSpecPair in
+// src/cli/autostart.ts), so this is the one sanctioned mover:
+// enable({homeDir: installedRuntimeDir()}) regenerates the plists on the
+// installed runtime and restarts the services (bootout + bootstrap +
+// kickstart), then we wait for the gateway and web to come back healthy the
+// way startViaLaunchd does. The compare is realpath-based (a symlinked
+// ~/.gini/runtime must not read as wrongly homed), and a recorded home that
+// no longer exists fails the compare, so an instance homed on a deleted
+// checkout self-heals here too. Returns whether a re-home happened — the
+// caller then skips its own restart, because enable already restarted the
+// services.
+export async function rehomeUpdatedInstance(
+  config: RuntimeConfig,
+  web: WebOptions,
+  deps: RehomeUpdatedInstanceDeps = DEFAULT_REHOME_UPDATED_INSTANCE_DEPS
+): Promise<boolean> {
+  const instance = config.instance;
+  const currentHome = deps.gatewayPlistHome(instance);
+  if (currentHome === null) return false;
+  const installed = deps.installedRuntimeDir();
+  if (sameRealPath(currentHome, installed)) return false;
+  step(`Re-homing instance '${instance}' onto the installed runtime (was ${tildify(currentHome)}, now ${tildify(installed)})`);
+  const enabled = await deps.enable({ instance, kinds: ["gateway", "web", "watchdog"], homeDir: installed });
+  if (!enabled.ok) {
+    warn(`Re-home failed: ${enabled.error ?? "autostart enable failed"}. Recover with \`gini autostart enable --instance ${instance} --home ${installed}\`.`);
+    return true;
+  }
+  // enable's bootout+bootstrap+kickstart already restarted the services on
+  // the new home; wait for the gateway and web to answer again so the
+  // command doesn't report success while the instance is still booting.
+  const deadline = Date.now() + deps.healthDeadlineMs;
+  for (;;) {
+    const runtimeUp = await deps.isRunning(config);
+    const webUrl = runtimeUp ? await deps.existingWebUrl(config, web.webPort) : null;
+    if (runtimeUp && webUrl) {
+      step("Running instance restarted on the installed runtime");
+      return true;
+    }
+    if (Date.now() >= deadline) break;
+    await deps.sleep(deps.healthIntervalMs);
+  }
+  warn(`Instance did not report healthy within ${Math.round(deps.healthDeadlineMs / 1000)}s after re-home. Check \`gini status --instance ${instance}\`.`);
+  return true;
 }
 
 // Injectable seams for restartUpdatedInstance so the launchd-vs-foreground

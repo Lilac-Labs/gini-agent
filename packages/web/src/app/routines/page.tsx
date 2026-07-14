@@ -128,7 +128,12 @@ export default function RoutinesPage() {
           <>
             <h2 className="mt-8 text-[17px] font-semibold">My routines</h2>
             {mine.length === 0 && watcherList.length === 0 && customJobs.length === 0 ? (
-              <div className="mt-[18px] flex flex-col items-center justify-center rounded-xl border border-dashed border-border bg-card/50 px-6 py-16 text-center">
+              <div
+                className={cn(
+                  "mt-[18px] flex flex-col items-center justify-center rounded-xl border border-dashed border-border bg-card/50 px-6 text-center",
+                  suggestions.length > 0 ? "py-8" : "py-16"
+                )}
+              >
                 <p className="text-sm font-medium">No routines yet</p>
                 <p className="mt-1 text-xs text-muted-foreground">
                   Add a pre-built routine and it runs on a schedule.

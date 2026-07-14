@@ -10,8 +10,8 @@
 //      Pure given an injected `gwsSpawn` + `fetchImpl`, so it unit-tests with fakes.
 //   2. Synthesis — THREE parallel `generateStructured` calls turn the bundle
 //      into the profile, suggestedTasks, and suggestedRoutines (generation is
-//      output-token-bound, so splitting the deliverables roughly halves wall
-//      clock). The profile call is load-bearing; either suggestion call may
+//      output-token-bound, so separate calls keep the deliverables concurrent).
+//      The profile call is load-bearing; either suggestion call may
 //      fail independently and the scan still lands ready.
 //
 // runProfileScan orchestrates fetch → synthesize → validate/clamp and NEVER

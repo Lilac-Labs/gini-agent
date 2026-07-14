@@ -559,7 +559,7 @@ describe("onboarding scan pipeline", () => {
     expect(system).not.toContain("displayName");
   });
 
-  test("buildRoutinesPrompt carries the recurring-work rules verbatim", () => {
+  test("buildRoutinesPrompt requires evidence that work repeats", () => {
     const { system } = buildRoutinesPrompt({
       selfEmail: "me@example.com",
       inbox: [{ from: "a@b.com", subject: "hi" }],
@@ -567,9 +567,12 @@ describe("onboarding scan pipeline", () => {
     });
 
     for (const marker of [
-      "3–5 high-value recurring automations",
-      "durable patterns or goals",
-      "never suggest a one-off task",
+      "up to 5 high-value recurring automations",
+      "at least two separate messages or threads",
+      "an explicit recurring cadence or trigger",
+      "Do not infer a routine from a single email",
+      "return fewer than 3",
+      "repeated trigger and a repeatable outcome",
       "Auto-inbox, Morning Briefing, or Meeting Briefing",
       "usesEmail true",
       "no speculation, sensitive-trait inference"

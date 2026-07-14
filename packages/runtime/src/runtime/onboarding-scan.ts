@@ -515,7 +515,13 @@ const ROUTINES_CONTENT_RULES = [
   '    { "name": "Draft a weekly founder update", "description": "Once a week, turn recent work and email context into a founder-update draft for review.", "usesEmail": true }',
   "  ]",
   "}",
-  "Rules: suggest 3–5 high-value recurring automations supported by durable patterns or goals in the mailbox. A routine must be repeatable work Gini can carry out with Gmail, Google Calendar, web research, and document drafting; never suggest a one-off task, a vague reminder, work only the user can perform, or an action that sends email without the user's review. Do not repeat the built-in Auto-inbox, Morning Briefing, or Meeting Briefing routines. Prefer specific outcomes over generic summaries. Use sentence-case names of 3–8 words and one concise description sentence that explains what recurs and what Gini produces. Set usesEmail true whenever the routine needs to read, classify, draft, or otherwise act on Gmail; false otherwise. State only needs supported by the mailbox — no speculation, sensitive-trait inference, embedded email addresses, or quoted private message text."
+  "Rules: suggest up to 5 high-value recurring automations.",
+  "These are routines, not one-off tasks. A suggestion qualifies only when the mailbox provides either (a) at least two separate messages or threads showing the same kind of work, or (b) an explicit recurring cadence or trigger.",
+  "Do not infer a routine from a single email, thread, meeting, project, deadline, or unresolved request, even when it is important; those belong in suggestedTasks. If fewer than 3 patterns qualify, return fewer than 3; if none qualify, return an empty list.",
+  "Each routine must pair a repeated trigger and a repeatable outcome Gini can carry out with Gmail, Google Calendar, web research, or document drafting. Its description must say when or what triggers it and what Gini produces each time.",
+  "Never suggest a vague reminder, work only the user can perform, or an action that sends email without the user's review. Do not repeat the built-in Auto-inbox, Morning Briefing, or Meeting Briefing routines.",
+  "Prefer specific outcomes over generic summaries. Use sentence-case names of 3–8 words and one concise description sentence. Set usesEmail true whenever the routine needs to read, classify, draft, or otherwise act on Gmail; false otherwise.",
+  "State only needs supported by the mailbox — no speculation, sensitive-trait inference, embedded email addresses, or quoted private message text."
 ].join("\n");
 
 // The mailbox is UNTRUSTED data — all three calls carry this so the model never

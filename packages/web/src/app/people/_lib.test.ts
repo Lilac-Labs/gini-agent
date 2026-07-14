@@ -140,8 +140,8 @@ describe("people/_lib extraction status", () => {
     expect(extractionView(undefined, NOW)).toBeNull();
   });
 
-  test("running: live dot, scanning label, sync still offered (poll now)", () => {
-    expect(extractionView(status({ runState: "running" }), NOW)).toEqual({
+  test("running with a queue backlog: pulsing dot, scanning label, syncable", () => {
+    expect(extractionView(status({ runState: "running", counts: { pending: 5, ingested: 0, done: 0, skipped: 0, error: 0 } }), NOW)).toEqual({
       tone: "running",
       live: true,
       label: "Scanning your mail…",
@@ -150,13 +150,33 @@ describe("people/_lib extraction status", () => {
     });
   });
 
-  test("running with progress: label carries the localized processed count", () => {
+  test("running with work in flight: label carries the localized processed count", () => {
     const v = extractionView(
-      status({ runState: "running", counts: { pending: 0, ingested: 0, done: 1200, skipped: 30, error: 4 } }),
+      status({ runState: "running", counts: { pending: 3, ingested: 0, done: 1200, skipped: 30, error: 4 } }),
       NOW,
     );
     expect(v?.label).toBe("Scanning your mail — 1,234 processed");
     expect(v?.live).toBe(true);
+  });
+
+  test("running with an in-flight turn but an empty queue still counts as working", () => {
+    const v = extractionView(status({ runState: "running", counts: { pending: 0, ingested: 0, done: 2, skipped: 0, error: 0 }, inFlightTurns: 1 }), NOW);
+    expect(v?.live).toBe(true);
+    expect(v?.label).toBe("Scanning your mail — 2 processed");
+  });
+
+  test("running with the backlog drained: calm 'Up to date', not a perpetual scan", () => {
+    expect(extractionView(status({ runState: "running", counts: { pending: 0, ingested: 0, done: 82, skipped: 1602, error: 0 } }), NOW)).toEqual({
+      tone: "running",
+      live: false,
+      label: "Up to date · 1,684 processed",
+      hasAccount: true,
+      canSync: true,
+    });
+  });
+
+  test("running, caught up with nothing processed yet: bare 'Up to date'", () => {
+    expect(extractionView(status({ runState: "running" }), NOW)?.label).toBe("Up to date");
   });
 
   test("paused: amber, syncable, keeps the processed suffix", () => {

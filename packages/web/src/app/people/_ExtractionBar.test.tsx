@@ -19,6 +19,14 @@ const RUNNING: ExtractionView = {
   canSync: true,
 };
 
+const CAUGHT_UP: ExtractionView = {
+  tone: "running",
+  live: false,
+  label: "Up to date · 1,684 processed",
+  hasAccount: true,
+  canSync: true,
+};
+
 const IDLE_WITH_ACCOUNT: ExtractionView = {
   tone: "idle",
   live: false,
@@ -52,6 +60,14 @@ describe("ExtractionBar", () => {
     expect(screen.getByText("Scanning your mail — 3 processed")).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Sync" }));
     expect(onSync).toHaveBeenCalledTimes(1);
+  });
+
+  test("running but caught up: static (non-pulsing) dot, 'Up to date', sync still offered", () => {
+    render(<ExtractionBar view={CAUGHT_UP} pending={false} onSync={() => {}} />);
+    expect(screen.getByTestId("extraction-dot")).not.toBeNull();
+    expect(screen.queryByTestId("extraction-dot-live")).toBeNull();
+    expect(screen.getByText("Up to date · 1,684 processed")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Sync" })).not.toBeNull();
   });
 
   test("idle with a mailbox: static dot + a Sync control that fires onSync", () => {

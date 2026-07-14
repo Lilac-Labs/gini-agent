@@ -130,10 +130,24 @@ export function extractionView(
   const suffix = processed > 0 ? ` · ${processed.toLocaleString()} processed` : "";
 
   if (status.runState === "running") {
+    // "running" is a persistent state — the watcher keeps polling forever once
+    // caught up. Only pulse "Scanning…" while work is actually in flight; once
+    // the backlog drains, settle to a calm "Up to date" so a live watcher with
+    // nothing to do doesn't look like it's forever mid-scan.
+    const working = status.counts.pending + status.counts.ingested > 0 || status.inFlightTurns > 0;
+    if (working) {
+      return {
+        tone: "running",
+        live: true,
+        label: processed > 0 ? `Scanning your mail — ${processed.toLocaleString()} processed` : "Scanning your mail…",
+        hasAccount,
+        canSync,
+      };
+    }
     return {
       tone: "running",
-      live: true,
-      label: processed > 0 ? `Scanning your mail — ${processed.toLocaleString()} processed` : "Scanning your mail…",
+      live: false,
+      label: processed > 0 ? `Up to date · ${processed.toLocaleString()} processed` : "Up to date",
       hasAccount,
       canSync,
     };

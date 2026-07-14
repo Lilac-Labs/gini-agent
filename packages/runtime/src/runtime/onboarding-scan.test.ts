@@ -2,7 +2,7 @@
 // (src/runtime/onboarding-scan.ts). A fake `gwsSpawn` serves the one
 // `auth export --unmasked` call and a fake `fetchImpl` routes the token mint +
 // every Gmail read, so fetchMailbox is exercised without a binary or network;
-// the echo provider stubs the two parallel synthesis calls so runProfileScan
+// the echo provider stubs the three parallel synthesis calls so runProfileScan
 // never reaches a model. Hermetic: GINI_STATE_ROOT points at a scratch dir so
 // providerOverrideForRuntime's state read never touches the developer machine.
 
@@ -12,7 +12,7 @@ import { join } from "node:path";
 
 import { clearEchoStructuredResponses, setEchoStructuredResponse } from "../provider";
 import type { FetchImpl, GwsSpawn } from "./onboarding-scan";
-import { buildProfilePrompt, buildTasksPrompt, fetchMailbox, runProfileScan } from "./onboarding-scan";
+import { buildProfilePrompt, buildRoutinesPrompt, buildTasksPrompt, fetchMailbox, runProfileScan } from "./onboarding-scan";
 import type { RuntimeConfig } from "../types";
 
 // Base64url-encode a plain-text body the way Gmail returns part data.
@@ -375,7 +375,7 @@ describe("onboarding scan pipeline", () => {
     expect(outcome.error).toContain("Gmail request failed");
   });
 
-  test("runProfileScan maps stubbed profile and tasks calls to ready with both deliverables", async () => {
+  test("runProfileScan maps all three synthesis calls to one ready scan", async () => {
     const { spawn } = fakeExportSpawn();
     const { fetchImpl } = fakeFetch({
       selfEmail: "me@example.com",
@@ -387,6 +387,15 @@ describe("onboarding scan pipeline", () => {
       profile: { displayName: "Ada Lovelace", sections: [{ title: "Professional Identity", bullets: ["Engineer"] }] }
     });
     setEchoStructuredResponse("onboarding-scan-tasks", { suggestedTasks: ["Reply to boss about the plan"] });
+    setEchoStructuredResponse("onboarding-scan-routines", {
+      suggestedRoutines: [
+        {
+          name: "Draft a weekly founder update",
+          description: "Turn recent work and email context into a founder-update draft for review.",
+          usesEmail: true
+        }
+      ]
+    });
 
     const snapshots: string[][] = [];
     const outcome = await runProfileScan(echoConfig(), {
@@ -400,9 +409,16 @@ describe("onboarding scan pipeline", () => {
     expect(outcome.profile.displayName).toBe("Ada Lovelace");
     expect(outcome.suggestedTasks).toEqual(["Reply to boss about the plan"]);
     expect(snapshots).toEqual([["i1"]]);
+    expect(outcome.suggestedRoutines).toEqual([
+      {
+        name: "Draft a weekly founder update",
+        description: "Turn recent work and email context into a founder-update draft for review.",
+        usesEmail: true
+      }
+    ]);
   });
 
-  test("runProfileScan lands ready without suggestions when the tasks call fails", async () => {
+  test("runProfileScan keeps routine suggestions when the tasks call fails", async () => {
     const { spawn } = fakeExportSpawn();
     const { fetchImpl } = fakeFetch({ selfEmail: "me@example.com", inboxIds: [], sentIds: [] });
     setEchoStructuredResponse("onboarding-scan-profile", {
@@ -411,6 +427,11 @@ describe("onboarding scan pipeline", () => {
     // A tasks stub that misses the contract makes that call throw; the scan
     // still lands ready — the web falls back to its static suggestions.
     setEchoStructuredResponse("onboarding-scan-tasks", { suggestedTasks: "not a list" });
+    setEchoStructuredResponse("onboarding-scan-routines", {
+      suggestedRoutines: [
+        { name: "Track customer themes", description: "Review customer threads each week and draft a theme brief.", usesEmail: true }
+      ]
+    });
 
     const outcome = await runProfileScan(echoConfig(), { gwsSpawn: spawn, fetchImpl });
 
@@ -418,6 +439,24 @@ describe("onboarding scan pipeline", () => {
     if (outcome.status !== "ready") throw new Error("unreachable");
     expect(outcome.profile.displayName).toBe("Ada Lovelace");
     expect(outcome.suggestedTasks).toBeUndefined();
+    expect(outcome.suggestedRoutines?.[0]?.name).toBe("Track customer themes");
+  });
+
+  test("runProfileScan keeps task suggestions when the routines call fails", async () => {
+    const { spawn } = fakeExportSpawn();
+    const { fetchImpl } = fakeFetch({ selfEmail: "me@example.com", inboxIds: [], sentIds: [] });
+    setEchoStructuredResponse("onboarding-scan-profile", {
+      profile: { displayName: "Ada Lovelace", sections: [] }
+    });
+    setEchoStructuredResponse("onboarding-scan-tasks", { suggestedTasks: ["Reply to boss"] });
+    setEchoStructuredResponse("onboarding-scan-routines", { suggestedRoutines: "not a list" });
+
+    const outcome = await runProfileScan(echoConfig(), { gwsSpawn: spawn, fetchImpl });
+
+    expect(outcome.status).toBe("ready");
+    if (outcome.status !== "ready") throw new Error("unreachable");
+    expect(outcome.suggestedTasks).toEqual(["Reply to boss"]);
+    expect(outcome.suggestedRoutines).toBeUndefined();
   });
 
   test("runProfileScan fails when the profile call misses the profile contract", async () => {
@@ -426,6 +465,7 @@ describe("onboarding scan pipeline", () => {
     // The tasks call succeeding cannot rescue a failed profile call.
     setEchoStructuredResponse("onboarding-scan-profile", { profile: { sections: [] } });
     setEchoStructuredResponse("onboarding-scan-tasks", { suggestedTasks: ["Reply to boss"] });
+    setEchoStructuredResponse("onboarding-scan-routines", { suggestedRoutines: [] });
 
     const outcome = await runProfileScan(echoConfig(), { gwsSpawn: spawn, fetchImpl });
 
@@ -519,7 +559,28 @@ describe("onboarding scan pipeline", () => {
     expect(system).not.toContain("displayName");
   });
 
-  test("both prompts render the same mailbox as untrusted evidence", () => {
+  test("buildRoutinesPrompt carries the recurring-work rules verbatim", () => {
+    const { system } = buildRoutinesPrompt({
+      selfEmail: "me@example.com",
+      inbox: [{ from: "a@b.com", subject: "hi" }],
+      sent: []
+    });
+
+    for (const marker of [
+      "3–5 high-value recurring automations",
+      "durable patterns or goals",
+      "never suggest a one-off task",
+      "Auto-inbox, Morning Briefing, or Meeting Briefing",
+      "usesEmail true",
+      "no speculation, sensitive-trait inference"
+    ]) {
+      expect(system).toContain(marker);
+    }
+    expect(system).not.toContain("Check who sent the LAST message");
+    expect(system).not.toContain("displayName");
+  });
+
+  test("all prompts render the same mailbox as untrusted evidence", () => {
     const bundle = {
       selfEmail: "me@example.com",
       inbox: [{ from: "boss@corp.com", subject: "Q3", snippet: "sync please", body: "the full body" }],
@@ -527,12 +588,15 @@ describe("onboarding scan pipeline", () => {
     };
     const profile = buildProfilePrompt(bundle);
     const tasks = buildTasksPrompt(bundle);
+    const routines = buildRoutinesPrompt(bundle);
 
     // The tasks call needs who-wrote-last evidence and the profile call needs
     // sent mail for voice — both read the SAME rendered mailbox.
     expect(profile.user).toBe(tasks.user);
+    expect(profile.user).toBe(routines.user);
     expect(profile.system).toContain("UNTRUSTED");
     expect(tasks.system).toContain("UNTRUSTED");
+    expect(routines.system).toContain("UNTRUSTED");
     expect(profile.user).toContain("me@example.com");
     expect(profile.user).toContain("boss@corp.com");
     expect(profile.user).toContain("the full body");

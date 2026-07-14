@@ -16,8 +16,8 @@
 // (src/state/onboarding.ts). The scan is a deterministic in-runtime pipeline
 // (src/runtime/onboarding-scan.ts): one `gws auth export` mints a Gmail access
 // token, direct parallel Gmail HTTP reads fetch the mailbox with no model and
-// no tool loop, then two parallel structured model calls synthesize the
-// profile and the suggested tasks. startOnboardingScan runs it in the
+// no tool loop, then three parallel structured model calls synthesize the
+// profile, suggested tasks, and suggested routines. startOnboardingScan runs it in the
 // background and finalizes the record + pushes an `onboarding` event over the
 // events stream (the browser is notified instead of polling). Validation
 // errors throw with the "Invalid input:" prefix the gateway maps to a 400.
@@ -39,12 +39,12 @@ import {
   routineTemplate,
   validateTimezone
 } from "./routine-templates";
-import type { ChatSessionRecord, GoogleAccount, JobRecord, OnboardingProfile, OnboardingRecord, OnboardingScan, RuntimeConfig, Task } from "../types";
+import type { ChatSessionRecord, GoogleAccount, JobRecord, OnboardingProfile, OnboardingRecord, OnboardingRoutineSuggestion, OnboardingScan, RuntimeConfig, Task } from "../types";
 
 // A running scan older than this is treated as orphaned by a runtime restart
 // (the background pipeline died with the process) and flipped to failed on the
 // next GET, so the web's "Try again" resubmits it. The deterministic pipeline
-// (one parallel HTTP fetch window + two parallel model calls) settles well
+// (one parallel HTTP fetch window + three parallel model calls) settles well
 // within this.
 const SCAN_STALE_MS = 5 * 60_000;
 
@@ -186,12 +186,29 @@ export async function startOnboardingScan(config: RuntimeConfig): Promise<Onboar
 // isn't clobbered, and only applies when the scan is still "running" — a
 // completed user or a resubmit that raced ahead wins. The event is
 // system-attributed (the scan has no agent owner).
-function finalizeScan(config: RuntimeConfig, outcome: { status: "ready"; profile: OnboardingProfile; suggestedTasks?: string[] } | { status: "failed"; error: string }): void {
+function finalizeScan(
+  config: RuntimeConfig,
+  outcome:
+    | {
+        status: "ready";
+        profile: OnboardingProfile;
+        suggestedTasks?: string[];
+        suggestedRoutines?: OnboardingRoutineSuggestion[];
+      }
+    | { status: "failed"; error: string }
+): void {
   const record = readOnboarding(config.instance);
   if (!record || record.scan.status !== "running") return;
   const scan: OnboardingScan =
     outcome.status === "ready"
-      ? { ...record.scan, status: "ready", profile: outcome.profile, ...(outcome.suggestedTasks ? { suggestedTasks: outcome.suggestedTasks } : {}), finishedAt: now() }
+      ? {
+          ...record.scan,
+          status: "ready",
+          profile: outcome.profile,
+          ...(outcome.suggestedTasks ? { suggestedTasks: outcome.suggestedTasks } : {}),
+          ...(outcome.suggestedRoutines ? { suggestedRoutines: outcome.suggestedRoutines } : {}),
+          finishedAt: now()
+        }
       : { ...record.scan, status: "failed", error: outcome.error, finishedAt: now() };
   record.scan = scan;
   writeOnboarding(config.instance, record);
@@ -343,10 +360,13 @@ function flag(section: unknown, key: string): boolean {
 }
 
 // Upper bounds folded over the scan deliverable. The deliverable is model
-// text derived from attacker-controllable email, and suggestedTasks render as
-// pre-checked one-click task seeds — so oversized output is clamped rather
-// than rejected (bounds are generous relative to the prompt's asks).
+// text derived from attacker-controllable email, while suggestedTasks and
+// suggestedRoutines become one-click task seeds — so oversized output is
+// clamped rather than rejected (bounds are generous relative to the prompts).
 const MAX_SUGGESTED_TASKS = 10;
+const MAX_SUGGESTED_ROUTINES = 5;
+const MAX_ROUTINE_NAME_CHARS = 80;
+const MAX_ROUTINE_DESCRIPTION_CHARS = 300;
 const MAX_PROFILE_SECTIONS = 12;
 const MAX_SECTION_BULLETS = 12;
 const MAX_LINE_CHARS = 300;
@@ -374,6 +394,38 @@ export function validateScanTasks(value: unknown): string[] | undefined {
   return rawTasks
     .filter((t): t is string => typeof t === "string" && t.trim().length > 0 && t.length <= MAX_LINE_CHARS)
     .slice(0, MAX_SUGGESTED_TASKS);
+}
+
+// Shape-check + clamp the routines call's structured deliverable
+// `{ suggestedRoutines: [{ name, description, usesEmail }] }`. Invalid rows
+// drop independently; duplicate names collapse case-insensitively so the
+// gallery never renders two cards for the same inferred automation.
+export function validateScanRoutines(value: unknown): OnboardingRoutineSuggestion[] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const rawRoutines = (value as { suggestedRoutines?: unknown }).suggestedRoutines;
+  if (!Array.isArray(rawRoutines)) return undefined;
+  const seen = new Set<string>();
+  const routines: OnboardingRoutineSuggestion[] = [];
+  for (const raw of rawRoutines) {
+    if (!raw || typeof raw !== "object") continue;
+    const item = raw as Record<string, unknown>;
+    if (typeof item.name !== "string" || typeof item.description !== "string" || typeof item.usesEmail !== "boolean") {
+      continue;
+    }
+    const name = collapseScanText(item.name).slice(0, MAX_ROUTINE_NAME_CHARS);
+    const description = collapseScanText(item.description).slice(0, MAX_ROUTINE_DESCRIPTION_CHARS);
+    if (!name || !description) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    routines.push({ name, description, usesEmail: item.usesEmail });
+    if (routines.length === MAX_SUGGESTED_ROUTINES) break;
+  }
+  return routines;
+}
+
+function collapseScanText(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
 }
 
 // Truncate profile strings and cap section/bullet counts — keep what fits,

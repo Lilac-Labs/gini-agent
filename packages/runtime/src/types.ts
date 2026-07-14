@@ -2442,12 +2442,23 @@ export interface OnboardingProfile {
   sections: OnboardingProfileSection[];
 }
 
+// A recurring automation inferred from the same mailbox evidence as the
+// onboarding profile. The Routines page presents these as suggestions; the
+// user still chooses one and finishes its schedule/account setup in a task
+// before any job is created.
+export interface OnboardingRoutineSuggestion {
+  name: string;
+  description: string;
+  usesEmail: boolean;
+}
+
 export type OnboardingScanStatus = "idle" | "running" | "ready" | "failed" | "no_account";
 
 // The Gmail profile scan's lifecycle. The deterministic in-runtime pipeline
 // (src/runtime/onboarding-scan.ts) runs in the background while `status ===
-// "running"`; on completion it writes `profile`/`suggestedTasks` (ready) or
-// `error` (failed) and pushes an `onboarding` event so the browser refetches.
+// "running"`; on completion it writes `profile` plus optional
+// `suggestedTasks`/`suggestedRoutines` (ready), or `error` (failed), and pushes
+// an `onboarding` event so the browser refetches.
 export interface OnboardingScan {
   status: OnboardingScanStatus;
   startedAt?: string;
@@ -2455,6 +2466,7 @@ export interface OnboardingScan {
   error?: string;
   profile?: OnboardingProfile;
   suggestedTasks?: string[];
+  suggestedRoutines?: OnboardingRoutineSuggestion[];
 }
 
 export interface OnboardingRecord {

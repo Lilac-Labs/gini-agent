@@ -11,8 +11,8 @@
 //     idempotent replace on re-apply, missing ids ignored, skill resolution
 //     pre-validated before the replace pass, created ids tracked through a
 //     mid-apply failure
-//   - validateScanProfile / validateScanTasks shape-check + clamping unit
-//     coverage
+//   - validateScanProfile / validateScanTasks / validateScanRoutines
+//     shape-check + clamping unit coverage
 //
 // Hermetic: HOME + GINI_STATE_ROOT point at a per-test scratch dir so the
 // google-accounts registry, ~/.config/gws probe, and instance state never
@@ -29,10 +29,20 @@ import { join } from "node:path";
 // (and thus ../runtime/onboarding, which statically imports runProfileScan) is
 // evaluated. Tests set `scanOutcome` / `scanDelayMs` to steer a run's result
 // without spawning gws or hitting the model. Defaults to a ready profile.
-let scanOutcome: { status: "ready"; profile: OnboardingProfile; suggestedTasks?: string[] } | { status: "failed"; error: string } = {
+let scanOutcome:
+  | {
+      status: "ready";
+      profile: OnboardingProfile;
+      suggestedTasks?: string[];
+      suggestedRoutines?: OnboardingRoutineSuggestion[];
+    }
+  | { status: "failed"; error: string } = {
   status: "ready",
   profile: { displayName: "Stub User", sections: [{ title: "Professional Identity", bullets: ["Founder"] }] },
-  suggestedTasks: ["Reply to the investor thread"]
+  suggestedTasks: ["Reply to the investor thread"],
+  suggestedRoutines: [
+    { name: "Draft a weekly founder update", description: "Draft a weekly progress update for review.", usesEmail: true }
+  ]
 };
 let scanCalls = 0;
 mock.module("./onboarding-scan", () => ({
@@ -63,7 +73,7 @@ import { createJob, mutateState, readState, upsertTask, createChatSession } from
 import { attachGoogleAccountToInstance } from "../state/google-account-bindings";
 import { writeGoogleAccounts } from "../state/google-accounts";
 import { onboardingPath, readOnboarding, writeOnboarding } from "../state/onboarding";
-import { autostartCrmForCompletedOnboarding, validateScanProfile, validateScanTasks } from "./onboarding";
+import { autostartCrmForCompletedOnboarding, validateScanProfile, validateScanRoutines, validateScanTasks } from "./onboarding";
 import {
   __awaitCrmLoopExitForTests,
   __crmOnboardingThreadCountForTests,
@@ -71,7 +81,7 @@ import {
   pauseCrmExtraction,
 } from "../jobs/crm-extractor";
 import { getCrmRunState, setCrmMeta } from "../state/crm-extraction-db";
-import type { OnboardingProfile, OnboardingRecord, RuntimeConfig, Task, TaskStatus } from "../types";
+import type { OnboardingProfile, OnboardingRecord, OnboardingRoutineSuggestion, RuntimeConfig, Task, TaskStatus } from "../types";
 
 // Snapshot of the real jobs module, captured before any mock.module call:
 // once a mock is installed the namespace's live bindings point at the mock,
@@ -123,7 +133,10 @@ describe("web onboarding api", () => {
     scanOutcome = {
       status: "ready",
       profile: { displayName: "Stub User", sections: [{ title: "Professional Identity", bullets: ["Founder"] }] },
-      suggestedTasks: ["Reply to the investor thread"]
+      suggestedTasks: ["Reply to the investor thread"],
+      suggestedRoutines: [
+        { name: "Draft a weekly founder update", description: "Draft a weekly progress update for review.", usesEmail: true }
+      ]
     };
   });
 
@@ -282,6 +295,7 @@ describe("web onboarding api", () => {
     const ready = await waitForScan(config, "ready");
     expect(ready.scan.profile.displayName).toBe("Stub User");
     expect(ready.scan.suggestedTasks).toEqual(["Reply to the investor thread"]);
+    expect(ready.scan.suggestedRoutines?.[0]?.name).toBe("Draft a weekly founder update");
     expect(ready.scan.finishedAt).toBeString();
     expect(scanCalls).toBe(1);
     expect(__crmOnboardingThreadCountForTests(config.instance)).toBe(1);
@@ -637,6 +651,37 @@ describe("web onboarding api", () => {
     const clamped = validateScanTasks({ suggestedTasks: [long, ...Array.from({ length: 14 }, (_, i) => `task ${i}`)] });
     expect(clamped).toHaveLength(10);
     expect(clamped?.[0]).toBe("task 0");
+  });
+
+  test("validateScanRoutines canonicalizes, dedupes, caps, and rejects bad shapes", () => {
+    expect(
+      validateScanRoutines({
+        suggestedRoutines: [
+          { name: "  Weekly   customer brief ", description: " Review\ncustomer themes each week. ", usesEmail: true },
+          { name: "weekly customer brief", description: "duplicate", usesEmail: false },
+          { name: "Missing email marker", description: "invalid" },
+          null
+        ]
+      })
+    ).toEqual([
+      { name: "Weekly customer brief", description: "Review customer themes each week.", usesEmail: true }
+    ]);
+
+    expect(validateScanRoutines("nope")).toBeUndefined();
+    expect(validateScanRoutines({})).toBeUndefined();
+    expect(validateScanRoutines({ suggestedRoutines: "nope" })).toBeUndefined();
+
+    const long = "x".repeat(400);
+    const clamped = validateScanRoutines({
+      suggestedRoutines: Array.from({ length: 8 }, (_, index) => ({
+        name: `Routine ${index} ${long}`,
+        description: long,
+        usesEmail: index % 2 === 0
+      }))
+    });
+    expect(clamped).toHaveLength(5);
+    expect(clamped?.[0]?.name).toHaveLength(80);
+    expect(clamped?.[0]?.description).toHaveLength(300);
   });
 });
 

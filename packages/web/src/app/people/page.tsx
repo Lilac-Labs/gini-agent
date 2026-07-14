@@ -9,7 +9,7 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUpDown, Building2, ListFilter, Maximize2, UserRoundPlus, X } from "lucide-react";
+import { ArrowUpDown, Building2, ChevronLeft, ChevronRight, ListFilter, Maximize2, Search, UserRoundPlus, X } from "lucide-react";
 import type { CrmContactDetail, CrmContactSummary } from "@runtime/capabilities/crm-contacts";
 import type { CrmExtractionStatus } from "@runtime/jobs/crm-extractor";
 import type { ChatSession } from "@/lib/view-types";
@@ -38,6 +38,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   CATEGORY_ITEMS,
+  DEFAULT_SORT,
   SORT_ITEMS,
   contactsRefetchMs,
   extractionRefetchMs,
@@ -45,9 +46,12 @@ import {
   filterContacts,
   fullName,
   initials,
+  paginate,
   relativeTime,
   roleLine,
+  searchContacts,
   sortContacts,
+  truncateDescription,
   type PeopleCategory,
   type PeopleSort,
 } from "./_lib";
@@ -82,8 +86,10 @@ export default function PeoplePage() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [sort, setSort] = useState<PeopleSort>("name");
+  const [sort, setSort] = useState<PeopleSort>(DEFAULT_SORT);
   const [category, setCategory] = useState<PeopleCategory>("all");
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
   const [panelWide, setPanelWide] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [draft, setDraft] = useState(EMPTY_DRAFT);
@@ -115,7 +121,6 @@ export default function PeoplePage() {
     },
   });
 
-  // Manual kick for the extraction pipeline: idle/legacy users (onboarded
   // Manual sync. Posts /crm/extraction/start, which starts an idle pipeline
   // (users onboarded before autostart, or who connected mail later), resumes a
   // paused one, or wakes a running one to poll for new mail now instead of
@@ -144,9 +149,12 @@ export default function PeoplePage() {
   });
 
   const rows = useMemo(
-    () => sortContacts(filterContacts(contacts.data?.contacts ?? [], category), sort),
-    [contacts.data, category, sort],
+    () => sortContacts(searchContacts(filterContacts(contacts.data?.contacts ?? [], category), search), sort),
+    [contacts.data, category, search, sort],
   );
+  // Paginate the filtered/sorted rows. paginate() clamps the page, so a search
+  // that shrinks the list snaps to the last valid page rather than a blank one.
+  const pageData = useMemo(() => paginate(rows, page), [rows, page]);
   const selected = rows.find((c) => c.id === selectedId) ?? contacts.data?.contacts.find((c) => c.id === selectedId) ?? null;
   const view = extractionView(extraction.data, Date.now());
 
@@ -187,7 +195,7 @@ export default function PeoplePage() {
                   <DropdownMenuContent align="start">
                     <DropdownMenuLabel className="text-[11.5px] text-muted-foreground">Sort</DropdownMenuLabel>
                     {SORT_ITEMS.map((s) => (
-                      <DropdownMenuItem key={s.id} onSelect={() => setSort(s.id)}>
+                      <DropdownMenuItem key={s.id} onSelect={() => { setSort(s.id); setPage(1); }}>
                         <span className="inline-flex w-3.5 justify-center">
                           {sort === s.id ? <span className="size-[5px] self-center rounded-full bg-current" /> : null}
                         </span>
@@ -200,25 +208,38 @@ export default function PeoplePage() {
                   <ExtractionBar view={view} pending={syncExtraction.isPending} onSync={() => syncExtraction.mutate()} />
                 ) : null}
               </div>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    title="Filter"
-                    className="flex size-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground"
-                  >
-                    <ListFilter className="size-4" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="min-w-[190px]">
-                  <DropdownMenuLabel className="text-[11.5px] text-muted-foreground">Category</DropdownMenuLabel>
-                  {CATEGORY_ITEMS.map((c) => (
-                    <DropdownMenuItem key={c.id} onSelect={() => setCategory(c.id)}>
-                      <span className="flex-1">{c.label}</span>
-                      {category === c.id ? <span className="size-[5px] rounded-full bg-current" /> : null}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <div className="flex items-center gap-2.5">
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <input
+                    type="search"
+                    value={search}
+                    onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+                    placeholder="Search people"
+                    aria-label="Search people"
+                    className="h-8 w-[200px] rounded-lg border border-border bg-card pl-8 pr-3 text-[13px] outline-none placeholder:text-muted-foreground focus:border-ring"
+                  />
+                </div>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      title="Filter"
+                      className="flex size-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground"
+                    >
+                      <ListFilter className="size-4" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="min-w-[190px]">
+                    <DropdownMenuLabel className="text-[11.5px] text-muted-foreground">Category</DropdownMenuLabel>
+                    {CATEGORY_ITEMS.map((c) => (
+                      <DropdownMenuItem key={c.id} onSelect={() => { setCategory(c.id); setPage(1); }}>
+                        <span className="flex-1">{c.label}</span>
+                        {category === c.id ? <span className="size-[5px] rounded-full bg-current" /> : null}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
             </div>
 
             {/* Table */}
@@ -233,7 +254,12 @@ export default function PeoplePage() {
                 <div className="border-t border-border px-4 py-8 text-center text-sm text-muted-foreground">Loading…</div>
               ) : rows.length === 0 ? (
                 <div className="border-t border-border p-6">
-                  {view?.live ? (
+                  {search.trim() ? (
+                    <EmptyState
+                      title="No matches"
+                      description={`No people match "${search.trim()}". Try a different name, company, or email.`}
+                    />
+                  ) : view?.live ? (
                     <EmptyState
                       title="Scanning your mail…"
                       description="Your assistant is reading your recent threads. People will appear here as they're found."
@@ -251,7 +277,7 @@ export default function PeoplePage() {
                   )}
                 </div>
               ) : (
-                rows.map((c) => (
+                pageData.items.map((c) => (
                   <button
                     key={c.id}
                     onClick={() => setSelectedId(c.id)}
@@ -275,7 +301,7 @@ export default function PeoplePage() {
                       <span className="block truncate text-[13px] text-muted-foreground">{c.email ?? "—"}</span>
                       <span className="mt-px block text-[13px] text-muted-foreground">{c.phone ?? "—"}</span>
                     </span>
-                    <span className="text-[13px] leading-[1.45]">{c.description ?? ""}</span>
+                    <span className="text-[13px] leading-[1.45]">{truncateDescription(c.description)}</span>
                     {c.isSelf || !c.email ? (
                       <span className="justify-self-end text-[13px] text-muted-foreground">{c.isSelf ? "you" : "—"}</span>
                     ) : (
@@ -291,6 +317,36 @@ export default function PeoplePage() {
                 ))
               )}
             </div>
+
+            {/* Pagination — only when the filtered list spans more than one page. */}
+            {!contacts.isLoading && pageData.pageCount > 1 ? (
+              <div className="mt-3 flex items-center justify-between text-[13px] text-muted-foreground">
+                <span>
+                  {pageData.start.toLocaleString()}–{pageData.end.toLocaleString()} of {pageData.total.toLocaleString()}
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={pageData.page <= 1}
+                    className="flex h-8 items-center gap-1 rounded-lg border border-border bg-card px-2.5 font-medium hover:bg-muted disabled:pointer-events-none disabled:opacity-40"
+                  >
+                    <ChevronLeft className="size-3.5" />
+                    Prev
+                  </button>
+                  <span className="px-1 tabular-nums">
+                    Page {pageData.page} of {pageData.pageCount}
+                  </span>
+                  <button
+                    onClick={() => setPage((p) => Math.min(pageData.pageCount, p + 1))}
+                    disabled={pageData.page >= pageData.pageCount}
+                    className="flex h-8 items-center gap-1 rounded-lg border border-border bg-card px-2.5 font-medium hover:bg-muted disabled:pointer-events-none disabled:opacity-40"
+                  >
+                    Next
+                    <ChevronRight className="size-3.5" />
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       </section>

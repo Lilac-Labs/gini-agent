@@ -5,10 +5,14 @@ import type { CrmExtractionStatus } from "@runtime/jobs/crm-extractor";
 export type PeopleSort = "name" | "recent";
 export type PeopleCategory = "all" | "Work" | "Personal";
 
+// Recent first: it's the default sort, and the dropdown lists it at the top.
 export const SORT_ITEMS: Array<{ id: PeopleSort; label: string }> = [
-  { id: "name", label: "Alphabetical" },
   { id: "recent", label: "Recent" },
+  { id: "name", label: "Alphabetical" },
 ];
+
+// The default the People page opens on — most-recently-engaged first.
+export const DEFAULT_SORT: PeopleSort = "recent";
 
 export const CATEGORY_ITEMS: Array<{ id: PeopleCategory; label: string }> = [
   { id: "all", label: "All" },
@@ -64,6 +68,35 @@ export function filterContacts(
   return contacts.filter((c) => c.isSelf || (c.category ?? "").toLowerCase() === category.toLowerCase());
 }
 
+// Free-text search over the fields a user scans by: name, company, email,
+// position, and the one-line description. Case/whitespace-insensitive; a blank
+// query is a no-op. Unlike the category filter, search does NOT pin the self
+// row — a search is a deliberate lookup, so "you" only matches if it matches.
+export function searchContacts(contacts: CrmContactSummary[], query: string): CrmContactSummary[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return contacts;
+  return contacts.filter((c) => {
+    const haystack = [fullName(c), c.company, c.email, c.position, c.description]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(q);
+  });
+}
+
+// The list description is a one-line handle; long doss's-worth summaries blow
+// out the row height, so clamp to a sensible width with an ellipsis. Cuts on a
+// word boundary when one is near the limit so a word isn't sliced mid-token.
+export const DESCRIPTION_MAX = 100;
+export function truncateDescription(description: string | null | undefined, max = DESCRIPTION_MAX): string {
+  const text = (description ?? "").trim();
+  if (text.length <= max) return text;
+  const slice = text.slice(0, max);
+  const lastSpace = slice.lastIndexOf(" ");
+  const head = lastSpace > max - 15 ? slice.slice(0, lastSpace) : slice;
+  return `${head.trimEnd()}…`;
+}
+
 // "name" keeps the server's case-insensitive name order, with the user's own
 // reserved row pinned first; "recent" orders by engagement recency (never-
 // engaged rows sink, ties fall back to name order).
@@ -77,6 +110,38 @@ export function sortContacts(
     if (a.isSelf !== b.isSelf) return Number(b.isSelf) - Number(a.isSelf);
     return (b.lastSpokeAt ?? 0) - (a.lastSpokeAt ?? 0);
   });
+}
+
+// Fixed page size for the People table — enough to fill the viewport without a
+// long scroll, small enough that paging is meaningful on a large directory.
+export const PAGE_SIZE = 25;
+
+export interface Page<T> {
+  items: T[];
+  page: number; // clamped, 1-based
+  pageCount: number; // always >= 1
+  total: number;
+  start: number; // 1-based index of the first item shown (0 when empty)
+  end: number; // 1-based index of the last item shown (0 when empty)
+}
+
+// Slice `items` to the requested 1-based page. `page` is clamped into range so
+// a stale page number (e.g. after a search shrinks the list) can't strand the
+// user on an empty page — it snaps to the last page instead.
+export function paginate<T>(items: T[], page = 1, pageSize = PAGE_SIZE): Page<T> {
+  const total = items.length;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const clamped = Math.min(Math.max(1, Math.floor(page) || 1), pageCount);
+  const startIdx = (clamped - 1) * pageSize;
+  const slice = items.slice(startIdx, startIdx + pageSize);
+  return {
+    items: slice,
+    page: clamped,
+    pageCount,
+    total,
+    start: total === 0 ? 0 : startIdx + 1,
+    end: startIdx + slice.length,
+  };
 }
 
 // ---------------------------------------------------------------------------

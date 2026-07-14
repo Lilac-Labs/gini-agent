@@ -4,7 +4,7 @@ description: "Query and maintain the user's personal CRM — the precreated cont
 license: MIT
 metadata:
   gini:
-    version: 1.8.1
+    version: 1.9.0
     author: Gini
 ---
 
@@ -25,7 +25,7 @@ contacts (
   category TEXT,                    -- relationship bucket: 'Work' (professional — colleagues, partners, vendors, investors, recruiting) or 'Personal' (friends, family, community); NULL when genuinely unclear
   url TEXT,                         -- scheme-qualified (https://…)
   phone TEXT,                       -- E.164: + then digits only (e.g. +14047294874)
-  description TEXT,                 -- one line: who they are at a glance (e.g. "CEO of Slashy — met at a YC dinner, intro'd by Tony")
+  description TEXT,                 -- one line, <=100 chars: who they are at a glance (e.g. "CEO of Slashy — met at a YC dinner, intro'd by Tony")
   profile TEXT,                     -- the dossier (below)
   last_spoke_at INTEGER,            -- epoch ms the USER last engaged them (wrote to them, replied in their thread, or was cc'd into it); NULL = never observed
   updated_at INTEGER                -- epoch ms; auto-bumped on every UPDATE — never set it yourself
@@ -35,7 +35,7 @@ relations (a TEXT, b TEXT, kind TEXT, note TEXT)   -- who-knows-whom edges, by c
 
 The database enforces these formats with CHECK constraints — a write with an uppercase email, a scheme-less url, or a formatted phone number is rejected with an error; normalize the value and retry.
 
-`description` is the cheap list handle; `profile` is the multi-KB dossier. When listing or scanning people, SELECT the scalar columns + `description` and leave `profile` out — read a profile only for the specific row you're about to use or rewrite. Keep `description` to one sentence and refresh it whenever a rewrite of the profile changes who the person is at a glance.
+`description` is the cheap list handle; `profile` is the multi-KB dossier. When listing or scanning people, SELECT the scalar columns + `description` and leave `profile` out — read a profile only for the specific row you're about to use or rewrite. Keep `description` to one short phrase of **at most 100 characters** (it renders as a single fixed-width list cell — longer text is truncated with an ellipsis on the page, so put the identifying detail first), and refresh it whenever a rewrite of the profile changes who the person is at a glance.
 
 `last_spoke_at` separates real relationships from one-way inbound: most cold outreach is never answered, so a row with `last_spoke_at IS NULL` is usually pipeline, not a relationship. Set/advance it whenever the material shows the user ENGAGING with the person: writing to them, replying in a thread they're part of, or being deliberately looped into their thread (someone cc'ing the user in is an intro shape — those participants count). Never invent it. Questions like "my important contacts" or "who do I know" default to `WHERE last_spoke_at IS NOT NULL ORDER BY last_spoke_at DESC` — include never-engaged rows only when the user asks for everyone or for inbound/pipeline.
 

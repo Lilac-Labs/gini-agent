@@ -3,6 +3,9 @@ import type { CrmContactSummary } from "@runtime/capabilities/crm-contacts";
 import type { CrmExtractionStatus } from "@runtime/jobs/crm-extractor";
 import {
   CATEGORY_ITEMS,
+  DEFAULT_SORT,
+  DESCRIPTION_MAX,
+  PAGE_SIZE,
   SORT_ITEMS,
   contactsRefetchMs,
   extractionRefetchMs,
@@ -10,10 +13,13 @@ import {
   filterContacts,
   fullName,
   initials,
+  paginate,
   processedCount,
   relativeTime,
   roleLine,
+  searchContacts,
   sortContacts,
+  truncateDescription,
 } from "./_lib";
 
 function contact(over: Partial<CrmContactSummary> & { id: string; firstName: string }): CrmContactSummary {
@@ -87,9 +93,61 @@ describe("people/_lib", () => {
     ]);
   });
 
-  test("menu item catalogs are stable", () => {
-    expect(SORT_ITEMS.map((s) => s.id)).toEqual(["name", "recent"]);
+  test("menu item catalogs are stable; Recent leads and is the default", () => {
+    expect(SORT_ITEMS.map((s) => s.id)).toEqual(["recent", "name"]);
+    expect(DEFAULT_SORT).toBe("recent");
     expect(CATEGORY_ITEMS.map((c) => c.id)).toEqual(["all", "Work", "Personal"]);
+  });
+
+  test("searchContacts matches across name, company, email, position, and description", () => {
+    const rows = [
+      contact({ id: "a", firstName: "Priya", lastName: "Datawell", company: "Northwind", email: "priya@northwind.io", position: "VP Sales", description: "met at a dinner" }),
+      contact({ id: "b", firstName: "Tomasz", lastName: "Vega", company: "Meridian Freight", email: "tv@meridian.io", description: "logistics lead" }),
+      contact({ id: "c", firstName: "You", isSelf: true }),
+    ];
+    expect(searchContacts(rows, "northwind").map((c) => c.id)).toEqual(["a"]); // company
+    expect(searchContacts(rows, "VEGA").map((c) => c.id)).toEqual(["b"]); // name, case-insensitive
+    expect(searchContacts(rows, "meridian.io").map((c) => c.id)).toEqual(["b"]); // email
+    expect(searchContacts(rows, "vp sales").map((c) => c.id)).toEqual(["a"]); // position
+    expect(searchContacts(rows, "dinner").map((c) => c.id)).toEqual(["a"]); // description
+    expect(searchContacts(rows, "  ").map((c) => c.id)).toEqual(["a", "b", "c"]); // blank = no-op, self included
+    expect(searchContacts(rows, "nobody")).toEqual([]);
+    // Search does not pin the self row — it only appears if it matches.
+    expect(searchContacts(rows, "you").map((c) => c.id)).toEqual(["c"]);
+    expect(searchContacts(rows, "priya").map((c) => c.id)).toEqual(["a"]);
+  });
+
+  test("truncateDescription clamps at the limit with an ellipsis, on a word boundary", () => {
+    expect(truncateDescription(null)).toBe("");
+    expect(truncateDescription("short and sweet")).toBe("short and sweet");
+    const exactly100 = "x".repeat(100);
+    expect(truncateDescription(exactly100)).toBe(exactly100); // <= max is untouched
+    const long = "Alice Nakamura is the founder and CEO of Slashy, a fintech startup she launched in 2024 after leaving Google";
+    const out = truncateDescription(long);
+    expect(out.length).toBeLessThanOrEqual(DESCRIPTION_MAX + 1); // + the ellipsis char
+    expect(out.endsWith("…")).toBe(true);
+    expect(out).not.toContain("  ");
+    // A no-space blob past the limit is hard-cut (no boundary near the end).
+    const blob = "a".repeat(150);
+    expect(truncateDescription(blob)).toBe("a".repeat(100) + "…");
+  });
+
+  test("paginate slices, reports the window, and clamps out-of-range pages", () => {
+    const items = Array.from({ length: 57 }, (_, i) => i);
+    const p1 = paginate(items, 1, 25);
+    expect(p1.items).toEqual(items.slice(0, 25));
+    expect(p1).toMatchObject({ page: 1, pageCount: 3, total: 57, start: 1, end: 25 });
+    const p3 = paginate(items, 3, 25);
+    expect(p3.items).toEqual(items.slice(50, 57));
+    expect(p3).toMatchObject({ page: 3, pageCount: 3, start: 51, end: 57 });
+    // Over-range snaps to the last page; under-range/garbage snaps to 1.
+    expect(paginate(items, 99, 25).page).toBe(3);
+    expect(paginate(items, 0, 25).page).toBe(1);
+    expect(paginate(items, -5, 25).page).toBe(1);
+    // Empty list is one empty page with a zeroed window.
+    expect(paginate([], 1, 25)).toMatchObject({ items: [], page: 1, pageCount: 1, total: 0, start: 0, end: 0 });
+    // Default page size is applied when omitted.
+    expect(paginate(Array.from({ length: PAGE_SIZE + 1 }, (_, i) => i)).pageCount).toBe(2);
   });
 });
 

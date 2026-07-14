@@ -24,7 +24,7 @@
 
 import { resolveEffectiveContext } from "../execution/effective-context";
 import { assertSkillNamesResolve, removeJob } from "../jobs";
-import { autostartCrmExtractionAfterOnboarding } from "../jobs/crm-extractor";
+import { autostartCrmExtractionAfterOnboarding, primeCrmExtractionThreads } from "../jobs/crm-extractor";
 import { appendEvent, mutateState, readState } from "../state";
 import { getGoogleAccountBindings } from "../state/google-account-bindings";
 import { readGoogleAccounts } from "../state/google-accounts";
@@ -38,7 +38,7 @@ import {
   routineTemplate,
   validateTimezone
 } from "./routine-templates";
-import type { ChatSessionRecord, JobRecord, OnboardingProfile, OnboardingRecord, OnboardingScan, RuntimeConfig, Task } from "../types";
+import type { ChatSessionRecord, GoogleAccount, JobRecord, OnboardingProfile, OnboardingRecord, OnboardingScan, RuntimeConfig, Task } from "../types";
 
 // A running scan older than this is treated as orphaned by a runtime restart
 // (the background pipeline died with the process) and flipped to failed on the
@@ -111,6 +111,7 @@ function failStaleScan(config: RuntimeConfig, record: OnboardingRecord): void {
 // before any write; completed:true stamps completedAt once.
 export function patchOnboarding(config: RuntimeConfig, payload: Record<string, unknown>): OnboardingRecord {
   const record = getOnboarding(config);
+  const wasCompleted = record.completed;
   if (payload.timezone !== undefined) {
     record.timezone = validateTimezone(payload.timezone);
   }
@@ -129,6 +130,12 @@ export function patchOnboarding(config: RuntimeConfig, payload: Record<string, u
     else delete record.completedAt;
   }
   writeOnboarding(config.instance, record);
+  if (!wasCompleted && record.completed) {
+    // The recent Gmail snapshot is already available by the final wizard step,
+    // so this is the first safe point to launch the heavy People backfill. It
+    // remains detached and can never fail the completion response.
+    autostartCrmExtractionAfterOnboarding(config);
+  }
   return record;
 }
 
@@ -150,18 +157,21 @@ export async function startOnboardingScan(config: RuntimeConfig): Promise<Onboar
   const record = getOnboarding(config);
   if (record.completed) return record;
   if (record.scan.status === "running" || record.scan.status === "ready") return record;
-  if (!hasGoogleAccess(config)) {
+  const account = resolveScanAccount(config);
+  if (!account) {
     record.scan = { status: "no_account" };
     writeOnboarding(config.instance, record);
     return record;
   }
   record.scan = { status: "running", startedAt: now() };
   writeOnboarding(config.instance, record);
-  const configDir = resolveScanConfigDir(config);
   // Fire-and-forget: run the pipeline off the request, then finalize. Any
   // pipeline fault already resolves inside runProfileScan (never throws); the
   // extra .catch is belt-and-suspenders so an unexpected throw still finalizes.
-  void runProfileScan(config, { ...(configDir ? { configDir } : {}) })
+  void runProfileScan(config, {
+    configDir: account.configDir,
+    onMailboxFetched: (snapshot) => primeCrmExtractionThreads(config.instance, account.id, snapshot.threads),
+  })
     .catch((error): { status: "failed"; error: string } => ({
       status: "failed",
       error: error instanceof Error ? error.message : String(error)
@@ -193,25 +203,28 @@ function finalizeScan(config: RuntimeConfig, outcome: { status: "ready"; profile
   });
 }
 
-// Whether this instance has a Google account selected for onboarding. The
-// machine-global registry may hold reusable credentials, but a fresh instance
-// must not scan an account until the user signs into this instance.
-function hasGoogleAccess(config: RuntimeConfig): boolean {
-  return Boolean(resolveScanConfigDir(config));
-}
-
-// The gws config dir the scan should target: the persisted primary account's
-// dir when it still names a registered row. Machine-global credentials are not
-// enough: a fresh local instance must not scan whatever Gmail account happens
-// to exist in ~/.gini/google-accounts or ~/.config/gws.
-function resolveScanConfigDir(config: RuntimeConfig): string | undefined {
+// The account the scan should target: the persisted instance primary when it
+// still names a registered row. Returning the whole row lets the completed
+// fetch hand its normalized threads to the same account's People queue.
+// Machine-global credentials alone are not enough: a fresh local instance must
+// not scan whatever Gmail account happens to exist elsewhere on the machine.
+function resolveScanAccount(config: RuntimeConfig): GoogleAccount | undefined {
   const accounts = readGoogleAccounts();
   if (accounts.length === 0) return undefined;
   const bindings = getGoogleAccountBindings(config.instance);
   const primary = bindings.primaryAccountId
     ? accounts.find((account) => account.id === bindings.primaryAccountId)
     : undefined;
-  return primary?.configDir;
+  return primary;
+}
+
+// Account registration/provisioning happens before the first onboarding scan
+// on a new instance, but after onboarding for later account additions. Keep the
+// call sites simple and centralize that distinction here; getOnboarding also
+// grandfathers existing instances before deciding.
+export function autostartCrmForCompletedOnboarding(config: RuntimeConfig): void {
+  if (!getOnboarding(config).completed) return;
+  autostartCrmExtractionAfterOnboarding(config);
 }
 
 // POST /api/onboarding/routines body:
@@ -287,11 +300,10 @@ export async function applyOnboardingRoutines(
     record.routineJobIds.push(job.id);
     writeOnboarding(config.instance, record);
   }
-  // Applying routines is the end of onboarding: kick the CRM extraction
-  // pipeline off in the background (backfill + infinite watcher) when a
-  // Google account is connected. Fire-and-forget — never blocks or fails
-  // the onboarding response. See ADR people-crm-extraction-pipeline.md.
-  autostartCrmExtractionAfterOnboarding(config);
+  // Existing/completed users may re-apply this endpoint directly. A new user
+  // is still mid-wizard here, so wait for PATCH completed:true where the recent
+  // Gmail snapshot is guaranteed to be ready before People starts.
+  if (record.completed) autostartCrmExtractionAfterOnboarding(config);
   return { record, jobs };
 }
 

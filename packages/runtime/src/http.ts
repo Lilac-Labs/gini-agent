@@ -88,7 +88,7 @@ import { providerCatalogWithStatus, withProviderAuthStatus } from "./provider";
 import { buildModelCatalog } from "./model-routes";
 import { setDefaultModel } from "./runtime/default-model";
 import { archiveAgent, createAgent, deleteAgent, listAgents, renameAgent, setAgentMemory, setAgentProvider, unarchiveAgent, useAgent } from "./capabilities/agents";
-import { autostartCrmExtractionAfterOnboarding, crmExtractionStatus, disableCrmExtraction, enableCrmExtraction, pauseCrmExtraction, startCrmExtraction } from "./jobs/crm-extractor";
+import { crmExtractionStatus, disableCrmExtraction, enableCrmExtraction, pauseCrmExtraction, startCrmExtraction } from "./jobs/crm-extractor";
 import { createCrmContact, getCrmContact, listCrmContacts } from "./capabilities/crm-contacts";
 import {
   approveSoul,
@@ -118,7 +118,7 @@ import { cookieValue, serializeCookie } from "./lib/cookies";
 import { RateLimiter } from "./lib/rate-limit";
 import { signUploadParams, verifyUploadSignature } from "./lib/upload-signing";
 import { getSetupStatus, removeSetupProvider, setSetupProvider } from "./runtime/setup-api";
-import { applyOnboardingRoutines, getOnboarding, patchOnboarding, startOnboardingScan } from "./runtime/onboarding";
+import { applyOnboardingRoutines, autostartCrmForCompletedOnboarding, getOnboarding, patchOnboarding, startOnboardingScan } from "./runtime/onboarding";
 import { installRoutineTemplate, listRoutineTemplates, uninstallRoutineTemplate } from "./runtime/routine-templates";
 import { createSkillFromInput, getSkill, grantConnectorToSkill, installSkillFromBody, listSkills, reloadSkills, rollbackSkill, searchSkills, setSkillStatus, testSkill, updateSkill, validateSkills } from "./capabilities/skills";
 import { createChat, deleteChat, getChatSession, getOrCreateAgentChat, listChatSessions, removePendingChatMessageById, renameChat, retryFailedContainerRun, startTaskContainer, submitChatMessage, submitThreadReply, syncChatTaskResult } from "./execution/chat";
@@ -2155,9 +2155,10 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       const adopt = payload.adopt === true;
       try {
         const account = await registerAccount({ tag, configDir, adopt });
-        // If this registration makes an instance-bound mailbox reachable, kick
-        // the CRM extraction pipeline. Global-only registration remains a no-op.
-        autostartCrmExtractionAfterOnboarding(config);
+        // A later account addition on a completed instance should join People
+        // immediately. First-login registration stays quiet until the wizard's
+        // final step, after onboarding has primed its recent-thread snapshot.
+        autostartCrmForCompletedOnboarding(config);
         return json(account, 201);
       } catch (err) {
         return json({ error: err instanceof Error ? err.message : "Failed to register account" }, 400);
@@ -2166,7 +2167,9 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     ["POST", /^\/api\/google\/accounts\/([^/]+)\/use$/, async (_request, params) => {
       try {
         const account = await useAccountForInstance(config.instance, params[0]);
-        autostartCrmExtractionAfterOnboarding(config);
+        // Same completed-only gate as registration: switching the primary
+        // during first-run onboarding must not race its mailbox scan.
+        autostartCrmForCompletedOnboarding(config);
         return json(account);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to use account";
@@ -2208,9 +2211,10 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
         makePrimary: payload.makePrimary === true,
         instance: config.instance
       });
-      // Same kick as the manual-registration route: a never-run pipeline
-      // starts once a mailbox is reachable (no-op otherwise).
-      autostartCrmExtractionAfterOnboarding(config);
+      // Same completed-only kick as manual registration: the initial hosted
+      // provision happens before onboarding's mailbox snapshot, while later
+      // account additions should join an already-running People pipeline.
+      autostartCrmForCompletedOnboarding(config);
       return json(provisioned, 201);
     }],
     ["POST", /^\/api\/google\/session\/signout$/, () => {

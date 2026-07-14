@@ -36,8 +36,23 @@ let scanOutcome: { status: "ready"; profile: OnboardingProfile; suggestedTasks?:
 };
 let scanCalls = 0;
 mock.module("./onboarding-scan", () => ({
-  runProfileScan: async () => {
+  runProfileScan: async (_config: RuntimeConfig, opts?: { onMailboxFetched?: (snapshot: unknown) => void }) => {
     scanCalls += 1;
+    opts?.onMailboxFetched?.({
+      threads: [{
+        threadId: "thread_from_onboarding",
+        messages: [{
+          id: "message_from_onboarding",
+          threadId: "thread_from_onboarding",
+          date: 1_000,
+          from: { address: "user@example.com" },
+          to: [{ address: "friend@example.com" }],
+          cc: [],
+          subject: "Hello",
+          body: "Recent onboarding mail",
+        }],
+      }],
+    });
     return scanOutcome;
   }
 }));
@@ -48,7 +63,14 @@ import { createJob, mutateState, readState, upsertTask, createChatSession } from
 import { attachGoogleAccountToInstance } from "../state/google-account-bindings";
 import { writeGoogleAccounts } from "../state/google-accounts";
 import { onboardingPath, readOnboarding, writeOnboarding } from "../state/onboarding";
-import { validateScanProfile, validateScanTasks } from "./onboarding";
+import { autostartCrmForCompletedOnboarding, validateScanProfile, validateScanTasks } from "./onboarding";
+import {
+  __awaitCrmLoopExitForTests,
+  __crmOnboardingThreadCountForTests,
+  __setCrmMailSourceForTests,
+  pauseCrmExtraction,
+} from "../jobs/crm-extractor";
+import { getCrmRunState, setCrmMeta } from "../state/crm-extraction-db";
 import type { OnboardingProfile, OnboardingRecord, RuntimeConfig, Task, TaskStatus } from "../types";
 
 // Snapshot of the real jobs module, captured before any mock.module call:
@@ -262,7 +284,38 @@ describe("web onboarding api", () => {
     expect(ready.scan.suggestedTasks).toEqual(["Reply to the investor thread"]);
     expect(ready.scan.finishedAt).toBeString();
     expect(scanCalls).toBe(1);
+    expect(__crmOnboardingThreadCountForTests(config.instance)).toBe(1);
+    expect(getCrmRunState(config.instance)).toBe("idle");
     expect(readState(config.instance).events.some((e) => e.kind === "onboarding" && e.action === "onboarding.scan")).toBe(true);
+  });
+
+  test("account readiness waits for completion, then the final step starts People", async () => {
+    const config = testConfig(root, "complete-starts-people");
+    const handler = createHandler(config);
+    setCrmMeta(config.instance, "self_email", "user@example.com");
+    __setCrmMailSourceForTests(config.instance, {
+      kind: "fixture",
+      async listMessages() { return []; },
+      async fetchThread() { return []; },
+    });
+
+    expect(getCrmRunState(config.instance)).toBe("idle");
+    autostartCrmForCompletedOnboarding(config);
+    await Bun.sleep(20);
+    expect(getCrmRunState(config.instance)).toBe("idle");
+    const completed = await call(handler, config, "/api/onboarding", {
+      method: "PATCH",
+      body: JSON.stringify({ completed: true }),
+    });
+    expect(completed.completed).toBe(true);
+    for (let attempt = 0; attempt < 200 && getCrmRunState(config.instance) !== "running"; attempt += 1) {
+      await Bun.sleep(5);
+    }
+    expect(getCrmRunState(config.instance)).toBe("running");
+
+    await pauseCrmExtraction(config);
+    await __awaitCrmLoopExitForTests(config.instance);
+    __setCrmMailSourceForTests(config.instance, undefined);
   });
 
   test("a failed pipeline finalizes the scan as failed", async () => {

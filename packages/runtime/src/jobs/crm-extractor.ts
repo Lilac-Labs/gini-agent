@@ -136,7 +136,7 @@ export function primeCrmExtractionThreads(
   accountId: string,
   threads: Array<{ threadId: string; messages: CrmMail[] }>,
 ): void {
-  if (threads.length === 0) return;
+  if (threads.length === 0 || getCrmRunState(instance) === "disabled") return;
   let cache = onboardingThreads.get(instance);
   if (!cache) {
     cache = new Map();
@@ -145,6 +145,10 @@ export function primeCrmExtractionThreads(
   for (const thread of threads) {
     if (thread.messages.length > 0) cache.set(onboardingThreadKey(accountId, thread.threadId), thread.messages);
   }
+}
+
+export function __crmOnboardingThreadCountForTests(instance: Instance): number {
+  return onboardingThreads.get(instance)?.size ?? 0;
 }
 
 function takeOnboardingThread(

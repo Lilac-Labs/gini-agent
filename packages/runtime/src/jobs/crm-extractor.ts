@@ -55,6 +55,45 @@ function turnTimeoutMs(): number {
 function watcherIntervalMs(): number {
   return Number(process.env.GINI_CRM_WATCH_INTERVAL_MS ?? "60000");
 }
+// How often a turn-wait re-reads the task row. Small enough that a fast turn
+// (tests, or a quick real turn) is noticed promptly, large enough to be
+// negligible polling overhead against a real multi-second turn. Overridable so
+// tests don't pay a fixed per-turn floor. Read lazily like the others.
+function turnPollMs(): number {
+  return Number(process.env.GINI_CRM_TURN_POLL_MS ?? "500");
+}
+// Poll a submitted turn's task row until it leaves the running state or the
+// deadline passes. CHECKS BEFORE SLEEPING so an already-settled task returns on
+// the first pass instead of after a fixed sleep — the old `sleep(min(2000,…))`
+// then-check ordering cost every turn a full poll interval of dead wall-clock
+// even when the work finished in milliseconds. Returns the settled row, or null
+// if the row vanished, or "timeout" if the deadline passed while still running.
+// NOTE: intentionally does NOT bail on handle.stopRequested. A turn already
+// in flight when pause/disable arrives is allowed to FINISH and be recorded
+// (convergent turns are cheap; the stop contract is "nothing NEW dispatches",
+// not "abandon the running turn"). Callers enforce the no-new-dispatch rule.
+async function awaitTaskSettled(
+  config: RuntimeConfig,
+  taskId: string,
+): Promise<import("../types").Task | null | "timeout"> {
+  const deadline = Date.now() + turnTimeoutMs();
+  const poll = turnPollMs();
+  while (Date.now() < deadline) {
+    const row = readState(config.instance).tasks.find((t) => t.id === taskId);
+    if (!row) return null;
+    if (
+      row.status === "completed" ||
+      row.status === "failed" ||
+      row.status === "cancelled" ||
+      row.status === "waiting_approval" ||
+      row.status === "needs_input"
+    ) {
+      return row;
+    }
+    await Bun.sleep(Math.min(poll, Math.max(0, deadline - Date.now())));
+  }
+  return "timeout";
+}
 // Overlap window when polling for new mail — enqueue dedup makes re-listing
 // the boundary idempotent.
 const WATCHER_OVERLAP_MS = 60_000;
@@ -342,16 +381,9 @@ async function runReconcileTurn(
     const task = await submitTask(config, buildReconcileMessage(skillBody(), selfEmail), {
       mode: "chat", agentId, subagentId,
     });
-    const deadline = Date.now() + turnTimeoutMs();
-    while (Date.now() < deadline) {
-      await Bun.sleep(Math.min(2_000, turnTimeoutMs()));
-      const row = readState(config.instance).tasks.find((t) => t.id === task.id);
-      if (!row) return false;
-      if (row.status === "completed") return true;
-      if (row.status === "failed" || row.status === "cancelled") return false;
-      if (row.status === "waiting_approval" || row.status === "needs_input") return false;
-    }
-    return false;
+    const row = await awaitTaskSettled(config, task.id);
+    if (row === null || row === "timeout") return false;
+    return row.status === "completed";
   } catch (error) {
     handle.lastError = error instanceof Error ? error.message : String(error);
     return false;
@@ -392,11 +424,9 @@ async function runTurn(
     const content = buildTurnMessage(batch, skillBody(), selfEmail);
     const attempt = async (): Promise<{ ok: boolean; taskId: string; error?: string }> => {
       const task = await submitTask(config, content, { mode: "chat", agentId, subagentId });
-      const deadline = Date.now() + turnTimeoutMs();
-      while (Date.now() < deadline) {
-        await Bun.sleep(Math.min(2_000, turnTimeoutMs()));
-        const row = readState(config.instance).tasks.find((t) => t.id === task.id);
-        if (!row) return { ok: false, taskId: task.id, error: "task disappeared" };
+      const row = await awaitTaskSettled(config, task.id);
+      if (row === null) return { ok: false, taskId: task.id, error: "task disappeared" };
+      if (row !== "timeout") {
         if (row.status === "completed") return { ok: true, taskId: task.id };
         if (row.status === "failed" || row.status === "cancelled") {
           return { ok: false, taskId: task.id, error: `${row.status}: ${(row.error ?? row.summary ?? "").slice(0, 120)}` };

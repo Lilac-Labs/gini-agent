@@ -41,6 +41,9 @@ beforeAll(() => {
   process.env.GINI_EMBEDDING_PROVIDER = "echo";
   process.env.GINI_RERANKER_PROVIDER = "none";
   process.env.GINI_CRM_WATCH_INTERVAL_MS = "50";
+  // Poll settled tasks tightly: turns settle in <1 tick in tests, so the
+  // default 500ms per-turn poll was pure wall-clock floor across ~23 tests.
+  process.env.GINI_CRM_TURN_POLL_MS = "20";
   delete process.env.GINI_CRM_FIXTURE_DIR;
 });
 afterAll(() => {
@@ -51,6 +54,7 @@ afterAll(() => {
   delete process.env.GINI_EMBEDDING_PROVIDER;
   delete process.env.GINI_RERANKER_PROVIDER;
   delete process.env.GINI_CRM_WATCH_INTERVAL_MS;
+  delete process.env.GINI_CRM_TURN_POLL_MS;
   rmSync(ROOT, { recursive: true, force: true });
 });
 
@@ -876,8 +880,13 @@ describe("crm-extractor", () => {
   }, 30_000);
 
   test("turn outcomes: provider failure, stuck approval, vanished task, and timeout-with-retry", async () => {
-    // Each scenario gets its own instance with one engaged thread; the flip
-    // helper mutates the curator task row between the runner's 2s polls.
+    // Each scenario gets its own instance with one engaged thread. The flip
+    // helper rewrites the curator task row WHILE THE TURN IS STILL RUNNING —
+    // the echo response is delayed, so the flip lands its terminal state before
+    // the task ever legitimately completes. This is deterministic: it does not
+    // depend on out-racing the turn-wait's poll interval (an earlier version
+    // flipped only after `completed` and relied on a slow 2s poll not yet
+    // having observed it — fragile, and wrong once the poll got fast).
     const engaged = (threadId: string) =>
       mutableSource([mail({ id: `${threadId}-m`, threadId, date: 1_000, from: { address: SELF }, to: [{ address: "pal@z.com" }] })]);
     const provider = normalizeProvider(makeConfig("x").provider);
@@ -892,12 +901,14 @@ describe("crm-extractor", () => {
       if (opts.echo) {
         // Stubs are consumed one per provider call; queue two so the
         // timeout scenario's retry attempt is also delayed (the no-stub
-        // fallback would complete instantly and win the race).
+        // fallback would complete instantly and win the race). Flip scenarios
+        // delay the turn so the flip can land mid-run (see below).
+        const delayMs = opts.echoDelayMs ?? (opts.flip ? 300 : undefined);
         for (let i = 0; i < 2; i++) {
           setEchoToolCallingResponse(
             { provider, text: "ok", toolCalls: [], finishReason: "stop" },
             undefined,
-            opts.echoDelayMs ? { delayMs: opts.echoDelayMs } : undefined,
+            delayMs ? { delayMs } : undefined,
           );
         }
       } else {
@@ -909,11 +920,14 @@ describe("crm-extractor", () => {
       try {
         await startCrmExtraction(config);
         if (opts.flip) {
-          // Wait for the curator task to finish, then rewrite its terminal
-          // state before the runner's next poll observes it.
+          // Flip the RUNNING curator task's row to its terminal state before
+          // the delayed turn completes, so the turn-wait observes the flipped
+          // state deterministically (not a race against the poll interval).
           let flipped = false;
-          await until("task flipped", () => {
-            const task = readState(instance).tasks.find((t) => t.subagentId && t.status === "completed");
+          await until("running task flipped", () => {
+            const task = readState(instance).tasks.find(
+              (t) => t.subagentId && (t.status === "running" || t.status === "queued"),
+            );
             if (task && !flipped) {
               flipped = true;
               opts.flip!(task.id);
@@ -955,10 +969,11 @@ describe("crm-extractor", () => {
       }),
     ).toContain("task disappeared");
     // A 1ms deadline times out (the echo response is delayed past it),
-    // retries once, then errors.
+    // retries once, then errors. 300ms delay >> the 1ms deadline, so it still
+    // reliably times out, without the old 3s-per-attempt wall-clock cost.
     const timeoutError = await runScenario("crmx-turn-timeout", {
       echo: true,
-      echoDelayMs: 3_000,
+      echoDelayMs: 300,
       env: { GINI_CRM_TURN_TIMEOUT_MS: "1" },
     });
     expect(timeoutError).toBe("timeout");

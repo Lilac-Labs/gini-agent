@@ -573,6 +573,12 @@ describe("onboarding scan pipeline", () => {
       "Do not infer a routine from a single email",
       "return fewer than 3",
       "repeated trigger and a repeatable outcome",
+      "category-triggered triage and draft replies",
+      "stakeholder or project update drafts",
+      "spend, invoice, usage, or operations recaps",
+      "credits, benefits, renewals, or expirations",
+      "abstract archetypes, not templates",
+      "generic inbox triage",
       "Auto-inbox, Morning Briefing, or Meeting Briefing",
       "usesEmail true",
       "no speculation, sensitive-trait inference"

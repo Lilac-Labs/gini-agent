@@ -418,14 +418,14 @@ describe("onboarding scan pipeline", () => {
     ]);
   });
 
-  test("runProfileScan keeps routine suggestions when the tasks call fails", async () => {
+  test("runProfileScan fails instead of dropping rejected task suggestions", async () => {
     const { spawn } = fakeExportSpawn();
     const { fetchImpl } = fakeFetch({ selfEmail: "me@example.com", inboxIds: [], sentIds: [] });
     setEchoStructuredResponse("onboarding-scan-profile", {
       profile: { displayName: "Ada Lovelace", sections: [] }
     });
-    // A tasks stub that misses the contract makes that call throw; the scan
-    // still lands ready — the web falls back to its static suggestions.
+    // The invalid stub rejects both the parallel attempt and its one retry.
+    // The scan must stay retryable instead of silently seeding generic tasks.
     setEchoStructuredResponse("onboarding-scan-tasks", { suggestedTasks: "not a list" });
     setEchoStructuredResponse("onboarding-scan-routines", {
       suggestedRoutines: [
@@ -435,11 +435,9 @@ describe("onboarding scan pipeline", () => {
 
     const outcome = await runProfileScan(echoConfig(), { gwsSpawn: spawn, fetchImpl });
 
-    expect(outcome.status).toBe("ready");
-    if (outcome.status !== "ready") throw new Error("unreachable");
-    expect(outcome.profile.displayName).toBe("Ada Lovelace");
-    expect(outcome.suggestedTasks).toBeUndefined();
-    expect(outcome.suggestedRoutines?.[0]?.name).toBe("Track customer themes");
+    expect(outcome.status).toBe("failed");
+    if (outcome.status !== "failed") throw new Error("unreachable");
+    expect(outcome.error).toContain("suggestedTasks contract");
   });
 
   test("runProfileScan keeps task suggestions when the routines call fails", async () => {
@@ -528,7 +526,7 @@ describe("onboarding scan pipeline", () => {
       expect(system).toContain(marker);
     }
     // The tasks deliverable's rules live in the OTHER call.
-    expect(system).not.toContain("5–7 concrete tasks");
+    expect(system).not.toContain("up to 10 high-value concrete tasks");
     expect(system).not.toContain("Check who sent the LAST message");
   });
 
@@ -543,9 +541,13 @@ describe("onboarding scan pipeline", () => {
     // and ranking rules must all survive the split.
     for (const marker of [
       "work Gini can complete on its own",
+      "up to 10 high-value concrete tasks",
       "Check who sent the LAST message",
       "draft a follow-up for an email the USER sent that got no response",
       "6–12 words",
+      "their organization when the mailbox supports it",
+      'Reply titles must begin "Draft a reply to"',
+      "Never output a generic selector",
       "summaries are not starter tasks",
       "At most ONE task per email thread",
       "never restate or re-send what the user already said",

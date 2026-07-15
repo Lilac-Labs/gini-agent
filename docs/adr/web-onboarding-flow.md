@@ -211,13 +211,11 @@ model only where it authors prose:
    with the no-signed-in-session error. The exported credentials and minted
    token live in scan-local variables only — never logged, never persisted,
    never interpolated into events or error text (Gmail/token faults map to
-   short generic messages). A single message get failing drops just that
-   message; profile/list/token faults fail the scan. The account's gws config
-   dir is resolved from the Google-accounts registry (the persisted primary,
-   else first provisioned, else first row; `~/.config/gws` / the hosted baked
-   credential when there is no registered account), the same account the
-   scheduled google jobs target.
-2. **Synthesize** — THREE parallel `generateStructured` calls turn the fetched
+   short generic messages). A failed thread read falls back to the prior
+   per-message best-effort path; profile/list/token faults fail the scan. The
+   account is the instance-bound persisted primary from the Google-accounts
+   registry — machine-global credentials alone are never scanned.
+2. **Synthesize** — THREE initially parallel `generateStructured` calls turn the fetched
    bundle into `{ profile: { displayName, sections[] } }`,
    `{ suggestedTasks[] }`, and
    `{ suggestedRoutines: [{ name, description, usesEmail }] }`; generation is
@@ -225,14 +223,18 @@ model only where it authors prose:
    concurrent. The content rules are server-owned and carried verbatim, split
    by deliverable (person-centric durable-fact sections in a fixed order,
    forbidden transactional content, and the displayName legal-name form on the
-   profile call; concrete one-off task shapes/ranking on the tasks call;
+   profile call; up to ten concrete one-off task titles on the tasks call,
+   each naming the deliverable, real person, organization when known, and
+   subject (generic selectors such as "the most important email" are forbidden);
    evidence-backed recurring work on the routines call). All three calls read
    the SAME rendered mailbox as untrusted quoted evidence. Outputs are
    shape-checked and clamped by `validateScanProfile`, `validateScanTasks`, and
-   `validateScanRoutines` before they land. The profile call is load-bearing:
-   its failure fails the scan. Either suggestion call may fail independently;
-   the scan still lands `ready`, the tasks step falls back to its static task
-   seeds, and the Routines page simply omits personalized suggestions.
+   `validateScanRoutines` before they land. The profile and tasks calls are
+   load-bearing. A rejected tasks call gets one serial retry after the initial
+   batch settles, which covers transient provider-queue contention without
+   slowing the normal path; if that retry also fails, the scan lands `failed`
+   and remains retryable. The routines call is optional and a failure there
+   simply omits personalized routine suggestions.
 
 The runtime must own the model call regardless: skill scripts receive only
 Google OAuth connector secrets, never model API keys — so keeping the fetch in
@@ -250,7 +252,10 @@ profile step's "Try again" after a failure: `POST /api/onboarding/scan` resubmit
 and refusing entirely on a completed record. Should the scan still be running
 when the user reaches the tasks step, that step shows a hint and adopts the
 scan's suggestions when they arrive — unless the user has already edited the
-list, in which case their state wins.
+list, in which case their state wins. Only concrete inbox-derived suggestions
+become checked starter tasks. A terminal scan with no task suggestions renders
+an empty state where the user can add a task or skip; it never substitutes a
+generic task whose eventual target is hidden from the title.
 
 `POST /api/onboarding/scan` flips the record to `running` and returns
 immediately; the pipeline runs in the **background** (fire-and-forget) and,
@@ -308,4 +313,5 @@ chat-topics-tasks-subagents.md).
   task-containers-and-runs.md).
 - The scan's quality is bounded by the model + the mailbox evidence; the
   contract only guarantees the transport (deterministic Gmail HTTP fetch in,
-  three parallel structured synthesis calls, shape-checked + clamped out).
+  an initially parallel structured synthesis batch with one serial task retry,
+  shape-checked + clamped out).

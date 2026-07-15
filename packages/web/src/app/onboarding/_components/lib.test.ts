@@ -1,7 +1,7 @@
 // Unit tests for the pure onboarding helpers: routines-step wizard-state
 // defaults, the capability-derived step sequence (provider step + scan
-// gating), suggested-task selection (scan-ready suggestions vs static
-// fallbacks), late scan-result adoption on the tasks step, timezone labels,
+// gating), inbox-derived suggested-task selection, late scan-result adoption
+// on the tasks step, timezone labels,
 // email linkification segments, and primary-account resolution and ordering.
 // Pure-JS tests
 // (no React/DOM) — they import the helper module directly.
@@ -13,7 +13,6 @@ import {
   adoptScanSuggestions,
   connectGoogleUrl,
   defaultRoutinesState,
-  FALLBACK_SUGGESTED_TASKS,
   initialOnboardingStep,
   needsProviderStep,
   onboardingSteps,
@@ -179,19 +178,19 @@ describe("suggestedTasksFrom", () => {
     expect(suggestedTasksFrom(scan)).toEqual(["Draft a reply to Alice", "Follow up on the invoice"]);
   });
 
-  test("ready scan WITHOUT suggestions falls back to the static list", () => {
-    expect(suggestedTasksFrom({ status: "ready" })).toEqual(FALLBACK_SUGGESTED_TASKS);
+  test("ready scan without suggestions returns no seed tasks", () => {
+    expect(suggestedTasksFrom({ status: "ready" })).toEqual([]);
   });
 
   test.each(["running", "failed", "no_account", "idle"] as const)(
-    "%s scan falls back to the static list",
+    "%s scan returns no seed tasks",
     (status) => {
-      expect(suggestedTasksFrom({ status })).toEqual(FALLBACK_SUGGESTED_TASKS);
+      expect(suggestedTasksFrom({ status })).toEqual([]);
     }
   );
 
-  test("undefined scan falls back to the static list", () => {
-    expect(suggestedTasksFrom(undefined)).toEqual(FALLBACK_SUGGESTED_TASKS);
+  test("undefined scan returns no seed tasks", () => {
+    expect(suggestedTasksFrom(undefined)).toEqual([]);
   });
 });
 
@@ -217,7 +216,7 @@ describe("adoptScanSuggestions", () => {
     expect(adoptScanSuggestions(undefined, false)).toBeUndefined();
   });
 
-  test("a ready scan without suggestions keeps the fallbacks", () => {
+  test("a ready scan without suggestions keeps the empty list", () => {
     expect(adoptScanSuggestions({ status: "ready" }, false)).toBeUndefined();
     expect(adoptScanSuggestions({ status: "ready", suggestedTasks: [] }, false)).toBeUndefined();
   });

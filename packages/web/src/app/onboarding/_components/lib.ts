@@ -70,30 +70,19 @@ export function removeSeededItem<T extends { text: string; checked: boolean }>(i
   return index < 0 ? items : items.filter((_, i) => i !== index);
 }
 
-// Shown on the tasks step when the Gmail scan hasn't produced suggestions
-// (still running, failed, or no Google account to scan). Same rules the scan
-// prompt enforces: seeded tasks must be work Gini can complete on its own —
-// reply drafts, follow-up drafts for outbound mail awaiting the other party,
-// doc drafts, doc reviews. No summaries, never actions the user has to take.
-export const FALLBACK_SUGGESTED_TASKS = [
-  "Draft a reply to the most important email in my inbox",
-  "Draft follow-ups for emails I sent that never got a reply",
-  "Find everything I need to follow up on",
-  "Draft an agenda doc for my next meeting"
-];
-
-// The scan's suggestions when it finished with any, otherwise the static
-// fallbacks — never an empty list.
+// Only inbox-derived suggestions become one-click starter tasks. A missing,
+// running, failed, or empty scan returns no rows: the tasks step may offer an
+// empty state, but it must never seed broad prompts that hide which email or
+// meeting Gini will actually work on.
 export function suggestedTasksFrom(scan: OnboardingScan | undefined): string[] {
-  const fromScan = scan?.status === "ready" ? (scan.suggestedTasks ?? []) : [];
-  return fromScan.length > 0 ? fromScan : FALLBACK_SUGGESTED_TASKS;
+  return scan?.status === "ready" ? (scan.suggestedTasks ?? []) : [];
 }
 
 // Whether a scan that turned ready AFTER the step-5 snapshot was taken should
 // replace the displayed list: only while the user hasn't touched it (no
 // toggle, custom add, or seeding in flight), and only when the scan actually
-// produced suggestions — a ready-but-empty scan keeps the fallbacks. Returns
-// the replacement list, or undefined to keep the current one.
+// produced suggestions. Returns the replacement list, or undefined to keep
+// the current one.
 export function adoptScanSuggestions(
   scan: OnboardingScan | undefined,
   touched: boolean

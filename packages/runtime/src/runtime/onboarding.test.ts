@@ -646,7 +646,7 @@ describe("web onboarding api", () => {
     expect(validateScanTasks({ suggestedTasks: "reply to boss" })).toBeUndefined();
 
     // The oversized suggestion is dropped (never a pre-checked one-click
-    // seed), then the list caps at 10.
+    // seed), then the starter-task list caps at ten rows.
     const long = "x".repeat(400);
     const clamped = validateScanTasks({ suggestedTasks: [long, ...Array.from({ length: 14 }, (_, i) => `task ${i}`)] });
     expect(clamped).toHaveLength(10);

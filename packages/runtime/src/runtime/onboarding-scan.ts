@@ -11,8 +11,8 @@
 //   2. Synthesis — THREE parallel `generateStructured` calls turn the bundle
 //      into the profile, suggestedTasks, and suggestedRoutines (generation is
 //      output-token-bound, so separate calls keep the deliverables concurrent).
-//      The profile call is load-bearing; either suggestion call may
-//      fail independently and the scan still lands ready.
+//      Profile and task suggestions are load-bearing; a rejected tasks call is
+//      retried once after the parallel batch settles. Routines remain optional.
 //
 // runProfileScan orchestrates fetch → synthesize → validate/clamp and NEVER
 // throws to the caller: any fetch/model/transport fault resolves to
@@ -503,9 +503,9 @@ const PROFILE_CONTENT_RULES = [
 const TASKS_CONTENT_RULES = [
   "Reply with a JSON object and nothing else, matching this shape:",
   "{",
-  '  "suggestedTasks": ["Reply to the recruiter about the open role", "Follow up with the vendor on the unpaid invoice"]',
+  '  "suggestedTasks": ["Draft a reply to Jordan from Acme about pricing", "Draft a follow-up to Priya at Northstar about the contract"]',
   "}",
-  "Rules: state only facts supported by the mailbox — no speculation. suggestedTasks must be 5–7 concrete tasks that reference real emails, and every one must be work Gini can complete on its own, in exactly these shapes: (a) draft a reply to an email where the OTHER party wrote last and is waiting on the user (drafts only — Gini never sends); (b) draft a follow-up for an email the USER sent that got no response — chasing what the other party still owes (an answer, a document, an action); (c) draft a document the user plainly needs (an agenda, prep notes); (d) review a document that was shared with the user. Check who sent the LAST message in every thread before choosing shape (a) vs (b). Each suggestedTask is a brief one-line TITLE, not a description: 6–12 words that name the action, the real person or party from the thread, and the subject — nothing more. The two examples above are illustrative only; use the actual people and subjects from this mailbox. Do NOT restate the email's contents, quote the thread subject, or explain why the task matters — no embedded email addresses, no dates or quotes justifying it, no \"she asked … and is waiting\" clauses. A short identifying detail (a meeting time, a dollar amount) is fine; a sentence of reasoning is not. Gini rediscovers the specifics when it works the task. At most ONE task per email thread — when a thread could yield several, pick the single most useful one. A follow-up chases what the other party owes (their answer, their confirmation, their action) and must never restate or re-send what the user already said in their own last message. Do NOT suggest summarize-this-thread, status-memo, or compile-context tasks — summaries are not starter tasks. Rank by what matters to the user: blocking legal/immigration/financial matters and waiting counterparties first, routine notices and social invites last — a minor item must never displace an important thread the user owes a response on (an attorney, investor, or partner waiting on the user ALWAYS makes the list). Replies awaiting the user come first, then follow-ups chasing the other party. Never suggest a task the user must perform themselves — signing, filing, approving, rating, granting access, or clicking through an external service."
+  "Rules: state only facts supported by the mailbox — no speculation. Choose up to 10 high-value concrete tasks that reference real emails; return fewer rather than inventing work to hit a quota. Every task must be work Gini can complete on its own, in exactly these shapes: (a) draft a reply to an email where the OTHER party wrote last and is waiting on the user (drafts only — Gini never sends); (b) draft a follow-up for an email the USER sent that got no response — chasing what the other party still owes (an answer, a document, an action); (c) draft a document the user plainly needs (an agenda, prep notes); (d) review a document that was shared with the user. Check who sent the LAST message in every thread before choosing shape (a) vs (b). Each suggestedTask is a brief one-line TITLE, not a description: 6–12 words that name the concrete deliverable, the real person or party from the thread, their organization when the mailbox supports it, and the subject — nothing more. Reply titles must begin \"Draft a reply to\" and outbound follow-up titles must begin \"Draft a follow-up to\"; never shorten either to \"Reply\" or \"Follow up\". The two examples above are illustrative only; use the actual people, organizations, and subjects from this mailbox. Never output a generic selector such as \"the most important email\", \"emails that never got a reply\", \"everything I need to follow up on\", or \"my next meeting\". Do NOT restate the email's contents, quote the thread subject, or explain why the task matters — no embedded email addresses, no dates or quotes justifying it, no \"she asked … and is waiting\" clauses. A short identifying detail (a meeting time, a dollar amount) is fine; a sentence of reasoning is not. Gini rediscovers the specifics when it works the task. At most ONE task per email thread — when a thread could yield several, pick the single most useful one. A follow-up chases what the other party owes (their answer, their confirmation, their action) and must never restate or re-send what the user already said in their own last message. Do NOT suggest summarize-this-thread, status-memo, or compile-context tasks — summaries are not starter tasks. Rank by what matters to the user: blocking legal/immigration/financial matters and waiting counterparties first, routine notices and social invites last — a minor item must never displace an important thread the user owes a response on (an attorney, investor, or partner waiting on the user ALWAYS makes the list). Replies awaiting the user come first, then follow-ups chasing the other party. Never suggest a task the user must perform themselves — signing, filing, approving, rating, granting access, or clicking through an external service."
 ].join("\n");
 
 const ROUTINES_CONTENT_RULES = [
@@ -639,8 +639,8 @@ const routinesValidator: StructuredValidator<OnboardingRoutineSuggestion[]> = {
 
 // Run the deterministic scan: fetch the mailbox, then make THREE PARALLEL
 // structured model calls — profile, suggestedTasks, and suggestedRoutines.
-// The profile call is load-bearing (its failure fails the scan); either
-// suggestion call may fail independently and the scan still lands ready.
+// Profile and task suggestions are load-bearing (a rejected tasks call gets one
+// serial retry after the batch); routine suggestions may fail independently.
 // Any fetch/transport fault (or a signed-out session) resolves to
 // { status: "failed" } — never a throw, so the background caller can always
 // finalize the record. `gwsSpawn` + `fetchImpl` are injectable so the pipeline
@@ -665,17 +665,19 @@ export async function runProfileScan(
     const profilePrompt = buildProfilePrompt(fetched.bundle);
     const tasksPrompt = buildTasksPrompt(fetched.bundle);
     const routinesPrompt = buildRoutinesPrompt(fetched.bundle);
-    const [profileResult, tasksResult, routinesResult] = await Promise.allSettled([
+    const tasksRequest = {
+      ...tasksPrompt,
+      schemaName: "onboarding_scan_tasks",
+      validator: tasksValidator,
+      echoTag: "onboarding-scan-tasks"
+    };
+    const [profileResult, initialTasksResult, routinesResult] = await Promise.allSettled([
       generateStructured(
         config,
         { ...profilePrompt, schemaName: "onboarding_scan_profile", validator: profileValidator, echoTag: "onboarding-scan-profile" },
         providerOverride
       ),
-      generateStructured(
-        config,
-        { ...tasksPrompt, schemaName: "onboarding_scan_tasks", validator: tasksValidator, echoTag: "onboarding-scan-tasks" },
-        providerOverride
-      ),
+      generateStructured(config, tasksRequest, providerOverride),
       generateStructured(
         config,
         {
@@ -687,11 +689,23 @@ export async function runProfileScan(
         providerOverride
       )
     ]);
+    let tasksResult = initialTasksResult;
     if (profileResult.status === "rejected") {
       const reason: unknown = profileResult.reason;
       return { status: "failed", error: reason instanceof Error ? reason.message : String(reason) };
     }
-    const suggestedTasks = tasksResult.status === "fulfilled" ? tasksResult.value.data : [];
+    // Task suggestions are the final step's actual work, not optional garnish.
+    // Retry a rejected parallel call once after the other requests have settled
+    // (notably a transient provider queue rejection); a second failure keeps the
+    // scan retryable instead of silently substituting generic task seeds.
+    if (tasksResult.status === "rejected") {
+      try {
+        tasksResult = { status: "fulfilled", value: await generateStructured(config, tasksRequest, providerOverride) };
+      } catch (error) {
+        return { status: "failed", error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    const suggestedTasks = tasksResult.value.data;
     const suggestedRoutines = routinesResult.status === "fulfilled" ? routinesResult.value.data : [];
     return {
       status: "ready",

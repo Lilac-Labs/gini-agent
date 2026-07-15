@@ -23,12 +23,11 @@ Use `gws calendar` to list events, create and update events, look up free/busy w
 
 ## Prerequisites
 
-- If this deployment is managed/hosted, the Google credential is already provisioned at sign-in — `gws` is installed and authenticated, so skip the setup flow below and run `gws` directly. Scopes are fixed at sign-in on a managed deployment: when a call fails with `scope required` or HTTP 401, tell the user which action needs a scope their account wasn't granted, instead of trying to set anything up. (The scope list below still describes which verb needs which scope.)
-- `gws` installed and authenticated. If `gws` is not on PATH OR `gws auth status` reports no authenticated user, do NOT silently call setup. Instead, in a single short reply to the user:
+- `gws` must be installed. If it is not on PATH, do NOT silently call setup. Instead, in a single short reply to the user:
   1. State plainly what's missing — e.g. "Google Workspace access isn't set up on this machine yet" or "your Google sign-in has expired."
   2. Ask one sentence: "Want me to walk you through setting it up?" Wait for the user's answer.
   3. If they say yes, call `read_skill` with name `google-workspace-setup` and run that skill's onboarding flow turn-by-turn. If they say no or ask to defer, acknowledge briefly and stop — do not retry the original request.
-- Apply the same flow when any `gws calendar ...` call fails mid-task with `command not found` / ENOENT, HTTP 401, "no credentials", or "scope required". Don't report the failure as a dead end — surface the missing prerequisite and ask if the user wants to set it up before moving on.
+- If `gws auth status` reports no authenticated user, or a calendar call fails with an auth error, call `request_google_account`, tell the user to use the connect/reconnect button, then stop and wait. For `scope required`, name the missing scope before offering the reconnect button.
 - OAuth scopes the user picked at login must cover the verbs the agent will use:
   - Read-only agenda / free-busy: `calendar.readonly`
   - Create, update, delete events: `calendar.events` (or full `calendar`)
@@ -48,7 +47,7 @@ Selection rule: one account connected → just use it. Two or more:
 - A read/lookup/search the user didn't tie to an account (e.g. listing events, searching mail, finding a doc) → run it against **every** connected account (one `gws` call per config dir) and aggregate, labeling each result by its tag and email. Don't pick just one, and don't ask — the user wants the whole picture across accounts.
 - A write (send, create, edit, delete) with no account named → ASK which account first; never guess.
 
-If no accounts are connected yet, fall back to the setup flow in Prerequisites (`read_skill` with `google-workspace-setup`). On a managed/hosted deployment an account is always connected, so this case doesn't arise.
+If no accounts are connected yet, fall back to the setup flow in Prerequisites (`read_skill` with `google-workspace-setup`).
 
 ## When to Use
 

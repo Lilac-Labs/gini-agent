@@ -28,7 +28,10 @@ no approval) and, for EACH of your watches:
 
 1. Checks the Google sign-in (once for the session). If signed out, every watch
    reports `needs_auth` and nothing is drafted — the watches stay active and
-   recover the moment you re-authenticate.
+   recover the moment you re-authenticate. Re-auth happens through the
+   `request_google_account` reconnect button in chat, which leads to the
+   Integrations page — never `gws auth login`, and never a browser-driven
+   Google sign-in.
 2. Lists new mail matching that watch's query via `gws`, bounded by a per-watch
    watermark so steady-state polling lists almost nothing.
 3. Drops automated senders (no-reply, mailer-daemon, notifications, …) and your

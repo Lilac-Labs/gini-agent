@@ -348,7 +348,7 @@ describe("GET /api/home", () => {
     const handler = createHandler(config);
     const ids = await mutateState(config.instance, (state) => {
       // A user-started conversation (Message mode) with a completed run. It
-      // skips the tasks list (it lives in Home's Chats tab) but
+      // skips the tasks list (it lives in Home's Chats section) but
       // still feeds Recents, where it renders with the chat icon.
       const convo = createTopic(state, { title: "Chat with Gini", startedAs: "message" });
       const run = seedTask(state, convo.id, "completed", "2026-07-01T10:00:00.000Z", { summary: "Answered." });

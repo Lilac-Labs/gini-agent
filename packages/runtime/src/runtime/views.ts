@@ -161,7 +161,7 @@ function reviewForAuthorization(auth: { id: string; action: string }): NonNullab
 // archived containers never appear; the root Chat (kind:"agent") and bridge
 // sessions are not containers on home — Chat is its own surface.
 // Message-mode conversations (startedAs === "message") also skip the TASKS
-// list — they live in Home's Chats tab, so a parked question or
+// list — they live in Home's Chats section, so a parked question or
 // finished reply there never reads as a task row. They still feed Recents.
 //
 // Acknowledged containers whose latest outcome is a completed run resurface
@@ -225,7 +225,7 @@ export function homeView(
       }
     }
     // Recents above still applies; only the task-row path skips message-mode
-    // conversations (they belong to Home's Chats tab, not the
+    // conversations (they belong to Home's Chats section, not the
     // home tasks queue). Undefined startedAs (older records, router topics)
     // keeps the row exactly as before.
     if (session.startedAs === "message") continue;

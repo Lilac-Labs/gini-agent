@@ -83,7 +83,7 @@ describe("homeView", () => {
     readState(config.instance);
     const ids = await mutateState(config.instance, (state) => {
       // Message conversation parked on a question: needs_input attention,
-      // but it lives in Home's Chats tab — never a task row.
+      // but it lives in Home's Chats section — never a task row.
       const askingMessage = createTopic(state, { title: "hi", startedAs: "message" });
       seedTask(state, askingMessage.id, "needs_input", "2026-07-01T10:00:00.000Z");
 

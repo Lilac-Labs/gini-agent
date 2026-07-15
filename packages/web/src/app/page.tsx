@@ -11,11 +11,9 @@ import { HomeComposer } from "@/components/home/HomeComposer";
 import { HomeDoneList } from "@/components/home/HomeDoneList";
 import { HomeTaskList } from "@/components/home/HomeTaskList";
 import { RecentsList } from "@/components/home/RecentsList";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
-// The home page: a daily surface with one shared composer and Tasks/Chats
-// tabs. Tasks owns the attention queue, Done section, and Recents artifact
-// feed; Chats owns the user's active conversations.
+// The home page: a daily surface with one shared composer followed by
+// independently collapsible Tasks, Chats, Done, and Recents sections.
 // The old ops dashboard lives on at /overview (linked from Settings). No
 // PageHeader — the greeting is the header.
 //
@@ -57,24 +55,10 @@ export default function HomePage() {
           <div className="mx-auto flex w-full max-w-[720px] flex-col gap-[26px] px-4 py-6 pb-20 md:px-6">
             <Greeting />
             <HomeComposer />
-            <Tabs defaultValue="tasks" className="gap-[18px]">
-              <TabsList variant="line" className="self-start">
-                <TabsTrigger value="tasks" className="px-2.5">
-                  Tasks
-                </TabsTrigger>
-                <TabsTrigger value="chats" className="px-2.5">
-                  Chats
-                </TabsTrigger>
-              </TabsList>
-              <TabsContent value="tasks" className="flex flex-col gap-[26px]">
-                <HomeTaskList />
-                <HomeDoneList />
-                <RecentsList />
-              </TabsContent>
-              <TabsContent value="chats">
-                <HomeChatList />
-              </TabsContent>
-            </Tabs>
+            <HomeTaskList />
+            <HomeChatList />
+            <HomeDoneList />
+            <RecentsList />
           </div>
         </div>
         {panelSessionId ? (

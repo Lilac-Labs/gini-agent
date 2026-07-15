@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Check, ChevronDown, ChevronRight } from "lucide-react";
+import { Check } from "lucide-react";
 import { useTopicPanel } from "@/components/chat/TopicPanelContext";
 import { formatRecentTimestamp } from "@/components/chat/relative-time";
+import { HomeSectionHeader } from "@/components/home/HomeSectionHeader";
 import { useHome } from "@/lib/queries";
 import { useMounted } from "@/lib/use-mounted";
 
@@ -34,16 +35,12 @@ export function HomeDoneList() {
 
   return (
     <div className="flex flex-col gap-0.5">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1.5 px-0.5 pb-1.5 text-left text-xs text-muted-foreground transition-colors hover:text-foreground"
-      >
-        {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
-        <span>Done</span>
-        <span className="opacity-60">· {done.length}</span>
-      </button>
+      <HomeSectionHeader
+        title="Done"
+        count={done.length}
+        open={open}
+        onToggle={() => setOpen((value) => !value)}
+      />
 
       {open
         ? done.map((item) => (

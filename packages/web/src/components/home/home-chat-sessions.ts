@@ -1,6 +1,6 @@
 import type { ChatSession } from "@/lib/view-types";
 
-// Conversations shown in Home's Chats tab: user-started message containers
+// Conversations shown in Home's Chats section: user-started message containers
 // plus routine delivery channels. Task-mode, pinned, archived, headless, and
 // feature-owned containers belong to their existing surfaces instead.
 export function selectHomeChatSessions(

@@ -20,6 +20,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu";
+import { HomeSectionHeader } from "@/components/home/HomeSectionHeader";
 import { selectHomeChatSessions } from "@/components/home/home-chat-sessions";
 import { api } from "@/lib/api";
 import { useAllChatSessions, useInvalidate, useStatus } from "@/lib/queries";
@@ -32,6 +33,7 @@ export function HomeChatList() {
   const invalidate = useInvalidate();
   const status = useStatus();
   const allSessions = useAllChatSessions();
+  const [open, setOpen] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState<ChatSession | null>(null);
   const chats = useMemo(
     () => selectHomeChatSessions(allSessions.data ?? [], status.data?.activeAgent?.id),
@@ -54,29 +56,37 @@ export function HomeChatList() {
 
   return (
     <>
-      <div className="flex flex-col gap-2">
-        <div className="flex justify-end px-0.5">
-          <Button
-            data-ph-capture="true"
-            variant="outline"
-            size="sm"
-            onClick={() => router.push("/?compose=message")}
-          >
-            <Plus />
-            New chat
-          </Button>
-        </div>
+      <div className="flex flex-col gap-0.5">
+        <HomeSectionHeader
+          title="Chats"
+          count={chats.length}
+          open={open}
+          onToggle={() => setOpen((value) => !value)}
+          action={
+            <Button
+              data-ph-capture="true"
+              variant="outline"
+              size="sm"
+              onClick={() => router.push("/?compose=message")}
+            >
+              <Plus />
+              New chat
+            </Button>
+          }
+        />
 
-        {chats.length === 0 ? (
-          <div className="py-4 text-center text-sm text-muted-foreground">No chats yet</div>
-        ) : (
+        {open && chats.length === 0 ? (
+          <div className="py-4 text-center text-sm text-muted-foreground">
+            <span data-ph-capture="true">No chats yet</span>
+          </div>
+        ) : open ? (
           <ul className="flex flex-col gap-0.5">
             {chats.map((session) => {
               const unread = isUnread(session);
               return (
                 <li
                   key={session.id}
-                  className="group/row flex items-center rounded-lg transition-colors hover:bg-accent/45"
+                  className="ph-no-capture group/row flex items-center rounded-lg transition-colors hover:bg-accent/45"
                 >
                   <button
                     type="button"
@@ -134,7 +144,7 @@ export function HomeChatList() {
               );
             })}
           </ul>
-        )}
+        ) : null}
       </div>
 
       <DeleteConversationDialog
@@ -177,28 +187,30 @@ function DeleteConversationDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Delete {session ? `"${session.title}"` : "this conversation"}?</DialogTitle>
-          <DialogDescription data-ph-capture="true">
-            This permanently deletes the conversation and its full history. This can&apos;t be
-            undone.
+          <DialogTitle className="ph-no-capture">
+            Delete {session ? `"${session.title}"` : "this conversation"}?
+          </DialogTitle>
+          <DialogDescription>
+            <span data-ph-capture="true">
+              This permanently deletes the conversation and its full history. This can&apos;t be
+              undone.
+            </span>
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
           <Button
-            data-ph-capture="true"
             variant="outline"
             onClick={() => onOpenChange(false)}
             disabled={remove.isPending}
           >
-            Cancel
+            <span data-ph-capture="true">Cancel</span>
           </Button>
           <Button
-            data-ph-capture="true"
             variant="destructive"
             onClick={() => session && remove.mutate(session.id)}
             disabled={remove.isPending}
           >
-            {remove.isPending ? "Deleting…" : "Delete"}
+            {remove.isPending ? "Deleting…" : <span data-ph-capture="true">Delete</span>}
           </Button>
         </DialogFooter>
       </DialogContent>

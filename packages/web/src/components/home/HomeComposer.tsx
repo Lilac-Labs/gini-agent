@@ -141,7 +141,7 @@ export function HomeComposer() {
     clearAttachments();
     const messageMode = mode === "message";
     startTask.mutate(
-      // startedAs records the creation gesture: the Home Chats tab
+      // startedAs records the creation gesture: the Home Chats section
       // lists startedAs === "message" containers; Task-mode mints stay home
       // work items only.
       { content, images, startedAs: messageMode ? "message" : "task" },

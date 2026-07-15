@@ -83,7 +83,7 @@ Only **facts** persist on `ChatSessionRecord`: `pinned`, `headless`, `acknowledg
 home checkbox (`acknowledgeContainer` deliberately does not bump `updatedAt` — checking
 a row off is a read gesture, not activity). `startedAs` (`"task" | "message"`) records
 the composer gesture that minted the container — immutable presentation intent, not
-lifecycle; Home's Chats tab lists `startedAs === "message"` only, and the
+lifecycle; Home's Chats section lists `startedAs === "message"` only, and the
 field stays absent on router/agent/job mints and pre-field records (unknown ≠ either).
 
 ## The home surface

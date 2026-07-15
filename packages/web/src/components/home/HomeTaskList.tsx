@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
+import { HomeSectionHeader } from "@/components/home/HomeSectionHeader";
 import { HomeTaskRow } from "@/components/home/HomeTaskRow";
 import { useHome, useTasks } from "@/lib/queries";
 import type { ApiError } from "@/lib/api";
@@ -19,6 +20,7 @@ function firstLine(text: string | undefined): string | undefined {
 export function HomeTaskList() {
   const home = useHome();
   const tasksQuery = useTasks();
+  const [open, setOpen] = useState(true);
 
   // containerId → live status line. Last write wins; a container has at most
   // one live run (serial per container), so collisions don't happen in
@@ -34,10 +36,12 @@ export function HomeTaskList() {
     return map;
   }, [tasksQuery.data]);
 
+  const tasks = home.data?.tasks;
+  let body: ReactNode;
   if (!home.data) {
     if (home.isError) {
       const unreachable = (home.error as ApiError).unreachable === true;
-      return (
+      body = (
         <div className="py-4 text-center text-xs text-muted-foreground">
           {unreachable ? (
             "Reconnecting…"
@@ -52,42 +56,52 @@ export function HomeTaskList() {
           )}
         </div>
       );
-    }
-    // Skeleton mirrors the loaded task rows so the swap to real data doesn't
-    // shift the layout. The tab itself owns the section label.
-    return (
-      <div className="flex flex-col gap-0.5">
-        {[0, 1, 2].map((i) => (
-          <div key={i} className="flex items-start gap-3 px-1 py-2.5">
-            <Skeleton className="mt-px size-[17px] rounded-sm" />
-            <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-              <Skeleton className="h-4 w-3/5" />
-              <Skeleton className="h-3.5 w-4/5" />
+    } else {
+      // Skeleton mirrors the loaded task rows so the swap to real data doesn't
+      // shift the layout. The disclosure header itself stays stable.
+      body = (
+        <div className="flex flex-col gap-0.5">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="flex items-start gap-3 px-1 py-2.5">
+              <Skeleton className="mt-px size-[17px] rounded-sm" />
+              <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+                <Skeleton className="h-4 w-3/5" />
+                <Skeleton className="h-3.5 w-4/5" />
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  const tasks = home.data.tasks;
-  if (tasks.length === 0) {
-    return (
+          ))}
+        </div>
+      );
+    }
+  } else if (home.data.tasks.length === 0) {
+    body = (
       <div className="py-4 text-center text-sm text-muted-foreground">
         What should I take on first?
+      </div>
+    );
+  } else {
+    body = (
+      <div className="flex flex-col gap-0.5">
+        {home.data.tasks.map((item) => (
+          <HomeTaskRow
+            key={item.id}
+            item={item}
+            workingText={workingTextBySession.get(item.id)}
+          />
+        ))}
       </div>
     );
   }
 
   return (
     <div className="flex flex-col gap-0.5">
-      {tasks.map((item) => (
-        <HomeTaskRow
-          key={item.id}
-          item={item}
-          workingText={workingTextBySession.get(item.id)}
-        />
-      ))}
+      <HomeSectionHeader
+        title="Tasks"
+        count={tasks?.length}
+        open={open}
+        onToggle={() => setOpen((value) => !value)}
+      />
+      {open ? body : null}
     </div>
   );
 }

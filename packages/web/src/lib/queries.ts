@@ -999,7 +999,7 @@ export function useHome() {
 
 // Direct container start (POST /api/containers) — both home composer modes.
 // `startedAs` records the creation gesture ("task" stays a home work item;
-// "message" lists the conversation in Home's Chats tab).
+// "message" lists the conversation in Home's Chats section).
 // An optional product-authored title lets flows such as suggested-routine
 // setup keep the Home row compact while sending a fuller first-turn brief.
 // Optimistically prepends a working row so the list responds instantly; on

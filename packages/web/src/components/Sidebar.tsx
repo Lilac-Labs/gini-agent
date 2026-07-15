@@ -256,8 +256,6 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
             </li>
           </ul>
 
-          <div className="h-px bg-sidebar-border" />
-
           {/* Topics */}
           {topics.length > 0 ? (
             <>

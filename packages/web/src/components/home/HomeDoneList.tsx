@@ -24,7 +24,7 @@ export function HomeDoneList() {
   const [open, setOpen] = useState(true);
 
   if (!home.data) return null;
-  const done = home.data.done;
+  const done = home.data.done ?? [];
   if (done.length === 0) return null;
 
   const openThread = (id: string) => {

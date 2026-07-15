@@ -73,7 +73,7 @@ export function HomeComposer() {
     }
   };
 
-  // /?compose=message (the sidebar Chats "+") deep-links straight into
+  // /?compose=message (the Home Chats "New chat" action) deep-links into
   // Chat mode, /?compose=task (the routines "Create routine" entry point)
   // into Task mode with the textarea focused, then strips the params so
   // reload/back-nav doesn't re-trigger. /?prompt=<text> additionally seeds
@@ -141,7 +141,7 @@ export function HomeComposer() {
     clearAttachments();
     const messageMode = mode === "message";
     startTask.mutate(
-      // startedAs records the creation gesture: the sidebar Chats section
+      // startedAs records the creation gesture: the Home Chats tab
       // lists startedAs === "message" containers; Task-mode mints stay home
       // work items only.
       { content, images, startedAs: messageMode ? "message" : "task" },

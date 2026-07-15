@@ -56,7 +56,7 @@ export function profileCardView(
 
 // The request body seeding one step-5 task. Must match POST /api/containers
 // (startTaskContainer): startedAs "task" is what keeps the seeded container a
-// home work item instead of a sidebar Chats conversation, so a drift here
+// home work item instead of a Home Chats conversation, so a drift here
 // silently strands seeded tasks off the task-first home.
 export function seedTaskBody(content: string) {
   return { content, client: "web", startedAs: "task" } as const;

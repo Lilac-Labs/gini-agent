@@ -53,11 +53,10 @@ export function HomeTaskList() {
         </div>
       );
     }
-    // Skeleton mirrors a loaded section (label + rows) so the swap to real
-    // rows doesn't shift the layout.
+    // Skeleton mirrors the loaded task rows so the swap to real data doesn't
+    // shift the layout. The tab itself owns the section label.
     return (
       <div className="flex flex-col gap-0.5">
-        <div className="px-0.5 pb-1.5 text-xs text-muted-foreground">Tasks</div>
         {[0, 1, 2].map((i) => (
           <div key={i} className="flex items-start gap-3 px-1 py-2.5">
             <Skeleton className="mt-px size-[17px] rounded-sm" />
@@ -82,7 +81,6 @@ export function HomeTaskList() {
 
   return (
     <div className="flex flex-col gap-0.5">
-      <div className="px-0.5 pb-1.5 text-xs text-muted-foreground">Tasks</div>
       {tasks.map((item) => (
         <HomeTaskRow
           key={item.id}

@@ -1103,8 +1103,8 @@ export interface ChatSessionRecord {
   surfaced?: boolean;
   // Records the creation gesture: which composer mode the user started the
   // container from — "task" (a fire-and-forget work item that lives on home)
-  // or "message" (a conversation the user stays in; the sidebar Messages
-  // section lists these). Immutable presentation intent, not lifecycle —
+  // or "message" (a conversation the user stays in; Home's Chats tab lists
+  // these). Immutable presentation intent, not lifecycle —
   // nothing flips it later. Absent on containers minted before the field
   // existed and on router/agent/job-minted containers (unknown ≠ either).
   startedAs?: "task" | "message";

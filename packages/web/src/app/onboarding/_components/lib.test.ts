@@ -135,7 +135,7 @@ describe("onboardingSteps", () => {
 });
 
 describe("seedTaskBody", () => {
-  test("pins the POST /containers contract — drifting it strands seeded tasks off the task-first home or leaks them into sidebar Chats", () => {
+  test("pins the POST /containers contract — drifting it strands seeded tasks off the task-first home or leaks them into Home Chats", () => {
     const body = seedTaskBody("Draft a reply to Alice");
     expect(body).toEqual({
       content: "Draft a reply to Alice",

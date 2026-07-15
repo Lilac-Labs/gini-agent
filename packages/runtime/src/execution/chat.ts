@@ -1644,7 +1644,7 @@ async function generateChatTitleFromBlocks(
       schemaName: "ChatTitle",
       echoTag: "chat-title",
       system: [
-        "You write concise sidebar titles for chat conversations.",
+        "You write concise titles for chat conversations.",
         "Choose the title from the conversation's actual topic and intent.",
         "Return JSON with one field: title.",
         "Use 2 to 7 words. No quotes, emojis, markdown, punctuation padding, or prefixes like \"Chat about\"."

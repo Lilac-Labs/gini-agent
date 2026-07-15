@@ -6,14 +6,16 @@ import { TopicPanel } from "@/components/chat/TopicPanel";
 import { TopicPanelContext } from "@/components/chat/TopicPanelContext";
 import { RoutineDetailsPanel } from "@/components/jobs/RoutineDetailsPanel";
 import { Greeting } from "@/components/home/Greeting";
+import { HomeChatList } from "@/components/home/HomeChatList";
 import { HomeComposer } from "@/components/home/HomeComposer";
 import { HomeDoneList } from "@/components/home/HomeDoneList";
 import { HomeTaskList } from "@/components/home/HomeTaskList";
 import { RecentsList } from "@/components/home/RecentsList";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
-// The home page: a task-first daily surface — greeting, "Give Gini a task"
-// composer, the attention-queue task list, the collapsible Done section,
-// and the Recents artifact feed.
+// The home page: a daily surface with one shared composer and Tasks/Chats
+// tabs. Tasks owns the attention queue, Done section, and Recents artifact
+// feed; Chats owns the user's active conversations.
 // The old ops dashboard lives on at /overview (linked from Settings). No
 // PageHeader — the greeting is the header.
 //
@@ -55,9 +57,24 @@ export default function HomePage() {
           <div className="mx-auto flex w-full max-w-[720px] flex-col gap-[26px] px-4 py-6 pb-20 md:px-6">
             <Greeting />
             <HomeComposer />
-            <HomeTaskList />
-            <HomeDoneList />
-            <RecentsList />
+            <Tabs defaultValue="tasks" className="gap-[18px]">
+              <TabsList variant="line" className="self-start">
+                <TabsTrigger value="tasks" className="px-2.5">
+                  Tasks
+                </TabsTrigger>
+                <TabsTrigger value="chats" className="px-2.5">
+                  Chats
+                </TabsTrigger>
+              </TabsList>
+              <TabsContent value="tasks" className="flex flex-col gap-[26px]">
+                <HomeTaskList />
+                <HomeDoneList />
+                <RecentsList />
+              </TabsContent>
+              <TabsContent value="chats">
+                <HomeChatList />
+              </TabsContent>
+            </Tabs>
           </div>
         </div>
         {panelSessionId ? (

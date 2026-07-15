@@ -552,6 +552,21 @@ describe("provisionAccount", () => {
     expect(readGoogleAccounts()).toHaveLength(1);
   });
 
+  // A tier-3 encrypted `gws auth login` (credentials.enc) outranks the tier-4
+  // credentials.json this flow writes; left in a reused dir it would shadow
+  // every reconnect, so provisioning must remove it.
+  test("re-provisioning removes a stale encrypted login left in the reused dir", async () => {
+    const first = await provisionAccount(input);
+    writeFileSync(join(first.configDir, "credentials.enc"), "stale-encrypted-login");
+
+    const again = await provisionAccount({ ...input, refreshToken: "1//refresh-b" });
+
+    expect(again.configDir).toBe(first.configDir);
+    expect(existsSync(join(first.configDir, "credentials.enc"))).toBe(false);
+    const cred = JSON.parse(readFileSync(join(first.configDir, "credentials.json"), "utf8"));
+    expect(cred.refresh_token).toBe("1//refresh-b");
+  });
+
   test("a different principal mints its own account instead of clobbering the first", async () => {
     const first = await provisionAccount(input);
     const second = await provisionAccount({ ...input, email: "bob@example.com", principal: "sub-bob" });

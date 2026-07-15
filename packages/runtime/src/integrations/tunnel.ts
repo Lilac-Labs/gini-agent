@@ -26,7 +26,7 @@
 // store, browser opener, port resolver, drivers) is injectable so unit tests
 // never hit the network, OAuth, or the host browser. See `setTunnelDeps`.
 
-import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   buildTunnel as realBuildTunnel,
@@ -731,6 +731,13 @@ export async function defaultPersistWorkspaceGrant(
   const tag = existing?.tag ?? PROVISIONED_TAG;
   mkdir(configDir);
   writeFile(join(configDir, "credentials.json"), buildAuthorizedUserCredential(refreshToken));
+  // A tier-3 encrypted `gws auth login` (credentials.enc) outranks the tier-4
+  // plaintext credential just written (gws credential precedence; see ADR
+  // google-multi-account.md), so a stale interactive login left in the reused
+  // dir would shadow every refreshed grant. The relay only issues a refresh
+  // token after a completed consent, so the plain credential is authoritative —
+  // drop the encrypted one.
+  rmSync(join(configDir, "credentials.enc"), { force: true });
   try {
     await register({ tag, configDir, trusted: true, principal });
   } catch {

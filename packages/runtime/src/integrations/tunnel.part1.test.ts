@@ -12,7 +12,7 @@
 // frpc child.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -1119,6 +1119,25 @@ describe("tunnel integration", () => {
     expect(writes[0]!.path).toBe(join(existingDir, "credentials.json"));
     const cred = JSON.parse(writes[0]!.body) as Record<string, string>;
     expect(cred.refresh_token).toBe("rt-refreshed");
+    rmSync(existingDir, { recursive: true, force: true });
+  });
+
+  // A tier-3 encrypted `gws auth login` (credentials.enc) outranks the tier-4
+  // credentials.json this flow writes; left in the reused dir it would shadow
+  // every refreshed grant, so persisting must remove it.
+  test("defaultPersistWorkspaceGrant removes a stale encrypted login from the reused dir", async () => {
+    const existingDir = mkdtempSync(join(tmpdir(), "gini-ws-existing-"));
+    writeFileSync(join(existingDir, "credentials.enc"), "stale-encrypted-login");
+    await defaultPersistWorkspaceGrant(
+      "rt-refreshed",
+      "sub-abc",
+      async (input) => ({ id: "gacct_x", tag: input.tag, email: "", configDir: input.configDir, addedAt: "t" }),
+      () => existingDir,
+      () => {},
+      () => {},
+      () => ({ configDir: existingDir, tag: "work" })
+    );
+    expect(existsSync(join(existingDir, "credentials.enc"))).toBe(false);
     rmSync(existingDir, { recursive: true, force: true });
   });
 

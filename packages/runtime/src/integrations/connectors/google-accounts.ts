@@ -380,6 +380,12 @@ export async function provisionAccount(
     { mode: 0o600 }
   );
   renameSync(tmp, path);
+  // A tier-3 encrypted `gws auth login` (credentials.enc) outranks the tier-4
+  // plaintext file just written (see normalizeHostedGwsEnv's precedence note),
+  // so a stale interactive login left in a reused dir would shadow every
+  // credential this flow delivers. The user just completed a fresh consent, so
+  // the plain credential is authoritative — drop the encrypted one.
+  rmSync(join(configDir, "credentials.enc"), { force: true });
   const account = await registerAccount({
     tag,
     configDir,

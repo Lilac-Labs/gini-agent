@@ -23,12 +23,6 @@ import {
 import type { GoogleAccountStatus } from "@runtime/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle
-} from "@/components/ui/dialog";
 import { api } from "@/lib/api";
 import { useGoogleAuthMode, useInvalidate } from "@/lib/queries";
 import { connectGoogleUrl, primaryAccountId, reloginPrimaryUrl } from "@/app/onboarding/_components/lib";
@@ -81,8 +75,6 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
   // Account whose tag is being edited inline. Null when no row is in edit mode.
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftTag, setDraftTag] = useState("");
-  // Account pending disconnect confirmation. Null when the dialog is closed.
-  const [removing, setRemoving] = useState<GoogleAccountStatus | null>(null);
   // Service grants stay collapsed by default so each connected account takes
   // one compact row. Accounts expand independently.
   const [expandedAccountIds, setExpandedAccountIds] = useState<Set<string>>(() => new Set());
@@ -101,13 +93,10 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
     onError: (error: Error) => toast.error(error.message)
   });
 
-  const remove = useMutation({
-    mutationFn: (id: string) => api<{ id: string }>(`/google/accounts/${id}`, { method: "DELETE" }),
+  const disconnect = useMutation({
+    mutationFn: (id: string) => api<{ id: string }>(`/google/accounts/${id}/instance`, { method: "DELETE" }),
     onSuccess: () => {
-      toast.success("Account removed");
-      setRemoving(null);
-      // "connector-providers" carries the externallySatisfied bit derived
-      // from this registry, so the activation pills refresh immediately.
+      toast.success("Disconnected");
       invalidate(["connectors", "connector-providers", "google-accounts"]);
     },
     onError: (error: Error) => toast.error(error.message)
@@ -117,15 +106,6 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
     mutationFn: (id: string) => api<GoogleAccountStatus>(`/google/accounts/${id}/use`, { method: "POST" }),
     onSuccess: () => {
       toast.success("Google account selected");
-      invalidate(["connectors", "connector-providers", "google-accounts"]);
-    },
-    onError: (error: Error) => toast.error(error.message)
-  });
-
-  const signOut = useMutation({
-    mutationFn: () => api<{ ok: true }>("/google/session/signout", { method: "POST" }),
-    onSuccess: () => {
-      toast.success("Disconnected");
       invalidate(["connectors", "connector-providers", "google-accounts"]);
     },
     onError: (error: Error) => toast.error(error.message)
@@ -278,33 +258,31 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
                         Reconnect
                       </Button>
                     ) : null}
-                    {account.id === primaryId ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={signOut.isPending}
-                        onClick={() => signOut.mutate()}
-                      >
-                        {signOut.isPending ? "Disconnecting…" : "Disconnect"}
-                      </Button>
-                    ) : account.signedIn ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={useAccount.isPending}
-                        onClick={() => useAccount.mutate(account.id)}
-                      >
-                        Make primary
-                      </Button>
+                    {account.id !== primaryId ? (
+                      <>
+                        {account.signedIn ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={useAccount.isPending}
+                            onClick={() => useAccount.mutate(account.id)}
+                          >
+                            Make primary
+                          </Button>
+                        ) : null}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          aria-label={`Disconnect ${account.email || account.tag}`}
+                          disabled={disconnect.isPending}
+                          onClick={() => disconnect.mutate(account.id)}
+                        >
+                          {disconnect.isPending && disconnect.variables === account.id
+                            ? "Disconnecting…"
+                            : "Disconnect"}
+                        </Button>
+                      </>
                     ) : null}
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      aria-label={`Disconnect ${account.tag}`}
-                      onClick={() => setRemoving(account)}
-                    >
-                      Disconnect
-                    </Button>
                     {granted.length > 0 ? (
                       <Button
                         size="icon"
@@ -366,35 +344,6 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
         <PlusIcon className="size-3.5" />
         Add account
       </Button>
-
-      <Dialog
-        open={Boolean(removing)}
-        onOpenChange={(open) => {
-          if (!open && !remove.isPending) setRemoving(null);
-        }}
-      >
-        <DialogContent className="gap-5 border-border bg-card p-7 sm:max-w-md">
-          <DialogTitle className="text-base font-bold text-foreground">
-            Disconnect {removing?.tag ?? "account"}?
-          </DialogTitle>
-          <DialogDescription className="text-[13px] text-muted-foreground">
-            This signs the account out and removes it from the registry. You can reconnect it from chat anytime.
-          </DialogDescription>
-          <div className="flex items-center justify-end gap-2.5 border-t border-border pt-4">
-            <Button type="button" variant="outline" onClick={() => setRemoving(null)} disabled={remove.isPending}>
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              onClick={() => removing && remove.mutate(removing.id)}
-              disabled={!removing || remove.isPending}
-            >
-              {remove.isPending ? "Disconnecting…" : "Disconnect"}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

@@ -1,21 +1,36 @@
 /// <reference lib="dom" />
 
-// Each Google account is a separate disclosure: service grants start hidden,
-// expanding one account does not change its siblings, and its accessible
-// control reports the current state.
+// Each Google account is a separate disclosure, and account actions respect
+// the instance binding: the primary is protected while a secondary can be
+// disconnected without exposing machine-wide credential deletion.
 
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { GoogleAccountStatus } from "@runtime/types";
 import { GoogleAccountsCard } from "./GoogleAccountsCard";
 
 const realFetch = globalThis.fetch;
+let requests: Array<{ url: string; method: string }> = [];
 
 beforeEach(() => {
-  // useGoogleAuthMode owns an incidental query. Leave it pending so this test
-  // stays focused on the local disclosure state without a network dependency.
-  globalThis.fetch = mock(() => new Promise<Response>(() => {})) as unknown as typeof fetch;
+  requests = [];
+  globalThis.fetch = mock((input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const method = init?.method ?? (input instanceof Request ? input.method : "GET");
+    requests.push({ url, method });
+    if (method === "DELETE") {
+      return Promise.resolve(
+        new Response(JSON.stringify({ id: "gacct_personal" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      );
+    }
+    // useGoogleAuthMode owns an incidental query. Leave it pending so these
+    // tests stay focused on local account-card behavior.
+    return new Promise<Response>(() => {});
+  }) as unknown as typeof fetch;
 });
 
 afterEach(() => {
@@ -65,8 +80,6 @@ describe("GoogleAccountsCard disclosures", () => {
   test("accounts start collapsed and expand independently", () => {
     renderAccounts();
 
-    expect(screen.queryByRole("button", { name: "Disconnect" })).not.toBeNull();
-    expect(screen.queryByRole("button", { name: "Sign out of this instance" })).toBeNull();
     expect(screen.queryByText("Gmail")).toBeNull();
     expect(screen.queryByText("Google Calendar")).toBeNull();
 
@@ -87,5 +100,20 @@ describe("GoogleAccountsCard disclosures", () => {
     fireEvent.click(screen.getByRole("button", { name: "Collapse work@example.com details" }));
     expect(screen.queryByText("Gmail")).toBeNull();
     expect(screen.queryByText("Google Calendar")).not.toBeNull();
+  });
+
+  test("protects the primary and disconnects only the selected secondary", async () => {
+    renderAccounts();
+
+    expect(screen.queryByRole("button", { name: "Disconnect work@example.com" })).toBeNull();
+    expect(screen.queryByText("Remove from this machine")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect personal@example.com" }));
+
+    await waitFor(() => {
+      expect(requests).toContainEqual({
+        url: "/api/runtime/google/accounts/gacct_personal/instance",
+        method: "DELETE"
+      });
+    });
   });
 });

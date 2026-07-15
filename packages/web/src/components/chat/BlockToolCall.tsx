@@ -5,6 +5,7 @@ import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import type { ToolCallBlock, ToolResultBlock } from "@runtime/types";
 import { useCancelTask } from "@/lib/queries";
+import { terminalCommandPresentation } from "@/lib/tool-call-presentation";
 import { iconForTool } from "./tool-icons";
 
 // Pencil "Gini Webapp" tool call row:
@@ -20,7 +21,9 @@ import { iconForTool } from "./tool-icons";
 //     muted gray when errorSeverity is "info" (a calm needs-setup notice,
 //     e.g. web_search with no connector). terminal_exec renders no chip
 //     (its argsPreview is masked server-side); the full command lives in
-//     argsFull.command and is revealed on expand, prefixed with `$ `.
+//     argsFull.command and is revealed on expand, prefixed with `$ `. Gmail
+//     commands are the exception: they render as plain-language email actions
+//     and keep the CLI syntax + machine-local account path hidden.
 //   - Inline spinner (status === "running" && !result, no runningHint):
 //     a small Loader2 sits after the chip while the dispatch is in flight.
 //     Right for short tools (web_fetch, code_exec).
@@ -45,8 +48,10 @@ export function BlockToolCall({
   const running = block.status === "running" && !result;
   const waitingCard = running && Boolean(block.runningHint);
   const inlineSpinner = running && !waitingCard;
-  const command =
+  const rawCommand =
     block.toolName === "terminal_exec" ? String(block.argsFull?.command ?? "") : "";
+  const presentation = terminalCommandPresentation(block.displayLabel, rawCommand);
+  const command = presentation.command;
   const canExpand = Boolean(result) || Boolean(command);
   const Icon = iconForTool(block.toolName);
 
@@ -59,7 +64,7 @@ export function BlockToolCall({
     >
       <Icon className="size-[15px] shrink-0 text-muted-foreground" aria-hidden="true" />
       <span className="shrink-0 text-[13px] font-semibold text-foreground">
-        {block.displayLabel}
+        {presentation.label}
       </span>
       {block.argsPreview ? (
         <span className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-[3px] font-mono text-[12px] text-foreground">

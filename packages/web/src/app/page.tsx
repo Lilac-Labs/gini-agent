@@ -7,11 +7,13 @@ import { TopicPanelContext } from "@/components/chat/TopicPanelContext";
 import { RoutineDetailsPanel } from "@/components/jobs/RoutineDetailsPanel";
 import { Greeting } from "@/components/home/Greeting";
 import { HomeComposer } from "@/components/home/HomeComposer";
+import { HomeDoneList } from "@/components/home/HomeDoneList";
 import { HomeTaskList } from "@/components/home/HomeTaskList";
 import { RecentsList } from "@/components/home/RecentsList";
 
 // The home page: a task-first daily surface — greeting, "Give Gini a task"
-// composer, the attention-queue task list, and the Recents artifact feed.
+// composer, the attention-queue task list, the collapsible Done section,
+// and the Recents artifact feed.
 // The old ops dashboard lives on at /overview (linked from Settings). No
 // PageHeader — the greeting is the header.
 //
@@ -54,6 +56,7 @@ export default function HomePage() {
             <Greeting />
             <HomeComposer />
             <HomeTaskList />
+            <HomeDoneList />
             <RecentsList />
           </div>
         </div>

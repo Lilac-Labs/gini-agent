@@ -9,6 +9,7 @@ import type {
   ConnectorRecord,
   EmailWatcherRecord,
   GoogleAccountStatus,
+  HomeDoneItem,
   HomeTaskItem,
   ImprovementProposal,
   JobRecord,
@@ -978,6 +979,7 @@ export function useChatBlocks(
 export interface HomeView {
   owner?: { firstName?: string };
   tasks: HomeTaskItem[];
+  done: HomeDoneItem[];
   recents: RecentItem[];
 }
 
@@ -1041,7 +1043,7 @@ export function useStartTask() {
         updatedAt: new Date().toISOString()
       };
       qc.setQueryData<HomeView>(homeKey, (prev) =>
-        prev ? { ...prev, tasks: [row, ...prev.tasks] } : { tasks: [row], recents: [] }
+        prev ? { ...prev, tasks: [row, ...prev.tasks] } : { tasks: [row], done: [], recents: [] }
       );
       return { previous, optimisticId };
     },

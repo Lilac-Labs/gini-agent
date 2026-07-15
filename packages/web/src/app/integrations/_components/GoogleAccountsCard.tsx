@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -31,8 +30,7 @@ import {
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api";
 import { useGoogleAuthMode, useInvalidate } from "@/lib/queries";
-import { primaryAccountId, reloginPrimaryUrl } from "@/app/onboarding/_components/lib";
-import type { ChatSession } from "@/lib/view-types";
+import { connectGoogleUrl, primaryAccountId, reloginPrimaryUrl } from "@/app/onboarding/_components/lib";
 
 // The multi-color Google "G" mark, shared by the account rows here and the
 // Integrations page's Google drilldown header.
@@ -64,17 +62,18 @@ const SERVICE_META: Record<string, { label: string; description: string; icon: L
 // The tagged Google accounts from the machine-global registry (plus the
 // boot-registered hosted primary account), rendered as one card per account —
 // email + tag badge, connected date, sign-in status, granted-service rows —
-// with retag / disconnect / add-another flows. Connecting an additional
-// account runs a browser OAuth flow the agent drives, so "Add account" hands
-// the user off to a fresh chat with a seed message rather than attempting
-// OAuth from the page.
+// with retag / disconnect / add-another flows. "Add account" navigates
+// straight into the same-tab browser OAuth round trip onboarding uses
+// (connectGoogleUrl) — this page owns Google OAuth, so it never routes
+// through chat (the agent's request_google_account CTA points back HERE).
 export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus[] }) {
-  const router = useRouter();
   const invalidate = useInvalidate();
-  // Which auth mode shapes the reconnect URL (edge → full sign-in flow, loopback
-  // → gateway PKCE start), and which row is the primary. Only the PRIMARY row's
-  // revoked state heals through reloginPrimaryUrl; non-primary revoked rows keep
-  // the add/reconnect-via-chat affordance.
+  // Which auth mode shapes the connect/reconnect URLs (edge → full sign-in
+  // flow, loopback → gateway PKCE start), and which row is the primary. The
+  // PRIMARY row's revoked state heals through reloginPrimaryUrl (signin intent
+  // re-persists the primary); a non-primary revoked row heals through the add
+  // flow, which identity-matches the existing registry row by email and
+  // rewrites its credential in place.
   const authMode = useGoogleAuthMode();
   const mode = authMode.data?.mode;
   const primaryId = primaryAccountId(accounts);
@@ -110,23 +109,20 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
     onError: (error: Error) => toast.error(error.message)
   });
 
-  // Mirrors the Skills page "Set up via chat" mechanism: POST a session, send a
-  // seed message, then navigate to it so the agent drives the OAuth flow.
-  const addViaChat = useMutation({
-    mutationFn: async () => {
-      const session = await api<ChatSession>("/chat", {
-        method: "POST",
-        body: JSON.stringify({ title: "Connect Google account" })
-      });
-      await api(`/chat/${session.id}/messages`, {
-        method: "POST",
-        body: JSON.stringify({ content: "Connect another Google account.", client: "web" })
-      });
-      return session;
+  const useAccount = useMutation({
+    mutationFn: (id: string) => api<GoogleAccountStatus>(`/google/accounts/${id}/use`, { method: "POST" }),
+    onSuccess: () => {
+      toast.success("Google account selected");
+      invalidate(["connectors", "connector-providers", "google-accounts"]);
     },
-    onSuccess: (session) => {
-      invalidate(["chat", "tasks"]);
-      router.push(`/chat?session=${session.id}`);
+    onError: (error: Error) => toast.error(error.message)
+  });
+
+  const signOut = useMutation({
+    mutationFn: () => api<{ ok: true }>("/google/session/signout", { method: "POST" }),
+    onSuccess: () => {
+      toast.success("Signed out of this instance");
+      invalidate(["connectors", "connector-providers", "google-accounts"]);
     },
     onError: (error: Error) => toast.error(error.message)
   });
@@ -156,6 +152,12 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
           // auth mode so the click can never target the wrong URL.
           const canReloginPrimary =
             account.id === primaryId && !account.signedIn && account.tokenRevoked === true && Boolean(mode);
+          // A non-primary revoked row heals through the ADD flow: the user
+          // re-authorizes the same account, and provisionTarget matches the
+          // existing registry row by email and rewrites its credential in
+          // place — no duplicate row, no primary flip. Same auth-mode gate.
+          const canReconnectNonPrimary =
+            account.id !== primaryId && !account.signedIn && account.tokenRevoked === true && Boolean(mode);
           return (
             <div key={account.id} className="overflow-hidden rounded-xl border border-border bg-card">
               <div className="flex items-center gap-3.5 px-5 py-4">
@@ -244,6 +246,38 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
                         Reconnect
                       </Button>
                     ) : null}
+                    {canReconnectNonPrimary && mode ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        aria-label={`Reconnect ${account.tag}`}
+                        onClick={() =>
+                          window.location.assign(connectGoogleUrl(mode, "/integrations", window.location.origin))
+                        }
+                      >
+                        <RotateCwIcon className="size-3" />
+                        Reconnect
+                      </Button>
+                    ) : null}
+                    {account.id === primaryId ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={signOut.isPending}
+                        onClick={() => signOut.mutate()}
+                      >
+                        {signOut.isPending ? "Signing out..." : "Sign out of this instance"}
+                      </Button>
+                    ) : account.signedIn ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={useAccount.isPending}
+                        onClick={() => useAccount.mutate(account.id)}
+                      >
+                        {account.attached ? "Make primary" : "Use for this instance"}
+                      </Button>
+                    ) : null}
                     <Button
                       size="sm"
                       variant="outline"
@@ -285,11 +319,13 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
         variant="outline"
         size="sm"
         className="self-start"
-        disabled={addViaChat.isPending}
-        onClick={() => addViaChat.mutate()}
+        disabled={!mode}
+        onClick={() =>
+          mode && window.location.assign(connectGoogleUrl(mode, "/integrations", window.location.origin))
+        }
       >
         <PlusIcon className="size-3.5" />
-        {addViaChat.isPending ? "Opening chat…" : "Add account"}
+        Add account
       </Button>
 
       <Dialog

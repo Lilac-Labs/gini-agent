@@ -120,6 +120,15 @@ function outcomeLineFor(outcome: ContainerRunOutcome): string {
     : firstLine;
 }
 
+// Saved Gmail drafts render from a fenced email-draft block and do not create
+// a messaging.send authorization until the user chooses Send on the card.
+function taskProducedEmailDraft(task: Task): boolean {
+  return (
+    typeof task.summary === "string" &&
+    /(?:^|\r?\n)[ \t]*```email-draft[ \t]*(?:\r?\n|$)/.test(task.summary)
+  );
+}
+
 // Map a pending Authorization to the home review affordance. `kind` drives
 // the row icon: an outbound message send reads as an email-style review,
 // file writes as a document review, everything else generic. The label is
@@ -165,9 +174,9 @@ export function homeView(
   const state = readState(config.instance);
   const index = buildContainerAttentionIndex(state);
   // Tasks that produced an outbound-message draft render with the draft icon
-  // in Recents; message-mode containers render with the chat icon instead. One
-  // pass over authorizations (any status — the draft was reviewed by the time
-  // the run completed).
+  // in Recents; message-mode containers render with the chat icon instead.
+  // Authorizations cover approval-gated sends; the final summary covers saved
+  // Gmail drafts rendered as cards before any send is requested.
   const draftTaskIds = new Set<string>();
   for (const auth of state.authorizations) {
     if (auth.action === "messaging.send" && auth.taskId) draftTaskIds.add(auth.taskId);
@@ -204,7 +213,12 @@ export function homeView(
         recents.push({
           id: newest.id,
           containerId: session.id,
-          icon: session.startedAs === "message" ? "chat" : draftTaskIds.has(newest.id) ? "draft" : "document",
+          icon:
+            session.startedAs === "message"
+              ? "chat"
+              : draftTaskIds.has(newest.id) || taskProducedEmailDraft(newest)
+                ? "draft"
+                : "document",
           title: session.title,
           timestamp: newest.updatedAt
         });

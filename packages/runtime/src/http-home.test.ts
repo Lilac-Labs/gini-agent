@@ -270,7 +270,7 @@ describe("GET /api/home", () => {
     });
   });
 
-  test("surfaces a child task even when the parent watcher container is headless", async () => {
+  test("surfaces a draft-producing child task from a headless watcher with the draft icon", async () => {
     const config = buildConfig("home-headless-parent-child");
     const handler = createHandler(config);
 
@@ -285,7 +285,8 @@ describe("GET /api/home", () => {
         surfaced: true
       });
       const childTask = seedTask(state, child.id, "completed", "2026-07-01T10:05:00.000Z", {
-        summary: "Draft ready for review."
+        summary:
+          "Draft ready for review.\n\n```email-draft\nTo: alex@example.com\nSubject: Re: Renewal\nDraftId: draft_123\nAccount: me@example.com\n\nHi Alex,\n\nLet's renew.\n```"
       });
       return { parent: parent.id, child: child.id, childTask: childTask.id };
     });
@@ -304,7 +305,7 @@ describe("GET /api/home", () => {
       {
         id: ids.childTask,
         containerId: ids.child,
-        icon: "document",
+        icon: "draft",
         title: "Draft reply to Alex about renewal",
         timestamp: "2026-07-01T10:05:00.000Z"
       }

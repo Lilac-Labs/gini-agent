@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import {
   CalendarIcon,
   CheckIcon,
+  ChevronDownIcon,
   CircleIcon,
   FileTextIcon,
   HardDriveIcon,
@@ -82,6 +83,9 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
   const [draftTag, setDraftTag] = useState("");
   // Account pending disconnect confirmation. Null when the dialog is closed.
   const [removing, setRemoving] = useState<GoogleAccountStatus | null>(null);
+  // Service grants stay collapsed by default so each connected account takes
+  // one compact row. Accounts expand independently.
+  const [expandedAccountIds, setExpandedAccountIds] = useState<Set<string>>(() => new Set());
 
   const retag = useMutation({
     mutationFn: ({ id, tag }: { id: string; tag: string }) =>
@@ -138,6 +142,15 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
     retag.mutate({ id, tag });
   };
 
+  const toggleAccount = (id: string) => {
+    setExpandedAccountIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   return (
     <div className="flex flex-col gap-3">
       {accounts.length === 0 ? (
@@ -158,6 +171,8 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
           // place — no duplicate row, no primary flip. Same auth-mode gate.
           const canReconnectNonPrimary =
             account.id !== primaryId && !account.signedIn && account.tokenRevoked === true && Boolean(mode);
+          const expanded = expandedAccountIds.has(account.id);
+          const detailsId = `google-account-details-${account.id}`;
           return (
             <div key={account.id} className="overflow-hidden rounded-xl border border-border bg-card">
               <div className="flex items-center gap-3.5 px-5 py-4">
@@ -290,30 +305,50 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
                     >
                       Disconnect
                     </Button>
+                    {granted.length > 0 ? (
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="size-8 shrink-0"
+                        aria-label={`${expanded ? "Collapse" : "Expand"} ${account.email || account.tag} details`}
+                        aria-expanded={expanded}
+                        aria-controls={detailsId}
+                        onClick={() => toggleAccount(account.id)}
+                      >
+                        <ChevronDownIcon
+                          className={`size-4 text-muted-foreground transition-transform ${expanded ? "rotate-180" : ""}`}
+                          aria-hidden
+                        />
+                      </Button>
+                    ) : null}
                   </div>
                 )}
               </div>
-              {granted.map((name) => {
-                const meta = SERVICE_META[name] ?? { label: name, description: "", icon: CircleIcon };
-                const Icon = meta.icon;
-                return (
-                  <div key={name} className="flex items-center gap-3.5 border-t border-border px-5 py-3.5">
-                    <span className="flex size-[34px] shrink-0 items-center justify-center rounded-[9px] border border-border bg-white">
-                      <Icon className="size-[17px] text-muted-foreground" />
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-semibold">{meta.label}</div>
-                      {meta.description ? (
-                        <div className="text-[12.5px] text-muted-foreground">{meta.description}</div>
-                      ) : null}
-                    </div>
-                    <span className="flex items-center gap-1.5 text-[13px] font-semibold text-emerald-600">
-                      <CheckIcon className="size-3.5" />
-                      Enabled
-                    </span>
-                  </div>
-                );
-              })}
+              {expanded ? (
+                <div id={detailsId}>
+                  {granted.map((name) => {
+                    const meta = SERVICE_META[name] ?? { label: name, description: "", icon: CircleIcon };
+                    const Icon = meta.icon;
+                    return (
+                      <div key={name} className="flex items-center gap-3.5 border-t border-border px-5 py-3.5">
+                        <span className="flex size-[34px] shrink-0 items-center justify-center rounded-[9px] border border-border bg-white">
+                          <Icon className="size-[17px] text-muted-foreground" />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm font-semibold">{meta.label}</div>
+                          {meta.description ? (
+                            <div className="text-[12.5px] text-muted-foreground">{meta.description}</div>
+                          ) : null}
+                        </div>
+                        <span className="flex items-center gap-1.5 text-[13px] font-semibold text-emerald-600">
+                          <CheckIcon className="size-3.5" />
+                          Enabled
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
             </div>
           );
         })

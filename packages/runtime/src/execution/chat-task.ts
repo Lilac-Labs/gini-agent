@@ -29,7 +29,7 @@ import {
   recordProviderAuthFailure,
   recordUsage
 } from "../state";
-import { readGoogleAccounts } from "../state/google-accounts";
+import { googleAccountsForInstance } from "../integrations/connectors/google-accounts";
 import { ApprovedActionFailedError, findTask, scheduleAutoRetain } from "../agent";
 import { recordObjectiveOutcomes } from "../learning/outcomes";
 import { recall } from "../memory";
@@ -920,10 +920,10 @@ export async function runChatTask(config: RuntimeConfig, taskId: string): Promis
     (skill) => skill.status === "enabled" && !isSkillActive(state, skill)
   );
   const inactiveSkillsBlock = buildInactiveSkillsBlock(inactiveSkills, state);
-  // Registered Google accounts (multi-account): surface tag/email/config-dir so
+  // This instance's Google accounts (multi-account): surface tag/email/config-dir so
   // the model can target the right account per `gws` command and ask when the
-  // request is ambiguous. Registry is machine-global; read it directly.
-  const connectedAccountsBlock = buildConnectedAccountsBlock(readGoogleAccounts());
+  // request is ambiguous. Other instances' reusable credentials stay hidden.
+  const connectedAccountsBlock = buildConnectedAccountsBlock(googleAccountsForInstance(config.instance));
   // Bound-jobs block: if this chat session has one or more JobRecords whose
   // chatSessionId matches, surface them in the system prompt so the model
   // can act on "this job" / "the reminder" without first calling list_jobs.

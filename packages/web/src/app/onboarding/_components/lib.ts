@@ -142,10 +142,8 @@ export function splitEmailSegments(text: string): Array<{ text: string; email: b
 }
 
 // The "Primary account" on the accounts step: the server-resolved `primary`
-// flag when the gateway sends one (the persisted primaryAccountId, which a
-// sign-in-intent OAuth flips — see connectGoogleUrl), else the pre-flag
-// heuristic: the relay-provisioned account when one exists, else the first
-// (oldest) registered account.
+// flag means this runtime instance has explicitly selected that attached account.
+// Credentials belonging only to other instances are omitted by the server.
 export function primaryAccountId(accounts: GoogleAccountStatus[]): string | undefined {
   const flagged = accounts.find((account) => account.primary);
   return (flagged ?? accounts.find((account) => account.provisioned) ?? accounts[0])?.id;

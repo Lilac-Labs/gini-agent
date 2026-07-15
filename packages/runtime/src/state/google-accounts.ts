@@ -6,8 +6,8 @@
 // persistence of the registry — the orchestration (live status, register,
 // remove) lives in src/integrations/connectors/google-accounts.ts.
 //
-// Storage is machine-global (NOT per-instance state): log in once, the account
-// is available in every instance. The registry file is
+// Storage is machine-global (NOT per-instance state), while product reads are
+// filtered by per-instance bindings. The registry file is
 // ~/.gini/google-accounts/accounts.json, gini-managed config dirs live under
 // ~/.gini/google-accounts/<id>/. The pre-existing ~/.config/gws session is
 // adopted in place (its account's configDir points at ~/.config/gws), so no
@@ -17,7 +17,7 @@
 // so tests can override the env var; os.homedir() caches getpwuid on macOS and
 // won't pick up a runtime HOME change. Writes are atomic (temp + rename) and
 // land at mode 0600. readGoogleAccounts never throws (missing/corrupt → []) —
-// it's on the hot system-prompt path.
+// instance-filtered reads build on it in hot paths.
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";

@@ -56,7 +56,7 @@ export function configuredRecord(
 // — e.g. a locally managed Google account, which may not have a connector
 // record). Configured-but-not-usable is "Needs attention" — stays in the
 // Connected chip section (user DID connect it; it needs fixing). The Google
-// tile counts the tagged accounts from the machine-global registry in its
+// tile counts the tagged accounts attached to this instance in its
 // status line; if ALL accounts need reconnection → Needs attention.
 export function buildTiles(
   providers: ProviderDescriptor[],

@@ -291,7 +291,7 @@ describe("direct self tools — query", () => {
 
   test("list_connectors surfaces per-account Google sign-in even with NO google connector record", async () => {
     // Google can be live on an instance whose state has no google-oauth-desktop
-    // record (machine-global account registry / credentialExternallySatisfied).
+    // record (instance account binding / credentialExternallySatisfied).
     // The tool must still expose live per-account signedIn — it is the model's
     // only on-demand truth source (the system-prompt accounts block is
     // registration-only and directs the model here).
@@ -310,10 +310,14 @@ describe("direct self tools — query", () => {
       message: "",
       ...over
     });
-    const restore = setGoogleAccountsStatusProvider(async () => [
-      account({ id: "gacct_p", tag: "personal", email: "me@gmail.com", signedIn: true, primary: true, message: "Signed in to Google" }),
-      account({ id: "gacct_w", tag: "work", email: "me@work.com", signedIn: false, tokenRevoked: true, message: "Google sign-in expired — re-auth needed" })
-    ]);
+    let requestedInstance: string | undefined;
+    const restore = setGoogleAccountsStatusProvider(async (requested) => {
+      requestedInstance = requested;
+      return [
+        account({ id: "gacct_p", tag: "personal", email: "me@gmail.com", signedIn: true, primary: true, message: "Signed in to Google" }),
+        account({ id: "gacct_w", tag: "work", email: "me@work.com", signedIn: false, tokenRevoked: true, message: "Google sign-in expired — re-auth needed" })
+      ];
+    });
     try {
       const result = await dispatchToolCall(config, taskId, "list_connectors", "call_1", "{}");
       expect(result.kind).toBe("sync");
@@ -324,6 +328,7 @@ describe("direct self tools — query", () => {
           googleAccounts?: Array<{ tag: string; email: string | null; signedIn: boolean; tokenRevoked: boolean; primary: boolean; message: string }>;
         };
         expect(parsed.ok).toBe(true);
+        expect(requestedInstance).toBe(instance);
         // Precondition of this test: the seeded state carries no google record.
         expect(parsed.connectors.some((c) => c.provider === "google-oauth-desktop")).toBe(false);
         expect(parsed.googleAccounts).toEqual([

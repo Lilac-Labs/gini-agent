@@ -1,5 +1,5 @@
 import type { ProviderModule } from "./types";
-import { readGoogleAccounts } from "../../state/google-accounts";
+import { googleAccountsForInstance } from "./google-accounts";
 
 // Google Workspace OAuth credential provider (hosted). In the hosted product
 // every guest ships with its Google Workspace credential already in place: the
@@ -62,11 +62,11 @@ export const googleOauthDesktopProvider: ProviderModule = {
   // The boot-registered Google account (ADR google-multi-account.md) satisfies
   // the workspace credential without any connector record. In hosted this
   // account is always present: the host registers the guest's primary Google
-  // account at boot, so `readGoogleAccounts()` is non-empty from the first turn
+  // account at boot, so its instance binding is non-empty from the first turn
   // and the Workspace API skills stay ACTIVE. Each account's config dir carries
   // its own OAuth client + tokens, so the gws CLI needs no client env vars on
   // that path — which is why `bindingsForCredentials` is untouched. Presence-only
   // by design: sign-in expiry is handled by the skill recipes at run time (`gws
   // auth status`), not by this gate.
-  credentialExternallySatisfied: () => readGoogleAccounts().length > 0
+  credentialExternallySatisfied: (instance) => googleAccountsForInstance(instance).length > 0
 };

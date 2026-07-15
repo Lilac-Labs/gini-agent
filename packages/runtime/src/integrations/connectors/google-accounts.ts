@@ -57,12 +57,13 @@ export function effectivePrimaryAccountId(
   return (accounts.find((a) => a.provisioned) ?? accounts[0])?.id;
 }
 
-// List every registered account joined with its live `gws auth status` (one
-// spawn per config dir, in parallel). Best-effort: a status fetch that rejects
+// List registered accounts joined with live `gws auth status` (one spawn per
+// visible config dir, in parallel). Best-effort: a status fetch that rejects
 // degrades that account to signedIn:false rather than failing the whole list.
-// When an instance is provided, only that instance's bound primary row carries
-// `primary: true`; machine-global registry rows are otherwise just available
-// credentials.
+// When an instance is provided, only credentials attached to that instance are
+// returned. The machine-global registry remains an implementation detail that
+// lets a fresh OAuth login reuse an existing credential without exposing other
+// instances' accounts in product surfaces.
 export async function listAccountsWithStatus(
   instanceOrDeps?: Instance | AccountDeps,
   maybeDeps: AccountDeps = {}
@@ -81,8 +82,11 @@ export async function listAccountsWithStatus(
   const bindings = instance ? effectiveInstanceBindings(instance, accounts) : undefined;
   const attachedIds = new Set(bindings?.attachedAccountIds ?? []);
   const primaryId = bindings?.primaryAccountId;
+  const visibleAccounts = instance
+    ? accounts.filter((account) => attachedIds.has(account.id))
+    : accounts;
   return Promise.all(
-    accounts.map(async (account) => {
+    visibleAccounts.map(async (account) => {
       const instanceFlags = {
         ...(account.id === primaryId ? { primary: true as const } : {}),
         ...(attachedIds.has(account.id) ? { attached: true as const } : {})
@@ -113,6 +117,17 @@ export async function listAccountsWithStatus(
       };
     })
   );
+}
+
+// Synchronous instance view for hot paths that do not need a live gws status
+// probe (system-prompt assembly and credential activation). Legacy completed
+// instances still pass through the same one-time primary migration as the API.
+export function googleAccountsForInstance(
+  instance: Instance,
+  accounts: GoogleAccount[] = readGoogleAccounts()
+): GoogleAccount[] {
+  const attached = new Set(effectiveInstanceBindings(instance, accounts).attachedAccountIds);
+  return accounts.filter((account) => attached.has(account.id));
 }
 
 export async function useAccountForInstance(

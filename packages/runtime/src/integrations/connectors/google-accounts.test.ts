@@ -329,15 +329,14 @@ describe("listAccountsWithStatus", () => {
     expect(await listAccountsWithStatus({ statusForDir: async () => signedOut() })).toEqual([]);
   });
 
-  test("a fresh instance with global accounts has no primary", async () => {
+  test("a fresh instance does not surface another instance's global credentials", async () => {
     await registerAccount(
       { tag: "personal", configDir: "/tmp/gws-personal" },
       { statusForDir: async () => signedIn("me@example.com") }
     );
 
     const list = await listAccountsWithStatus("fresh", { statusForDir: async () => signedOut() });
-    expect(list[0]?.primary).toBeUndefined();
-    expect(list[0]?.attached).toBeUndefined();
+    expect(list).toEqual([]);
   });
 
   test("completed legacy instances adopt the old global primary once", async () => {
@@ -355,7 +354,7 @@ describe("listAccountsWithStatus", () => {
     expect(getGoogleAccountBindings("legacy").legacyPrimaryMigratedAt).toBeDefined();
   });
 
-  test("marks the instance-bound primary row primary:true and no other", async () => {
+  test("returns only accounts attached to the requested instance", async () => {
     await registerAccount(
       { tag: "personal", configDir: "/tmp/gws-personal" },
       { statusForDir: async () => signedIn("me@example.com") }
@@ -367,9 +366,9 @@ describe("listAccountsWithStatus", () => {
     attachGoogleAccountToInstance("inst-a", work, { primary: true });
 
     const list = await listAccountsWithStatus("inst-a", { statusForDir: async () => signedOut() });
-    expect(list.find((a) => a.tag === "work")?.primary).toBe(true);
-    expect(list.find((a) => a.tag === "work")?.attached).toBe(true);
-    expect(list.find((a) => a.tag === "personal")?.primary).toBeUndefined();
+    expect(list.map((account) => account.tag)).toEqual(["work"]);
+    expect(list[0]?.primary).toBe(true);
+    expect(list[0]?.attached).toBe(true);
   });
 
   test("without an instance, listing does not infer primary from global registry", async () => {

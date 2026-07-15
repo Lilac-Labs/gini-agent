@@ -2046,9 +2046,9 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       // returned untouched.
       const hasGoogle = connectors.some((c) => c.provider === "google-oauth-desktop");
       const session = hasGoogle ? await gwsSessionStatus() : undefined;
-      // The tagged accounts registry is machine-global, so resolve it once and
-      // attach to every google-oauth-desktop record alongside `session`.
-      const accounts = hasGoogle ? await listAccountsWithStatus() : undefined;
+      // Resolve only this instance's attached accounts and add them to every
+      // google-oauth-desktop record alongside `session`.
+      const accounts = hasGoogle ? await listAccountsWithStatus(config.instance) : undefined;
       // On-view revalidation: trigger background re-probe for stale,
       // probe-having connectors so the page picks up the flip on the next
       // refetch. Never blocks the response.
@@ -2108,7 +2108,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       // page mirror isSkillActive's absent-record fallthrough — the hook
       // only applies when no connector record with the credential name
       // exists; the page enforces that record check itself.
-      externallySatisfied: Boolean(p.credentialExternallySatisfied?.()),
+      externallySatisfied: Boolean(p.credentialExternallySatisfied?.(config.instance)),
       probeIntervalMs: p.probeIntervalMs,
       // Optional credential-template the Add Connector dialog prefills when a
       // provider is picked as a template. Derived from the module's secret
@@ -2159,8 +2159,8 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // On-demand auto-detection — Skills page "Refresh detection" button
     // calls this. Same job that runs at gateway startup; idempotent.
     ["POST", /^\/api\/connectors\/detect$/, async () => json(await runConnectorDetection(config))],
-    // Machine-global tagged Google credentials (multi-account support), joined
-    // with this instance's sign-in binding. Credential dirs live under
+    // This instance's tagged Google credentials (multi-account support), joined
+    // with live sign-in status. Reusable credential dirs live under
     // ~/.gini/google-accounts; primary/attached state lives under
     // ~/.gini/instances/<instance>/google-account-bindings.json.
     ["GET", /^\/api\/google\/accounts$/, async () => json(await listAccountsWithStatus(config.instance))],

@@ -23,7 +23,7 @@
 // audit write is inlined below against ../state so the registry pulls in no
 // helper that transitively re-enters agent.ts and forms a cycle.
 
-import type { ApprovalMode, GoogleAccountStatus, RuntimeConfig, RuntimeState } from "../types";
+import type { ApprovalMode, GoogleAccountStatus, Instance, RuntimeConfig, RuntimeState } from "../types";
 import { addAudit, appendTrace, mutateState, now, readState } from "../state";
 import { status as runtimeStatus, updateAutoApproveSettings } from "../runtime";
 import { providerCatalogWithStatus, withProviderAuthStatus } from "../provider";
@@ -256,7 +256,7 @@ async function listMcpServers(config: RuntimeConfig, taskId: string): Promise<st
 // the status-augmented machine-global registry (one `gws auth status` spawn
 // per account config dir, in parallel, ~15s cached); a test swaps it via
 // setGoogleAccountsStatusProvider so the op never spawns `gws`.
-type GoogleAccountsStatusProvider = () => Promise<GoogleAccountStatus[]>;
+type GoogleAccountsStatusProvider = (instance: Instance) => Promise<GoogleAccountStatus[]>;
 
 let activeGoogleAccountsProvider: GoogleAccountsStatusProvider = listAccountsWithStatus;
 
@@ -287,7 +287,7 @@ async function listConnectors(config: RuntimeConfig, taskId: string): Promise<st
   // record. It makes this tool the model's on-demand truth source for
   // per-account sign-in: the system-prompt accounts block is registration-only
   // and directs the model here before asserting any account's status.
-  const accountStatuses = await activeGoogleAccountsProvider();
+  const accountStatuses = await activeGoogleAccountsProvider(config.instance);
   const googleAccounts = accountStatuses.map((account) => ({
     tag: account.tag,
     email: account.email || null,

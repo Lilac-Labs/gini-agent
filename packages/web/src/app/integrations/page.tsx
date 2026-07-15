@@ -66,9 +66,8 @@ const CHIP_LABELS: Record<TileFilter, string> = { all: "All", connected: "Connec
 export default function IntegrationsPage() {
   const connectors = useConnectors();
   const providers = useProviders();
-  // Machine-global registry — exists even with no google-oauth-desktop
-  // connector record, so the Google tile count and drilldown render on a
-  // registry-only machine.
+  // Instance-bound accounts exist even with no google-oauth-desktop connector
+  // record, so the Google tile count and drilldown render in that steady state.
   const googleAccounts = useGoogleAccounts();
   // Slack is a messaging bridge, not a connector provider: read the bridge list
   // to derive its tile alongside credential-backed integrations.

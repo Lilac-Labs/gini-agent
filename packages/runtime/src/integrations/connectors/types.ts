@@ -6,7 +6,7 @@
 // a remote health probe. Each module is a peer in `src/integrations/
 // connectors/` and registers itself via the registry.
 
-import type { RuntimeConfig } from "../../types";
+import type { Instance, RuntimeConfig } from "../../types";
 
 export interface ProviderField {
   // Stable id used as the form-field name and (for secrets) the secret
@@ -88,7 +88,7 @@ export interface ProviderModule {
   // migration and skill loader both consult.
   credentialName?: string;
   // Optional. Returns true when this provider's canonical credential is
-  // satisfied by an external (machine-global) source even though no connector
+  // satisfied by an external source attached to this instance even though no connector
   // record exists in the instance. `isSkillActive` consults this only when NO
   // connector record with the required name exists at all — an existing
   // record of any status (including `disabled`, an explicit operator off)
@@ -96,7 +96,7 @@ export interface ProviderModule {
   // google-oauth-desktop reports the machine-global Google account registry,
   // where each registered config dir is self-contained. Must be cheap and
   // synchronous: the activation gate sits on the hot system-prompt path.
-  credentialExternallySatisfied?: () => boolean;
+  credentialExternallySatisfied?: (instance: Instance) => boolean;
   // Probe is optional per ADR connector-provider-spec-compliance.md. Providers with no remote system to
   // query (apple-notes via TCC, generic by definition) omit it; the
   // connector record's health falls back to a status-only check.

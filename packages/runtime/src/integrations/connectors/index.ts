@@ -637,8 +637,8 @@ export function connectorIsUsable(connector: ConnectorRecord): boolean {
 //
 // When NO connector record with the required name exists at all, the provider
 // that owns the credential name gets a final say via its
-// `credentialExternallySatisfied` hook — e.g. a registered machine-global
-// Google account satisfies google-workspace-oauth with no connector record
+// `credentialExternallySatisfied` hook — e.g. a Google account attached to
+// this instance satisfies google-workspace-oauth with no connector record
 // (ADR google-multi-account.md). An existing record of ANY status keeps the
 // `connectorIsUsable`-only semantics: a `disabled` record is an explicit
 // operator off and must not be overridden by an external source.
@@ -651,7 +651,7 @@ export function isSkillActive(state: RuntimeState, skill: SkillRecord): boolean 
     if (named.length === 0) {
       const providerId = providerForCredentialName(name);
       const module = providerId ? getProvider(providerId) : undefined;
-      if (module?.credentialExternallySatisfied?.()) continue;
+      if (module?.credentialExternallySatisfied?.(state.instance)) continue;
     }
     return false;
   }

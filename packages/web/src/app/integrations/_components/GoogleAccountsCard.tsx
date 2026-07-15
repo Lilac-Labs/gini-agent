@@ -59,7 +59,7 @@ const SERVICE_META: Record<string, { label: string; description: string; icon: L
   meet: { label: "Google Meet", description: "Schedule and join meetings", icon: VideoIcon }
 };
 
-// The tagged Google accounts from the machine-global registry (plus the
+// The tagged Google accounts attached to this instance (including the
 // boot-registered hosted primary account), rendered as one card per account —
 // email + tag badge, connected date, sign-in status, granted-service rows —
 // with retag / disconnect / add-another flows. "Add account" navigates
@@ -279,7 +279,7 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
                         disabled={useAccount.isPending}
                         onClick={() => useAccount.mutate(account.id)}
                       >
-                        {account.attached ? "Make primary" : "Use for this instance"}
+                        Make primary
                       </Button>
                     ) : null}
                     <Button

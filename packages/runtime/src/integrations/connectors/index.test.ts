@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEmptyState, mutateState, readState } from "../../state";
+import { attachGoogleAccountToInstance } from "../../state/google-account-bindings";
 import { writeGoogleAccounts } from "../../state/google-accounts";
 import { writeSecret } from "../../state/secrets";
 import type { ConnectorRecord, RuntimeConfig, SkillRecord } from "../../types";
@@ -472,16 +473,21 @@ describe("isSkillActive with an externally satisfied credential", () => {
   // the host machine's real registry never leaks into these assertions.
   let scratchHome: string;
   let prevHome: string | undefined;
+  let prevStateRoot: string | undefined;
 
   beforeEach(() => {
     scratchHome = mkdtempSync(join(tmpdir(), "gini-connectors-ext-"));
     prevHome = process.env.HOME;
     process.env.HOME = scratchHome;
+    prevStateRoot = process.env.GINI_STATE_ROOT;
+    process.env.GINI_STATE_ROOT = join(scratchHome, "state");
   });
 
   afterEach(() => {
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
+    if (prevStateRoot === undefined) delete process.env.GINI_STATE_ROOT;
+    else process.env.GINI_STATE_ROOT = prevStateRoot;
     rmSync(scratchHome, { recursive: true, force: true });
   });
 
@@ -495,12 +501,24 @@ describe("isSkillActive with an externally satisfied credential", () => {
     };
   }
 
-  test("a registered Google account activates a workspace skill with zero connectors", () => {
-    writeGoogleAccounts([registryAccount()]);
+  test("an instance-bound Google account activates a workspace skill with zero connectors", () => {
+    const account = registryAccount();
+    writeGoogleAccounts([account]);
+    attachGoogleAccountToInstance("dev", account, { primary: true });
     const state = createEmptyState("dev");
     state.connectors = [];
     const skill = newSkill({ requiredCredentials: ["google-workspace-oauth"] });
     expect(isSkillActive(state, skill)).toBe(true);
+  });
+
+  test("another instance's registered Google account does not activate the workspace skill", () => {
+    const account = registryAccount();
+    writeGoogleAccounts([account]);
+    attachGoogleAccountToInstance("other", account, { primary: true });
+    const state = createEmptyState("dev");
+    state.connectors = [];
+    const skill = newSkill({ requiredCredentials: ["google-workspace-oauth"] });
+    expect(isSkillActive(state, skill)).toBe(false);
   });
 
   test("an empty or missing registry leaves the workspace skill inactive", () => {

@@ -348,8 +348,8 @@ export function useProviders() {
     queryKey: ["connector-providers"],
     queryFn: () => api<ProviderDescriptor[]>("/connectors/providers"),
     // The registry itself is built at runtime startup, but the payload also
-    // carries the live `externallySatisfied` bit (machine-global account
-    // registry), so poll at the same 60s cadence the connectors query idles
+    // carries the live `externallySatisfied` bit (instance-bound account), so
+    // poll at the same 60s cadence the connectors query idles
     // at. staleTime alone never refetches an idle page — without the
     // interval, accounts added/removed out-of-band (e.g. from a chat-driven
     // OAuth flow) would leave the activation pills stale indefinitely.
@@ -358,7 +358,7 @@ export function useProviders() {
   });
 }
 
-// Machine-global tagged Google accounts (GET /api/google/accounts), each
+// This instance's tagged Google accounts (GET /api/google/accounts), each
 // joined with live `gws auth status`. Exists independently of any
 // google-oauth-desktop connector record, so the Skills page can render the
 // accounts card on a registry-only machine. The GoogleAccountsCard

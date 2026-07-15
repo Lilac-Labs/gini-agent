@@ -2361,7 +2361,7 @@ export interface ConnectorRecord {
     message: string;
   };
   // Transient, API-enrichment-only. Never persisted to state — GET
-  // /api/connectors attaches the machine-global tagged Google accounts
+  // /api/connectors attaches this instance's tagged Google accounts
   // (each with live `gws auth status` per its config dir) to
   // google-oauth-desktop records, alongside `session`, so clients can
   // show the connected accounts. The accounts registry itself lives
@@ -2435,9 +2435,8 @@ export interface GoogleAccountStatus extends GoogleAccount {
   // first provisioned row, else the first row). Server-resolved so every
   // client agrees on which account is "the" account.
   primary?: boolean;
-  // True when this account is attached to the current runtime instance. An
-  // account can exist in the machine-global registry without being attached to
-  // this instance.
+  // True when this account is attached to the current runtime instance. Every
+  // instance-aware product read returns only rows carrying this flag.
   attached?: boolean;
 }
 

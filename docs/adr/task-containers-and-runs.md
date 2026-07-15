@@ -88,7 +88,7 @@ field stays absent on router/agent/job mints and pre-field records (unknown ≠ 
 
 ## The home surface
 
-`GET /api/home` returns the attention queue + recents via a lean read path
+`GET /api/home` returns the attention queue + done list + recents via a lean read path
 (`homeView`, `packages/runtime/src/runtime/views.ts`) — it does not reuse
 `listChatSessions`, which embeds full message arrays. **Inclusion predicate**: a
 container is a home task row iff its derived attention ≠ none AND
@@ -107,6 +107,13 @@ spawner explicitly marked user-facing (`surfaced`, set by `spawn_task`'s
 `done_unacknowledged` would flood home with every background errand. Runs, in-run
 helpers, silent children, and silent job runs never appear on home — home shows
 decisions and outcomes, never machinery.
+
+Acknowledged success resurfaces once more: a user-facing container (same
+`startedBy === "user" OR surfaced` rule) whose derived attention is `none` and whose
+latest terminal outcome is `completed` returns in a separate `done` array
+(`HomeDoneItem`: `id`, `title`, optional `outcomeLine`, `completedAt`), feeding the
+collapsible Done section under the tasks queue — sorted newest-first, capped at 10.
+Acknowledged failures and cancellations still disappear entirely.
 
 Container mutations ride `POST /api/containers` (direct start, bypasses the intake
 router; optional `startedAs`), `POST /api/containers/:id/acknowledge`,

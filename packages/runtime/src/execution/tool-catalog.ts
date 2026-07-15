@@ -96,7 +96,7 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
     type: "function",
     function: {
       name: "file_write",
-      description: "Write a workspace file. Approval-gated: the user must approve before the file is written.",
+      description: "Write a workspace file. Successful writes surface as an inline file card in chat, so use this for files the user should view here. Approval-gated: the user must approve before the file is written.",
       parameters: {
         type: "object",
         properties: {

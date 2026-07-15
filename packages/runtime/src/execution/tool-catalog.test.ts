@@ -531,6 +531,13 @@ describe("buildToolCatalog", () => {
     expect(desc).toContain("stable general knowledge");
   });
 
+  test("file_write description advertises the inline generated-file surface", () => {
+    const state = stateWithToolsets([ts("file")]);
+    const catalog = buildToolCatalog(state);
+    const desc = catalog.find((t) => t.function.name === "file_write")?.function.description ?? "";
+    expect(desc).toContain("inline file card in chat");
+  });
+
   describe("cross-toolset routing hints", () => {
     // browser_navigate's description steers content discovery to
     // web_search, and the search/fetch descriptions steer page

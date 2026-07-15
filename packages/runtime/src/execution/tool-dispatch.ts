@@ -2847,7 +2847,7 @@ async function emailWatchTool(
   // then re-add with the chosen `account`. One signed-in account auto-defaults
   // (Phase A); an explicit `account` resolves; so this fires only on a genuinely
   // ambiguous add. No watcher is created.
-  const selectionHint = await accountSelectionNeeded(account);
+  const selectionHint = await accountSelectionNeeded(account, config.instance);
   if (selectionHint) {
     appendTrace(config.instance, taskId, {
       type: "tool",

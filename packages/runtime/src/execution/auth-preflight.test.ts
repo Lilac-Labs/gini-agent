@@ -61,6 +61,16 @@ const withAccount: AccountConfigDirLookup = () => "/tmp/gws-cfg";
 const noAccount: AccountConfigDirLookup = () => undefined;
 
 describe("buildAuthPreflightBlock", () => {
+  test("passes the runtime instance to the Google account lookup", async () => {
+    let requestedInstance: string | undefined;
+    const lookup: AccountConfigDirLookup = (instance) => {
+      requestedInstance = instance;
+      return "/tmp/gws-cfg";
+    };
+    await buildAuthPreflightBlock(sanitizedEnv, authedRun, lookup, "inst-a");
+    expect(requestedInstance).toBe("inst-a");
+  });
+
   test("emits a directive block when tools are not authenticated", async () => {
     const block = await buildAuthPreflightBlock(sanitizedEnv, notAuthedRun, withAccount);
     // Something is not authed in this sanitized env, so the block is non-empty.
@@ -148,11 +158,11 @@ describe("buildAuthPreflightBlock", () => {
     expect(block).toContain("REQUIRED ACTION:");
   });
 
-  test("flags the missing-Google-account branch when no account is registered", async () => {
+  test("flags the missing-Google-account branch when no account is attached", async () => {
     // With no account, checkGws takes its early-return "no Google account" branch
     // (no subprocess). yc is also unauthed here, so the block lists both failures.
     const block = await buildAuthPreflightBlock(sanitizedEnv, notAuthedRun, noAccount);
-    expect(block).toContain("no Google account registered");
+    expect(block).toContain("no Google account attached to this Gini instance");
     expect(block).toContain("REQUIRED ACTION:");
   });
 

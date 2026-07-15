@@ -7,7 +7,7 @@
 //   - resolveSettings validation (unknown keys, per-kind shapes, label
 //     caps/canonicalization) and the legacy flat-options mapping
 //   - per-account settings (Auto-inbox): resolveInstallSettings shapes (the
-//     email-keyed map, flat-body fan-out to every registered account,
+//     email-keyed map, flat-body fan-out to every attached account,
 //     absent-body seeding, the zero-accounts flat fallback), the
 //     multi-account buildSpec prompt, and the accountSettings view join
 //     precedence (saved entry > legacy flat stamp > seeded defaults, where
@@ -46,7 +46,8 @@ import { join } from "node:path";
 
 import { createHandler } from "../http";
 import { readState } from "../state";
-import { addGoogleAccount, configDirForAccount, setPrimaryGoogleAccountId } from "../state/google-accounts";
+import { attachGoogleAccountToInstance } from "../state/google-account-bindings";
+import { addGoogleAccount, configDirForAccount } from "../state/google-accounts";
 import { writeLabelProfile } from "../state/google-label-profiles";
 import { writeOnboarding } from "../state/onboarding";
 import { ROUTINE_TEMPLATES, resolveInstallSettings, resolveSettings, routineTemplate } from "./routine-templates";
@@ -288,7 +289,7 @@ describe("routine templates", () => {
   test("resolveInstallSettings validates the email-keyed map and picks the shape per registry", () => {
     const template = routineTemplate("auto-inbox")!;
 
-    // Zero registered accounts: every non-account-keyed shape falls back to
+    // Zero attached accounts: every non-account-keyed shape falls back to
     // the flat single blob (the pre-per-account behavior).
     const flat = resolveInstallSettings(template, { settings: { labelNewMail: false } }) as RoutineSettings;
     expect(flat.labelNewMail).toBe(false);
@@ -398,15 +399,17 @@ describe("routine templates", () => {
     ).toBeUndefined();
   });
 
-  test("install seeds and persists the per-account map for registered accounts", async () => {
+  test("install seeds and persists the per-account map for attached accounts", async () => {
     const config = testConfig(root, "templates-per-account-install");
     const handler = createHandler(config);
     await seedWorkspaceSkills(handler, config);
-    seedGoogleAccount("gacct_a", "A@X.com");
-    seedGoogleAccount("gacct_b", "b@y.com");
+    seedGoogleAccount("gacct_a", "A@X.com", config.instance);
+    seedGoogleAccount("gacct_b", "b@y.com", config.instance);
+    seedGoogleAccount("gacct_other", "other@example.com");
 
-    // Settings omitted → one seeded entry per registered account (emails
-    // lowercased), each the catalog defaults.
+    // Settings omitted → one seeded entry per attached account (emails
+    // lowercased), each the catalog defaults. The unbound machine-global row
+    // remains invisible to this instance.
     const seeded = await call(handler, config, "/api/routines/templates/auto-inbox/install", {
       method: "POST",
       body: JSON.stringify({})
@@ -421,7 +424,7 @@ describe("routine templates", () => {
     expect(seeded.prompt).toContain("Account b@y.com:");
 
     // A legacy flat body (the onboarding wire shape) fans out to every
-    // registered account alike — archiveUnimportant lands as per-label
+    // attached account alike — archiveUnimportant lands as per-label
     // auto-archive on each account's default labels.
     const legacy = await call(handler, config, "/api/routines/templates/auto-inbox/install", {
       method: "POST",
@@ -449,9 +452,9 @@ describe("routine templates", () => {
     const config = testConfig(root, "templates-per-account-view");
     const handler = createHandler(config);
     await seedWorkspaceSkills(handler, config);
-    seedGoogleAccount("gacct_a", "a@x.com");
-    seedGoogleAccount("gacct_b", "b@y.com");
-    setPrimaryGoogleAccountId("gacct_b");
+    seedGoogleAccount("gacct_a", "a@x.com", config.instance);
+    const primary = seedGoogleAccount("gacct_b", "b@y.com", config.instance);
+    attachGoogleAccountToInstance(config.instance, primary, { primary: true });
 
     // Saved entry for a@x.com only: it renders its saved state (defaults
     // filled), while b@y.com — connected but absent from the persisted map —
@@ -520,10 +523,10 @@ describe("routine templates", () => {
     const config = testConfig(root, "templates-label-profile");
     const handler = createHandler(config);
     await seedWorkspaceSkills(handler, config);
-    seedGoogleAccount("gacct_a", "a@x.com");
-    seedGoogleAccount("gacct_b", "b@y.com");
-    seedGoogleAccount("gacct_c", "c@z.com");
-    seedGoogleAccount("gacct_d", "d@w.com");
+    seedGoogleAccount("gacct_a", "a@x.com", config.instance);
+    seedGoogleAccount("gacct_b", "b@y.com", config.instance);
+    seedGoogleAccount("gacct_c", "c@z.com", config.instance);
+    seedGoogleAccount("gacct_d", "d@w.com", config.instance);
     // a@x.com: a rich digest — two existing labels, one standard label
     // marked functionally covered, and one name colliding with a standard
     // label (case-insensitively).
@@ -1170,11 +1173,14 @@ describe("routine templates", () => {
   });
 });
 
-// Register a Google account in the (scratch-HOME) machine-global registry so
-// per-account installs see it. Emails are stored as given — the settings
-// paths own the lowercasing.
-function seedGoogleAccount(id: string, email: string): void {
-  addGoogleAccount({ id, tag: id, email, configDir: configDirForAccount(id), addedAt: new Date().toISOString() });
+// Register a Google account in the scratch-HOME machine-global registry and,
+// when requested, attach it to an instance. Emails are stored as given — the
+// settings paths own the lowercasing.
+function seedGoogleAccount(id: string, email: string, instance?: string) {
+  const account = { id, tag: id, email, configDir: configDirForAccount(id), addedAt: new Date().toISOString() };
+  addGoogleAccount(account);
+  if (instance) attachGoogleAccountToInstance(instance, account);
+  return account;
 }
 
 // The install path's skillNames validate against ENABLED skills; seed the two

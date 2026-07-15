@@ -1019,7 +1019,7 @@ export async function runChatTask(config: RuntimeConfig, taskId: string): Promis
   // Best-effort: a checker fault degrades to no block and never blocks the turn.
   if (!subagent) {
     try {
-      const authBlock = await buildAuthPreflightBlock();
+      const authBlock = await buildAuthPreflightBlock(process.env, undefined, undefined, config.instance);
       if (authBlock.length > 0) {
         ephemeralContext = ephemeralContext.length > 0 ? `${authBlock}\n\n${ephemeralContext}` : authBlock;
       }

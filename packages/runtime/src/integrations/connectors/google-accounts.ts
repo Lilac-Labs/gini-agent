@@ -231,6 +231,20 @@ export async function registerAccount(
   return account;
 }
 
+// Register a live credential through an instance-owned HTTP surface and attach
+// it to that instance. The first attached row becomes primary; later additions
+// preserve the user's existing primary choice.
+export async function registerAccountForInstance(
+  instance: Instance,
+  input: { tag?: string; configDir: string; adopt?: boolean; trusted?: boolean; principal?: string; email?: string },
+  deps: AccountDeps = {}
+): Promise<GoogleAccount> {
+  const account = await registerAccount(input, deps);
+  const hasPrimary = primaryGoogleAccountForInstance(instance) !== undefined;
+  attachGoogleAccountToInstance(instance, account, { primary: !hasPrimary });
+  return account;
+}
+
 // Remove an account from the registry. When its config dir is a gini-managed
 // one (under googleAccountsRoot()), best-effort delete that dir too so its
 // tokens don't linger. NEVER touches ~/.config/gws (an adopted dir lives

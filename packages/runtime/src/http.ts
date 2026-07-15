@@ -61,7 +61,7 @@ import { buildNotificationPreview, type PreviewEvent } from "./integrations/apns
 import { dailyUsage, homeView, mobileBootstrap, publicState } from "./runtime/views";
 import { checkConnector, connectorIsUsable, createConnector, credentialTemplateForProvider, deleteConnector, firstUngrantedCredential, isSkillActive, updateConnector } from "./integrations/connectors";
 import { gwsSessionStatus } from "./integrations/connectors/gws-session";
-import { detachInstanceGoogleAccount, googleAuthMode, listAccountsWithStatus, provisionAccount, registerAccount, removeAccount, retagAccount, signOutInstanceGoogleAccounts, useAccountForInstance } from "./integrations/connectors/google-accounts";
+import { detachInstanceGoogleAccount, googleAuthMode, listAccountsWithStatus, provisionAccount, registerAccountForInstance, removeAccount, retagAccount, signOutInstanceGoogleAccounts, useAccountForInstance } from "./integrations/connectors/google-accounts";
 import { handleGoogleLoginWebCallback, startGoogleLoginWeb } from "./integrations/connectors/google-login-web";
 import { getGoogleAccount, googleAccountsRoot } from "./state/google-accounts";
 import { getProvider, listProviders } from "./integrations/connectors/registry";
@@ -2000,7 +2000,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       // Resolve the sending account → its gws config dir against the registered
       // Google accounts (same resolution the email watchers use). An unresolved
       // / unset account falls back to the default gws session.
-      const configDir = await resolveDraftSendConfigDir(account);
+      const configDir = await resolveDraftSendConfigDir(account, config.instance);
       const result = await sendGmailDraft({ draftId, ...(configDir ? { configDir } : {}) });
       if (!result.ok) {
         return json({ ok: false, message: result.message ?? "Failed to send the draft." }, 502);
@@ -2166,7 +2166,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     ["GET", /^\/api\/google\/accounts$/, async () => json(await listAccountsWithStatus(config.instance))],
     ["POST", /^\/api\/google\/accounts$/, async (request) => {
       const payload = await body(request);
-      // tag is optional: registerAccount defaults a missing one from the live
+      // tag is optional: registration defaults a missing one from the live
       // session's email local-part (uniquified via uniqueAccountTag).
       const tag = typeof payload.tag === "string" && payload.tag.trim() ? payload.tag.trim() : undefined;
       const configDir = typeof payload.configDir === "string" ? payload.configDir.trim() : "";
@@ -2184,7 +2184,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       }
       const adopt = payload.adopt === true;
       try {
-        const account = await registerAccount({ tag, configDir, adopt });
+        const account = await registerAccountForInstance(config.instance, { tag, configDir, adopt });
         // A later account addition on a completed instance should join People
         // immediately. First-login registration stays quiet until the wizard's
         // final step, after onboarding has primed its recent-thread snapshot.

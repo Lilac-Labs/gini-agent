@@ -260,7 +260,7 @@ export async function applyOnboardingRoutines(
 ): Promise<{ record: OnboardingRecord; jobs: JobRecord[] }> {
   const record = getOnboarding(config);
   const timezone = payload.timezone !== undefined ? validateTimezone(payload.timezone) : (record.timezone ?? "UTC");
-  const specs = routineJobSpecs(payload, timezone);
+  const specs = routineJobSpecs(payload, timezone, config.instance);
   // Every spec's skills must resolve BEFORE the previous jobs are deleted: a
   // disabled Workspace skill then surfaces as a clean 400 with zero side
   // effects, instead of createScheduledJob throwing mid-loop after the old
@@ -335,7 +335,11 @@ export async function applyOnboardingRoutines(
 // registered account), and the Auto-inbox spec is composed ONLY of the
 // behaviors the user toggled on (zero behaviors ⇒ buildSpec returns
 // undefined ⇒ no job).
-function routineJobSpecs(payload: Record<string, unknown>, timezone: string): Record<string, unknown>[] {
+function routineJobSpecs(
+  payload: Record<string, unknown>,
+  timezone: string,
+  instance: string
+): Record<string, unknown>[] {
   const selections: Array<{ templateId: string; section: unknown; options: string[] }> = [
     { templateId: "auto-inbox", section: payload.autoInbox, options: ["labelNewMail", "archiveUnimportant", "assistScheduling", "draftReplies"] },
     { templateId: "morning-briefing", section: payload.morningBriefing, options: ["personalizedNews"] },
@@ -347,7 +351,7 @@ function routineJobSpecs(payload: Record<string, unknown>, timezone: string): Re
     const template = routineTemplate(templateId);
     if (!template) continue;
     const legacyOptions = Object.fromEntries(options.map((key) => [key, flag(section, key)]));
-    const settings = resolveInstallSettings(template, { options: legacyOptions });
+    const settings = resolveInstallSettings(template, { options: legacyOptions }, instance);
     const spec = template.buildSpec(settings, timezone);
     if (spec) specs.push(spec);
   }

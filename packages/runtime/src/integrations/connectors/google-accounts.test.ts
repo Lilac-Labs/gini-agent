@@ -17,6 +17,7 @@ import {
   normalizeHostedGwsEnv,
   provisionAccount,
   registerAccount,
+  registerAccountForInstance,
   removeAccount,
   retagAccount,
   signOutInstanceGoogleAccounts,
@@ -430,6 +431,23 @@ describe("removeAccount", () => {
 });
 
 describe("instance sign-in helpers", () => {
+  test("registerAccountForInstance attaches the row and makes only the first one primary", async () => {
+    const first = await registerAccountForInstance(
+      "inst-a",
+      { tag: "personal", configDir: "/tmp/gws-personal" },
+      { statusForDir: async () => signedIn("me@example.com") }
+    );
+    const second = await registerAccountForInstance(
+      "inst-a",
+      { tag: "work", configDir: "/tmp/gws-work" },
+      { statusForDir: async () => signedIn("me@work.com") }
+    );
+
+    expect(getGoogleAccountBindings("inst-a").attachedAccountIds).toEqual([first.id, second.id]);
+    expect(getGoogleAccountBindings("inst-a").primaryAccountId).toBe(first.id);
+    expect(getGoogleAccountBindings("inst-b").attachedAccountIds).toEqual([]);
+  });
+
   test("useAccountForInstance requires a live account and binds only that instance", async () => {
     const account = await registerAccount(
       { tag: "personal", configDir: "/tmp/gws-personal" },

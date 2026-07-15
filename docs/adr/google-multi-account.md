@@ -357,7 +357,9 @@ button**, not a login:
   live per-dir `gws auth status`, fetched in parallel, best-effort; exactly the
   effective primary row carries `primary: true`).
 - `POST /api/google/accounts` → body `{ tag?, configDir, adopt? }` →
-  `registerAccount(...)` (201). Rejects with 400 when `configDir` is missing,
+  `registerAccountForInstance(...)` (201), which attaches the live row to the
+  calling instance and makes it primary only when no primary exists. Rejects
+  with 400 when `configDir` is missing,
   or `"No signed-in Google session in <dir>"` when the dir has no live
   session — so an empty dir is never registered. A missing `tag` defaults from
   the live session: a re-register keeps the existing row's tag, a fresh

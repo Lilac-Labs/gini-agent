@@ -13,9 +13,10 @@
 // timeout so it can sit on the critical path to the model.
 
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { googleAccountsForInstance } from "../integrations/connectors/google-accounts";
+import { readGoogleAccounts } from "../state/google-accounts";
+import type { Instance } from "../types";
 
 const PROBE_TIMEOUT_MS = 8_000;
 const YC_PATH_PREFIX = `${homedir()}/.yc/bin:${homedir()}/.local/bin`;
@@ -67,30 +68,26 @@ async function checkYc(env: NodeJS.ProcessEnv, run: CommandRunner): Promise<Tool
   };
 }
 
-// Resolve the gws config dir from the first registered Google account, or
-// undefined when none is registered. Injectable so tests can drive both the
-// "no account" and "account present" branches deterministically, independent
-// of what ~/.gini/google-accounts/accounts.json happens to hold on the machine
-// running the suite (homedir() is not env-overridable at runtime).
-export type AccountConfigDirLookup = () => string | undefined;
+// Resolve the gws config dir from the first account attached to this instance,
+// or undefined when none is attached. Injectable so tests can drive both the
+// "no account" and "account present" branches deterministically.
+export type AccountConfigDirLookup = (instance?: Instance) => string | undefined;
 
-const realAccountConfigDir: AccountConfigDirLookup = () => {
-  try {
-    const raw = readFileSync(join(homedir(), ".gini", "google-accounts", "accounts.json"), "utf8");
-    const parsed = JSON.parse(raw) as { accounts?: Array<{ configDir?: string }> };
-    return parsed.accounts?.[0]?.configDir;
-  } catch {
-    return undefined;
-  }
-};
+const realAccountConfigDir: AccountConfigDirLookup = (instance) =>
+  (instance ? googleAccountsForInstance(instance) : readGoogleAccounts())[0]?.configDir;
 
-async function checkGws(env: NodeJS.ProcessEnv, run: CommandRunner, accountConfigDir: AccountConfigDirLookup): Promise<ToolStatus> {
-  const cfg = accountConfigDir();
+async function checkGws(
+  env: NodeJS.ProcessEnv,
+  run: CommandRunner,
+  accountConfigDir: AccountConfigDirLookup,
+  instance?: Instance
+): Promise<ToolStatus> {
+  const cfg = accountConfigDir(instance);
   if (!cfg) {
     return {
       tool: "google (gws)",
       ok: false,
-      detail: "no Google account registered in ~/.gini/google-accounts/accounts.json",
+      detail: "no Google account attached to this Gini instance",
       action:
         "No Google account is set up. On hosted, the Google account is connected at sign-in through the host, " +
         "so this normally means the account has not finished provisioning yet. You MUST resolve this now, before " +
@@ -118,7 +115,7 @@ async function checkGws(env: NodeJS.ProcessEnv, run: CommandRunner, accountConfi
     ok: false,
     detail: "session expired / not signed in",
     action:
-      "The Google session is expired (the account is already registered in accounts.json, so this is a " +
+      "The Google session is expired (the account is already attached to this instance, so this is a " +
       "RE-AUTH of the existing account, not first-time setup). You MUST resolve this now, before continuing " +
       "the task, even if the task does not use Google — then proceed. To resolve it, call " +
       "`request_google_account`: it puts a reconnect button (→ the Integrations page) in the chat. Tell the user " +
@@ -135,7 +132,8 @@ async function checkGws(env: NodeJS.ProcessEnv, run: CommandRunner, accountConfi
 export async function buildAuthPreflightBlock(
   env: NodeJS.ProcessEnv = process.env,
   run: CommandRunner = realRun,
-  accountConfigDir: AccountConfigDirLookup = realAccountConfigDir
+  accountConfigDir: AccountConfigDirLookup = realAccountConfigDir,
+  instance?: Instance
 ): Promise<string> {
   // Gate: only run on a provisioned machine. Absent/empty GINI_RELAY_PROVISIONED
   // => safe no-op (no checks, no injected block), so an install without the
@@ -144,7 +142,7 @@ export async function buildAuthPreflightBlock(
   if (!provisioned || provisioned.trim().length === 0) return "";
   let statuses: ToolStatus[];
   try {
-    statuses = await Promise.all([checkYc(env, run), checkGws(env, run, accountConfigDir)]);
+    statuses = await Promise.all([checkYc(env, run), checkGws(env, run, accountConfigDir, instance)]);
   } catch {
     return "";
   }

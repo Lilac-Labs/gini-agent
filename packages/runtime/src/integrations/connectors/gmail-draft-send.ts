@@ -1,6 +1,7 @@
 import { spawn } from "bun";
 import { resolveWatchAccount } from "../../state/email-watchers";
 import { listAccountsWithStatus } from "./google-accounts";
+import type { Instance } from "../../types";
 
 // Direct server-side send of a SAVED Gmail draft by id. The email-draft card's
 // Send button posts the draft id (which the agent embedded in the rendered
@@ -116,11 +117,11 @@ export function setDraftSendRunner(runner: GwsDraftSendRunner): () => void {
   };
 }
 
-// The registered Google accounts provider (each `{ email, configDir, signedIn }`).
-// Defaults to the live status-augmented registry the email watchers also read; a
+// The instance Google accounts provider (each `{ email, configDir, signedIn }`).
+// Defaults to the live status-augmented binding the email watchers also read; a
 // test swaps it via setAccountsProvider so the route never spawns `gws auth
 // status`, without a process-wide module mock that would leak into sibling tests.
-export type AccountsProvider = () => Promise<{ email: string; configDir: string; signedIn: boolean }[]>;
+export type AccountsProvider = (instance?: Instance) => Promise<{ email: string; configDir: string; signedIn: boolean }[]>;
 
 let activeAccountsProvider: AccountsProvider = listAccountsWithStatus;
 
@@ -133,13 +134,16 @@ export function setAccountsProvider(provider: AccountsProvider): () => void {
   };
 }
 
-// Resolve a sending account email → its gws config dir against the registered
+// Resolve a sending account email → its gws config dir against this instance's
 // Google accounts (the same resolution the email watchers use). An unset /
 // unresolved account yields undefined (default gws session). Never throws — a
 // registry fault degrades to default gws so a send is never blocked on it.
-export async function resolveDraftSendConfigDir(account: string | undefined): Promise<string | undefined> {
+export async function resolveDraftSendConfigDir(
+  account: string | undefined,
+  instance?: Instance
+): Promise<string | undefined> {
   try {
-    return resolveWatchAccount(account, await activeAccountsProvider()).configDir;
+    return resolveWatchAccount(account, await activeAccountsProvider(instance)).configDir;
   } catch {
     return undefined;
   }

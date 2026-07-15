@@ -19,11 +19,13 @@
 import { resolveEffectiveContext } from "../execution/effective-context";
 import { assertSkillNamesResolve, createScheduledJob, removeJob } from "../jobs";
 import { mutateState, readState, setContainerArchived } from "../state";
+import { getGoogleAccountBindings } from "../state/google-account-bindings";
 import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../state/google-accounts";
 import { readLabelProfile, type GoogleLabelProfile } from "../state/google-label-profiles";
 import { readOnboarding } from "../state/onboarding";
 import { ensureLabelProfile } from "./label-discovery";
-import type { GoogleAccount, JobRecord, JobStatus, RuntimeConfig, RuntimeState } from "../types";
+import { googleAccountsForInstance } from "../integrations/connectors/google-accounts";
+import type { GoogleAccount, Instance, JobRecord, JobStatus, RuntimeConfig, RuntimeState } from "../types";
 
 // One editable Gmail filtering label: the exact label name, a UI-only swatch
 // color (hex — never pushed to Gmail label colors), the natural-language
@@ -69,7 +71,7 @@ export type RoutineSettings = Record<string, boolean | string | RoutineLabelRule
 // `accounts` object is what distinguishes it from a legacy flat blob when
 // reading a persisted templateSettings. Flat templates keep the bare
 // RoutineSettings blob, and a per-account template installed with zero
-// registered accounts falls back to it too, so instances without a Google
+// attached accounts falls back to it too, so instances without a Google
 // account keep the flat single-blob behavior.
 export interface PerAccountRoutineSettings {
   accounts: Record<string, RoutineSettings>;
@@ -98,7 +100,7 @@ export interface RoutineTemplate {
   // account (the field schema in `settings` stays shared across accounts).
   // Install persists the { accounts } wrapper instead of one flat blob,
   // buildSpec composes a per-account prompt from it, and the gallery view
-  // joins each registered account's resolved state as
+  // joins each attached account's resolved state as
   // installed.accountSettings.
   perAccountSettings?: boolean;
   // Map a legacy flat boolean option map — the pre-settings wire shape still
@@ -473,7 +475,7 @@ export interface RoutineAccountSettingsView {
 // when supplied, like GET /api/jobs). `installed.settings` is the resolved
 // settings state the job was installed with (absent on templates without
 // settings and on jobs predating provenance); per-account templates carry
-// `installed.accountSettings` instead — one row per registered Google
+// `installed.accountSettings` instead — one row per attached Google
 // account — falling back to the flat `settings` only when no account is
 // registered. `installed.chatSessionId` is the routine's conversation when
 // this template delivers to Messages (absent for Auto-inbox and on jobs
@@ -498,8 +500,8 @@ export interface RoutineTemplateView {
 // GET /api/routines/templates
 export function listRoutineTemplates(config: RuntimeConfig, agentId?: string): { templates: RoutineTemplateView[] } {
   const jobs = readState(config.instance).jobs;
-  const accounts = registeredGmailAccounts();
-  const primaryAccountId = effectivePrimaryId(accounts);
+  const accounts = registeredGmailAccounts(config.instance);
+  const primaryAccountId = effectivePrimaryId(accounts, config.instance);
   // Backfill label profiles for accounts that predate discovery (or signed
   // in through a path without the connect trigger). Fire-and-forget, and
   // ONLY for accounts with no profile file at all — a failed profile is
@@ -573,12 +575,13 @@ function installedAccountSettings(template: RoutineTemplate, job: JobRecord, acc
   return installedSettings(template, job) ?? defaultSettingsForAccount(template, account);
 }
 
-// The registry rows per-account settings enumerate: every registered Google
-// account whose email is known (a trusted-registered row can predate its
+// The instance rows per-account settings enumerate: every attached Google
+// account whose email is known (a trusted registered row can predate its
 // email backfill — it joins once a list read back-fills the live email).
 // Sync and registry-only (no gws probes): this runs on every gallery GET.
-function registeredGmailAccounts(): GoogleAccount[] {
-  return readGoogleAccounts().filter((account) => account.email.trim().length > 0);
+function registeredGmailAccounts(instance?: Instance): GoogleAccount[] {
+  const accounts = instance ? googleAccountsForInstance(instance) : readGoogleAccounts();
+  return accounts.filter((account) => account.email.trim().length > 0);
 }
 
 // The lowercased-email key an account's settings live under — the same
@@ -587,13 +590,14 @@ function accountEmailKey(account: GoogleAccount): string {
   return account.email.trim().toLowerCase();
 }
 
-// The effective primary among the rows: the persisted primaryAccountId when
-// it names one of them, else the first provisioned row, else the first row —
-// the same precedence as effectivePrimaryAccountId in
-// integrations/connectors/google-accounts.ts, mirrored registry-only here
-// (like resolveScanConfigDir in onboarding.ts) so this hot gallery read
-// never grows a connectors-layer import.
-function effectivePrimaryId(accounts: GoogleAccount[]): string | undefined {
+// The effective primary among the rows: the instance binding's primary when
+// it names one of them, else the first attached row. The no-instance fallback
+// preserves the legacy machine-global precedence for direct helper callers.
+function effectivePrimaryId(accounts: GoogleAccount[], instance?: Instance): string | undefined {
+  if (instance) {
+    const primary = getGoogleAccountBindings(instance).primaryAccountId;
+    return primary && accounts.some((account) => account.id === primary) ? primary : accounts[0]?.id;
+  }
   const persisted = readPrimaryGoogleAccountId();
   if (persisted && accounts.some((account) => account.id === persisted)) return persisted;
   return (accounts.find((account) => account.provisioned) ?? accounts[0])?.id;
@@ -624,7 +628,7 @@ export async function installRoutineTemplate(
     payload.timezone !== undefined
       ? validateTimezone(payload.timezone)
       : (readOnboarding(config.instance)?.timezone ?? "UTC");
-  const settings = resolveInstallSettings(template, payload);
+  const settings = resolveInstallSettings(template, payload, config.instance);
   const spec = template.buildSpec(settings, timezone);
   if (!spec) {
     throw new Error(`Invalid input: enable at least one ${template.name} option`);
@@ -730,17 +734,18 @@ export function legacyOptionsToSettings(template: RoutineTemplate, raw: unknown)
 //     under its lowercased email key;
 //   - a flat body — or the legacy boolean options map, which is how the
 //     onboarding routines path arrives here — applies alike to every
-//     registered account;
-//   - an absent body seeds one entry per registered account from the
+//     attached account;
+//   - an absent body seeds one entry per attached account from the
 //     per-account defaults;
-//   - with zero registered accounts every non-account-keyed shape falls back
+//   - with zero attached accounts every non-account-keyed shape falls back
 //     to the flat single blob, so instances without a Google account still
 //     install.
 // Shared by the gallery install and the onboarding routineJobSpecs so both
 // writers persist the same shape.
 export function resolveInstallSettings(
   template: RoutineTemplate,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  instance?: Instance
 ): RoutineSettings | PerAccountRoutineSettings {
   const raw =
     payload.settings !== undefined && payload.settings !== null
@@ -750,7 +755,7 @@ export function resolveInstallSettings(
   if (isAccountKeyedSettings(raw)) {
     return { accounts: resolveAccountSettingsMap(template, raw as Record<string, unknown>) };
   }
-  const accounts = registeredGmailAccounts();
+  const accounts = registeredGmailAccounts(instance);
   if (accounts.length === 0) return resolveSettings(template, raw);
   if (raw !== undefined) {
     return {

@@ -2016,12 +2016,15 @@ describe("buildConnectedAccountsBlock", () => {
       expect(block).not.toContain("are connected");
       expect(block).not.toContain("is connected");
       // The verify-before-asserting instruction: sign-in status is NOT in this
-      // list, check list_connectors, and route auth failures to reconnect.
+      // list, check list_connectors, and route auth failures through the
+      // request_google_account reconnect button — never agent-driven OAuth.
       expect(block).toContain("does NOT include sign-in status");
       expect(block).toContain("list_connectors");
       expect(block).toContain("googleAccounts");
       expect(block).toContain("auth error");
+      expect(block).toContain("request_google_account");
       expect(block).toContain("Integrations page");
+      expect(block).toContain("Never run `gws auth login`");
     }
   });
 });

@@ -94,8 +94,10 @@ async function checkGws(env: NodeJS.ProcessEnv, run: CommandRunner, accountConfi
       action:
         "No Google account is set up. On hosted, the Google account is connected at sign-in through the host, " +
         "so this normally means the account has not finished provisioning yet. You MUST resolve this now, before " +
-        "continuing the task, even if the task does not use Google — then proceed. This notice only tells you that " +
-        "you must act, not how; there is no in-chat setup skill for this."
+        "continuing the task, even if the task does not use Google — then proceed. To resolve it, call " +
+        "`request_google_account`: it puts a connect button (→ the Integrations page) in the chat. Tell the user " +
+        "to click it, then stop and wait for them to say it's done. Never run `gws auth login`, and never drive a " +
+        "Google sign-in page with the browser tools."
     };
   }
   const r = await run("bash", ["-lc", `export PATH="${YC_PATH_PREFIX}:$PATH"; GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${cfg}" gws auth status`], env);
@@ -117,10 +119,11 @@ async function checkGws(env: NodeJS.ProcessEnv, run: CommandRunner, accountConfi
     detail: "session expired / not signed in",
     action:
       "The Google session is expired (the account is already registered in accounts.json, so this is a " +
-      "RE-AUTH of the existing account, not first-time setup). On hosted, the Google account is connected at " +
-      "sign-in through the host; a re-auth is driven the same way. You MUST resolve this now, before continuing " +
-      "the task, even if the task does not use Google — then proceed. This notice only tells you that you must " +
-      "act, not how; there is no in-chat setup skill for this."
+      "RE-AUTH of the existing account, not first-time setup). You MUST resolve this now, before continuing " +
+      "the task, even if the task does not use Google — then proceed. To resolve it, call " +
+      "`request_google_account`: it puts a reconnect button (→ the Integrations page) in the chat. Tell the user " +
+      "to click it, then stop and wait for them to say it's done. Never run `gws auth login`, and never drive a " +
+      "Google sign-in page with the browser tools."
   };
 }
 

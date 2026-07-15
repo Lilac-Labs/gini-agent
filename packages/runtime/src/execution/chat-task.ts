@@ -1882,7 +1882,7 @@ export function buildConnectedAccountsBlock(accounts: GoogleAccount[]): string {
     "These Google accounts are registered on this machine. Any `gws` command can target a specific one by prefixing it with `GOOGLE_WORKSPACE_CLI_CONFIG_DIR=\"<configDir>\" gws ...`.",
     ...rows,
     selectionRule,
-    "This list is registration only — it does NOT include sign-in status, and any account's sign-in may be expired or revoked. Never assert an account's sign-in status from this list: before telling the user whether an account is signed in or working, check `list_connectors` (its `googleAccounts` field carries each account's live signedIn status). If a `gws` call fails with an auth error, treat that account's sign-in as expired and direct the user to reconnect it on the Integrations page."
+    "This list is registration only — it does NOT include sign-in status, and any account's sign-in may be expired or revoked. Never assert an account's sign-in status from this list: before telling the user whether an account is signed in or working, check `list_connectors` (its `googleAccounts` field carries each account's live signedIn status). If a `gws` call fails with an auth error, treat that account's sign-in as expired: call `request_google_account` to put a reconnect button (→ the Integrations page) in the chat, tell the user to click it, then stop and wait for them to say it's done. Never run `gws auth login`, and never drive a Google sign-in page with the browser tools."
   ].join("\n");
 }
 

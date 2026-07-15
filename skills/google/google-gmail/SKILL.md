@@ -34,12 +34,12 @@ Never use `2>&1` when piping into a parser — it folds the preamble onto the JS
 
 ## Prerequisites
 
-- If this deployment is managed/hosted, the Google credential is already provisioned at sign-in — `gws` is installed and authenticated, so skip the setup flow below and run `gws` directly. Scopes are fixed at sign-in on a managed deployment: when a call fails with `scope required` or HTTP 401, tell the user which action needs a scope their account wasn't granted, instead of trying to set anything up. (The scope list below still describes which verb needs which scope.)
-- `gws` installed and authenticated. If `gws` is not on PATH OR `gws auth status` reports no authenticated user, do NOT silently call setup. Instead, in a single short reply to the user:
+- `gws` must be installed. If it is not on PATH, do NOT silently call setup. Instead, in a single short reply to the user:
   1. State plainly what's missing — e.g. "Google Workspace access isn't set up on this machine yet" or "your Google sign-in has expired."
   2. Ask one sentence: "Want me to walk you through setting it up?" Wait for the user's answer.
   3. If they say yes, call `read_skill` with name `google-workspace-setup` and run that skill's onboarding flow turn-by-turn. If they say no or ask to defer, acknowledge briefly and stop — do not retry the original request.
-- Apply the same flow when any `gws gmail ...` call fails mid-task with `command not found` / ENOENT, HTTP 401, "no credentials", or "scope required". Don't report the failure as a dead end — surface the missing prerequisite and ask if the user wants to set it up before moving on.
+- If `gws auth status` reports no authenticated user, or a `gws gmail ...` call fails with an auth error (HTTP 401, expired/revoked sign-in, or "no credentials"), call `request_google_account` to put a connect/reconnect button in the chat, then stop and wait for the user. Never drive a Google sign-in page with browser tools.
+- If a call fails with `scope required`, tell the user which action needs the missing scope and call `request_google_account` so they can reconnect with the required access.
 - The OAuth scopes the user picked at login must cover the verbs the agent will use:
   - Read-only triage: `gmail.readonly`
   - Send a new message: `gmail.send`

@@ -71,11 +71,33 @@ describe("buildAuthPreflightBlock", () => {
 
   test("the block informs+routes (does not prescribe the procedure)", async () => {
     const block = await buildAuthPreflightBlock(sanitizedEnv, notAuthedRun, withAccount);
-    // The hook's contract: it tells the agent it MUST act, and routes it to its
-    // own instructions/skills for HOW — it does not itself perform the login.
+    // The hook's contract: it tells the agent it MUST act, and routes it to
+    // the sanctioned mechanism — it does not itself perform the login. Only
+    // the yc line still routes via "your own instructions and skills"; the
+    // gws lines name their affordance (request_google_account, below).
     expect(block).toContain("does not perform any login");
     expect(block).toContain("following your own instructions and skills");
     expect(block).toContain("this notice only tells you that you must act, not how");
+  });
+
+  test("gws branches direct the agent to request_google_account (reauth and first-time)", async () => {
+    // Reauth: an account is registered but its token is invalid.
+    const reauth = await buildAuthPreflightBlock(sanitizedEnv, notAuthedRun, withAccount);
+    expect(reauth).toContain("RE-AUTH");
+    // First-time: no account registered at all.
+    const firstTime = await buildAuthPreflightBlock(sanitizedEnv, notAuthedRun, noAccount);
+    expect(firstTime).toContain("no Google account registered");
+    for (const block of [reauth, firstTime]) {
+      const gwsLine = block.split("\n").find((line) => line.startsWith("- google (gws):")) ?? "";
+      // The gws directive names the concrete mechanism: surface the in-chat
+      // button, hand off to the user, and never drive OAuth agent-side. The
+      // act-but-no-mechanism wording is what made an agent improvise
+      // `gws auth login` — it must not come back.
+      expect(gwsLine).toContain("request_google_account");
+      expect(gwsLine).toContain("Integrations page");
+      expect(gwsLine).toContain("gws auth login");
+      expect(gwsLine).not.toContain("act, not how");
+    }
   });
 
   test("the directive is unconditional — act even if the tool is irrelevant", async () => {

@@ -51,13 +51,14 @@ If no accounts are connected yet, fall back to the setup flow in Prerequisites (
 
 ## When to Use
 
-- The user asks Gini to read, draft, or edit the **body** of a Google Doc.
-- Appending notes, meeting summaries, or AI-generated content to an existing doc.
-- Creating a new blank doc as a starting point (then editing it with `+write` or `batchUpdate`).
+- The user explicitly asks Gini to read, draft, or edit the **body** of a Google Doc.
+- Appending notes, meeting summaries, or AI-generated content to an existing Google Doc.
+- Creating a new blank Google Doc as a starting point (then editing it with `+write` or `batchUpdate`).
 - Running structured edits (insert text at index, replace all of a string, apply heading styles) via the `batchUpdate` API.
 
 ## When NOT to Use
 
+- A generic request to draft or create a doc, report, agenda, notes, or other document that does not name Google Docs or require collaboration/live sharing — write a workspace `.md` file with `file_write` so it is surfaced inline in chat.
 - Sharing, moving, renaming, copying, trashing, or permission-managing a doc — use `google-drive` for the file-as-object surface.
 - Spreadsheets — use Sheets (`gws sheets ...`), not Docs.
 - Slide decks — use Slides (`gws slides ...`), not Docs.

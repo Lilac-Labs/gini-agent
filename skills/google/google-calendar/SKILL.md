@@ -62,7 +62,7 @@ If no accounts are connected yet, fall back to the setup flow in Prerequisites (
 - Personal to-dos the user wants to see on their iPhone — use `apple-reminders` for time-bound to-dos, not Calendar events.
 - One-off agent alerts ("ping me in an hour") — use the cronjob tool, not a self-invite.
 - Cross-device personal note-taking — use `apple-notes` or `obsidian`.
-- Meeting *content* (agenda doc, shared notes) — use `google-docs` for the doc and attach it to the event with a Drive link.
+- Meeting *content* (agenda, prep notes, summaries) is not a Calendar object. If the user did not name a destination, write a workspace `.md` file with `file_write` so it is surfaced inline in chat. Use `google-docs` only when the user explicitly requests Google Docs or needs collaboration/live sharing; attach that Drive link to the event when asked.
 - Project task tracking — use the project's issue tracker; Calendar is for time-bound events, not durable to-dos.
 
 ## Quick Reference

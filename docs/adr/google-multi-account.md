@@ -630,3 +630,4 @@ scope set is a separate decision.
 - ADR `connector-secret-storage.md` — how the OAuth client creds are encrypted
   at rest.
 
+

@@ -61,7 +61,7 @@ import { buildNotificationPreview, type PreviewEvent } from "./integrations/apns
 import { dailyUsage, homeView, mobileBootstrap, publicState } from "./runtime/views";
 import { checkConnector, connectorIsUsable, createConnector, credentialTemplateForProvider, deleteConnector, firstUngrantedCredential, isSkillActive, updateConnector } from "./integrations/connectors";
 import { gwsSessionStatus } from "./integrations/connectors/gws-session";
-import { detachInstanceGoogleAccount, googleAuthMode, listAccountsWithStatus, provisionAccount, registerAccountForInstance, removeAccount, retagAccount, signOutInstanceGoogleAccounts, useAccountForInstance } from "./integrations/connectors/google-accounts";
+import { detachInstanceGoogleAccount, disconnectInstanceGoogleAccount, googleAuthMode, listAccountsWithStatus, provisionAccount, registerAccountForInstance, removeAccount, retagAccount, signOutInstanceGoogleAccounts, useAccountForInstance } from "./integrations/connectors/google-accounts";
 import { handleGoogleLoginWebCallback, startGoogleLoginWeb } from "./integrations/connectors/google-login-web";
 import { getGoogleAccount, googleAccountsRoot } from "./state/google-accounts";
 import { getProvider, listProviders } from "./integrations/connectors/registry";
@@ -2305,6 +2305,15 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
         return json({ error: err instanceof Error ? err.message : "Failed to retag account" }, 400);
       }
       return json(getGoogleAccount(params[0]));
+    }],
+    ["DELETE", /^\/api\/google\/accounts\/([^/]+)\/instance$/, (_request, params) => {
+      try {
+        disconnectInstanceGoogleAccount(config.instance, params[0]);
+        return json({ id: params[0] });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to disconnect Google account";
+        return json({ error: message }, message.startsWith("Primary Google account") ? 409 : 404);
+      }
     }],
     ["DELETE", /^\/api\/google\/accounts\/([^/]+)$/, (_request, params) => {
       removeAccount(params[0]);

@@ -156,6 +156,21 @@ export function detachInstanceGoogleAccount(instance: Instance, accountId: strin
   detachGoogleAccountFromInstance(instance, accountId);
 }
 
+// Disconnect one reusable credential from this instance without deleting it
+// from the machine-global registry. The primary is intentionally protected:
+// the user must make another attached account primary before disconnecting it.
+export function disconnectInstanceGoogleAccount(instance: Instance, accountId: string): void {
+  const bindings = effectiveInstanceBindings(instance, readGoogleAccounts());
+  if (!bindings.attachedAccountIds.includes(accountId)) {
+    throw new Error(`Google account is not connected to this instance: ${accountId}`);
+  }
+  const primaryId = bindings.primaryAccountId ?? bindings.attachedAccountIds[0];
+  if (accountId === primaryId) {
+    throw new Error("Primary Google account cannot be disconnected. Make another account primary first.");
+  }
+  detachGoogleAccountFromInstance(instance, accountId);
+}
+
 export function primaryGoogleAccountForInstance(instance: Instance): GoogleAccount | undefined {
   const accounts = readGoogleAccounts();
   const bindings = effectiveInstanceBindings(instance, accounts);

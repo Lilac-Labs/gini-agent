@@ -1049,6 +1049,58 @@ describe("email watcher routes", () => {
     expect((await response.json()).error).toContain("configDir must be");
   });
 
+  test("DELETE /api/google/accounts/:id/instance disconnects only a secondary account", async () => {
+    const config = testConfig("http-google-disconnect-instance");
+    const handler = createHandler(config);
+    const prevHome = process.env.HOME;
+    const scratchHome = join(`/tmp/gini-http-tests-${import.meta.file}`, `disconnect-home-${process.pid}-${Date.now()}`);
+    mkdirSync(scratchHome, { recursive: true });
+    process.env.HOME = scratchHome;
+    try {
+      const { registerAccountForInstance } = await import("./integrations/connectors/google-accounts");
+      const { getGoogleAccountBindings } = await import("./state/google-account-bindings");
+      const { readGoogleAccounts } = await import("./state/google-accounts");
+      const primary = await registerAccountForInstance(config.instance, {
+        tag: "primary",
+        configDir: join(scratchHome, "primary"),
+        trusted: true,
+        email: "primary@example.com"
+      });
+      const secondary = await registerAccountForInstance(config.instance, {
+        tag: "secondary",
+        configDir: join(scratchHome, "secondary"),
+        trusted: true,
+        email: "secondary@example.com"
+      });
+
+      const protectedResponse = await rawCall(
+        handler,
+        config,
+        `/api/google/accounts/${primary.id}/instance`,
+        { method: "DELETE" },
+        config.token
+      );
+      expect(protectedResponse.status).toBe(409);
+      expect((await protectedResponse.json()).error).toContain("Primary Google account cannot be disconnected");
+
+      const disconnected = await rawCall(
+        handler,
+        config,
+        `/api/google/accounts/${secondary.id}/instance`,
+        { method: "DELETE" },
+        config.token
+      );
+      expect(disconnected.status).toBe(200);
+      expect(await disconnected.json()).toEqual({ id: secondary.id });
+      expect(getGoogleAccountBindings(config.instance).attachedAccountIds).toEqual([primary.id]);
+      expect(readGoogleAccounts()).toHaveLength(2);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      rmSync(scratchHome, { recursive: true, force: true });
+    }
+  });
+
   test("GET /api/google/login/start 302s to Google consent with PKCE and the browser-facing redirect_uri", async () => {
     const config = testConfig("http-google-login-start");
     const handler = createHandler(config);

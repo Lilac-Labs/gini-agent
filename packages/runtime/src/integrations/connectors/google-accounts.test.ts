@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import {
+  disconnectInstanceGoogleAccount,
   effectivePrimaryAccountId,
   ensureHostedPrimaryAccount,
   googleAuthMode,
@@ -476,6 +477,35 @@ describe("instance sign-in helpers", () => {
     expect(getGoogleAccountBindings("inst-a").primaryAccountId).toBeUndefined();
     expect(getGoogleAccountBindings("inst-a").attachedAccountIds).toEqual([]);
     expect(readGoogleAccounts()).toHaveLength(1);
+  });
+
+  test("disconnectInstanceGoogleAccount protects the primary and detaches only the requested secondary", async () => {
+    const primary = await registerAccountForInstance(
+      "inst-a",
+      { tag: "primary", configDir: "/tmp/gws-primary" },
+      { statusForDir: async () => signedIn("primary@example.com") }
+    );
+    const secondary = await registerAccountForInstance(
+      "inst-a",
+      { tag: "secondary", configDir: "/tmp/gws-secondary" },
+      { statusForDir: async () => signedIn("secondary@example.com") }
+    );
+    attachGoogleAccountToInstance("inst-b", secondary, { primary: true });
+
+    expect(() => disconnectInstanceGoogleAccount("inst-a", primary.id)).toThrow(
+      "Primary Google account cannot be disconnected"
+    );
+    disconnectInstanceGoogleAccount("inst-a", secondary.id);
+
+    expect(getGoogleAccountBindings("inst-a").attachedAccountIds).toEqual([primary.id]);
+    expect(getGoogleAccountBindings("inst-b").attachedAccountIds).toEqual([secondary.id]);
+    expect(readGoogleAccounts()).toHaveLength(2);
+  });
+
+  test("disconnectInstanceGoogleAccount rejects an account not attached to the instance", () => {
+    expect(() => disconnectInstanceGoogleAccount("inst-a", "gacct_missing")).toThrow(
+      "Google account is not connected to this instance"
+    );
   });
 });
 

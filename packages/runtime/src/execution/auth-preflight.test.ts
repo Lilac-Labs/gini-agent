@@ -94,9 +94,9 @@ describe("buildAuthPreflightBlock", () => {
     // Reauth: an account is registered but its token is invalid.
     const reauth = await buildAuthPreflightBlock(sanitizedEnv, notAuthedRun, withAccount);
     expect(reauth).toContain("RE-AUTH");
-    // First-time: no account registered at all.
+    // First-time: no account attached to this instance at all.
     const firstTime = await buildAuthPreflightBlock(sanitizedEnv, notAuthedRun, noAccount);
-    expect(firstTime).toContain("no Google account registered");
+    expect(firstTime).toContain("no Google account attached to this Gini instance");
     for (const block of [reauth, firstTime]) {
       const gwsLine = block.split("\n").find((line) => line.startsWith("- google (gws):")) ?? "";
       // The gws directive names the concrete mechanism: surface the in-chat

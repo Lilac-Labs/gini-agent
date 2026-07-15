@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation } from "@tanstack/react-query";
-import { Archive, MoreHorizontal, Plus, Trash2 } from "lucide-react";
+import { Archive, MoreHorizontal, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -62,17 +62,6 @@ export function HomeChatList() {
           count={chats.length}
           open={open}
           onToggle={() => setOpen((value) => !value)}
-          action={
-            <Button
-              data-ph-capture="true"
-              variant="outline"
-              size="sm"
-              onClick={() => router.push("/?compose=message")}
-            >
-              <Plus />
-              New chat
-            </Button>
-          }
         />
 
         {open && chats.length === 0 ? (

@@ -73,15 +73,15 @@ export function HomeComposer() {
     }
   };
 
-  // /?compose=message (the Home Chats "New chat" action) deep-links into
-  // Chat mode, /?compose=task (the routines "Create routine" entry point)
-  // into Task mode with the textarea focused, then strips the params so
+  // /?compose=message deep-links into Chat mode, while /?compose=task (the
+  // routines "Create routine" entry point) deep-links into Task mode with
+  // the textarea focused, then strips the params so
   // reload/back-nav doesn't re-trigger. /?prompt=<text> additionally seeds
   // the composer — pre-fill only, never auto-submit; a bare ?prompt= with no
   // compose param keeps the legacy Chat-mode seed so external links don't
-  // change behavior. Keyed on the params (not mount): clicking "+"
-  // while already on home only changes the query string, and the composer
-  // never remounts. Declared after the storage read above so the deep link
+  // change behavior. Keyed on the params (not mount) so a query-string
+  // change while already on home works without remounting the composer.
+  // Declared after the storage read above so the deep link
   // wins the mount race; deliberately transient — it never writes the
   // persisted mode chip.
   useEffect(() => {

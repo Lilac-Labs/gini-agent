@@ -290,6 +290,49 @@ provisioning/boot time. `provisionAccount` is idempotent per identity (matched
 by Google `sub`, then verified email, then a live-email probe of empty-email
 rows), so re-adding the same account never mints a duplicate row.
 
+### Reconnect and add from chat: the `request_google_account` CTA
+
+Google auth still needs the user mid-conversation: a token gets revoked while
+the agent is working, or the user asks in chat to add another account. The
+no-agent-driven-OAuth decision stands — the sanctioned handling is a **hand-off
+button**, not a login:
+
+- The agent calls the always-on `request_google_account` tool (toolset
+  `connectors`; dispatch in `packages/runtime/src/execution/tool-dispatch.ts`). It reads
+  `listAccountsWithStatus()` and emits ONE `system_note` chat block carrying
+  the generic `cta?: { href, label }` field (`SystemNoteCta` in
+  `packages/runtime/src/types.ts`): label "Reconnect Google account" when any registered
+  account's grant is revoked, else "Connect Google account"; href is always
+  `/integrations?view=google` — the Integrations page's Google drill-down
+  (the page's in-page view is deep-linkable via the `view` search param), so
+  the button lands the user on the per-account Reconnect rows rather than the
+  tiles grid. The href is app-relative — chat and the Integrations page are routes of the one web app served
+  from a single origin (ADR gateway-web-reverse-proxy.md).
+- The web chat renders the note text plus an inline button
+  (`packages/web/src/components/chat/BlockSystemNote.tsx`). On the Integrations page the
+  user runs the existing loopback PKCE browser OAuth flow. The tool is
+  fire-and-forget — no SetupRequest gate —
+  because the user navigates away, completes OAuth in their own browser, and
+  tells the agent when they're done; the agent's tool result instructs it to
+  stop and wait.
+- `cta` is deliberately generic to system notes and distinct from `authError`,
+  which stays model-provider-specific (ADR provider-reauth-guidance.md). A
+  note carries one or the other, never both.
+- The steering that routes the agent here lives in the system-prompt
+  registered-accounts block (`buildConnectedAccountsBlock`), the auth
+  preflight's gws branches (`packages/runtime/src/execution/auth-preflight.ts`), and the
+  google skills' prerequisite notes — each names `request_google_account` and
+  forbids `gws auth login` and browser-driven sign-in, so an auth failure has
+  exactly one mechanism instead of an act-with-no-how directive.
+- The Integrations card composes with this instead of looping back into chat:
+  "Add account" navigates directly into the same-tab OAuth round trip
+  onboarding uses (`connectGoogleUrl`), and a non-primary revoked row gets a
+  Reconnect button through that same add flow. The login callback matches the
+  existing registry row by email and rewrites its local credential in place. The
+  primary row keeps its dedicated relogin path (`reloginPrimaryUrl`, signin
+  intent) so the healed account is re-persisted as the primary. All three
+  flows pass `returnTo=/integrations?view=google`, so completing OAuth lands
+  back in the Google drill-down.
 ### Trust boundary / security
 
 - **No secrets in chat.** The login script never writes the client id/secret
@@ -545,6 +588,15 @@ scope set is a separate decision.
   (`extractConsentUrl`, `buildLoginArgs`, `forceAccountChooser` — merges
   `select_account` into any existing prompt, adds `login_hint`, no-ops an
   unparseable URL).
+- The connected-account prompt routes auth failures to
+  `request_google_account` (never `gws auth login`).
+- `bun test packages/runtime/src/execution/request-google-account-dispatch.test.ts` —
+  `request_google_account` emits exactly one `system_note` with
+  `cta.href === "/integrations?view=google"`, a Reconnect label (naming the revoked
+  account) when any registered account is revoked and a Connect label
+  otherwise, honors the agent's `message` override, and degrades a failing
+  status probe to the Connect wording; the status provider is stubbed so no
+  test spawns `gws`.
 - `bun test packages/runtime/src/integrations/connectors/google-login-web.test.ts`
   — the runtime-owned same-tab web login with stubbed Google HTTP: edge-mode,
   non-loopback-origin, and unknown-intent 400s, the returnTo sanitizer, the

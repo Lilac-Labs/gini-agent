@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ChevronLeft, Search, SearchX } from "lucide-react";
@@ -29,9 +30,11 @@ import {
   buildTiles,
   configuredRecord,
   filterTiles,
+  parseViewParam,
   slackTile,
   tileCounts,
   type IntegrationTile,
+  type IntegrationsView,
   type SlackBridgeLike,
   type TileFilter
 } from "./_lib";
@@ -74,10 +77,22 @@ export default function IntegrationsPage() {
     queryFn: () => api<SlackBridgeLike[]>("/messaging")
   });
   const invalidate = useInvalidate();
+  const params = useSearchParams();
 
   // The Google and Slack drilldowns are in-page view state (matching the
-  // design), not nested routes.
-  const [view, setView] = useState<"list" | "google" | "slack">("list");
+  // design), not nested routes — deep-linkable via ?view=google|slack (the
+  // chat request_google_account CTA and the Google card's post-OAuth returnTo
+  // land directly in the Google view). State initializes from the param, and
+  // setView mirrors changes back with the same replaceState idiom as above,
+  // so the back chevron swaps the URL in place instead of stacking history.
+  const [view, setViewState] = useState<IntegrationsView>(() => parseViewParam(params?.get("view")));
+  const setView = (next: IntegrationsView) => {
+    setViewState(next);
+    const url = new URL(window.location.href);
+    if (next === "list") url.searchParams.delete("view");
+    else url.searchParams.set("view", next);
+    window.history.replaceState(null, "", url.toString());
+  };
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<TileFilter>("all");
   const [dialog, setDialog] = useState<ConnectorDialogState>(CLOSED_DIALOG);

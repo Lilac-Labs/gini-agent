@@ -239,7 +239,9 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
                         variant="outline"
                         aria-label={`Reconnect ${account.tag}`}
                         onClick={() =>
-                          window.location.assign(reloginPrimaryUrl(mode, "/integrations", window.location.origin))
+                          window.location.assign(
+                            reloginPrimaryUrl(mode, "/integrations?view=google", window.location.origin)
+                          )
                         }
                       >
                         <RotateCwIcon className="size-3" />
@@ -252,7 +254,9 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
                         variant="outline"
                         aria-label={`Reconnect ${account.tag}`}
                         onClick={() =>
-                          window.location.assign(connectGoogleUrl(mode, "/integrations", window.location.origin))
+                          window.location.assign(
+                            connectGoogleUrl(mode, "/integrations?view=google", window.location.origin)
+                          )
                         }
                       >
                         <RotateCwIcon className="size-3" />
@@ -321,7 +325,7 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
         className="self-start"
         disabled={!mode}
         onClick={() =>
-          mode && window.location.assign(connectGoogleUrl(mode, "/integrations", window.location.origin))
+          mode && window.location.assign(connectGoogleUrl(mode, "/integrations?view=google", window.location.origin))
         }
       >
         <PlusIcon className="size-3.5" />

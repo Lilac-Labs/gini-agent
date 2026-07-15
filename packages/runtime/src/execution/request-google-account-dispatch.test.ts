@@ -1,7 +1,8 @@
 // Unit coverage for the request_google_account branch of dispatchToolCall.
 //
 // The dispatcher emits ONE system_note block whose `cta` renders as an
-// inline button to /integrations, with the label decided by the live
+// inline button to the Integrations page's Google drill-down
+// (/integrations?view=google), with the label decided by the live
 // per-account Google sign-in status. The status provider is swapped via
 // setRequestGoogleAccountStatusProvider so no test ever spawns a real
 // `gws auth status` subprocess.
@@ -88,7 +89,7 @@ describe("request_google_account dispatch", () => {
     expect(notes.length).toBe(1);
     const note = notes[0];
     if (note?.kind !== "system_note") throw new Error("expected a system_note block");
-    expect(note.cta).toEqual({ href: "/integrations", label: "Reconnect Google account" });
+    expect(note.cta).toEqual({ href: "/integrations?view=google", label: "Reconnect Google account" });
     expect(note.text).toContain("me@gmail.com");
     expect(note.authError).toBeUndefined();
   });
@@ -105,7 +106,7 @@ describe("request_google_account dispatch", () => {
     expect(notes.length).toBe(1);
     const note = notes[0];
     if (note?.kind !== "system_note") throw new Error("expected a system_note block");
-    expect(note.cta).toEqual({ href: "/integrations", label: "Connect Google account" });
+    expect(note.cta).toEqual({ href: "/integrations?view=google", label: "Connect Google account" });
     expect(note.text).toContain("Connect a Google account");
   });
 
@@ -149,6 +150,6 @@ describe("request_google_account dispatch", () => {
     expect(notes.length).toBe(1);
     const note = notes[0];
     if (note?.kind !== "system_note") throw new Error("expected a system_note block");
-    expect(note.cta).toEqual({ href: "/integrations", label: "Connect Google account" });
+    expect(note.cta).toEqual({ href: "/integrations?view=google", label: "Connect Google account" });
   });
 });

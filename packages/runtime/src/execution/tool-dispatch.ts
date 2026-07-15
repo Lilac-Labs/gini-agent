@@ -4578,7 +4578,8 @@ export function setRequestGoogleAccountStatusProvider(provider: RequestGoogleAcc
 // request_google_account tool. Google OAuth (connect and reconnect alike)
 // lives on the Integrations page — never in chat, never agent-driven (ADR
 // google-multi-account.md). This tool emits ONE system_note block whose
-// `cta` renders as an inline button to /integrations, then returns a sync
+// `cta` renders as an inline button to the Integrations page's Google
+// drill-down (/integrations?view=google), then returns a sync
 // result steering the model to hand off to the user and wait. Deliberately
 // fire-and-forget: no SetupRequest gate to resolve, because the user
 // completes OAuth on another page and reports back in their own words. No
@@ -4609,7 +4610,7 @@ async function requestGoogleAccountTool(
       ? `Google sign-in for ${revokedNames} needs to be reconnected.`
       : "Connect a Google account to continue.");
   emitSystemNote(resolveEmitContext(config, taskId), text, undefined, {
-    href: "/integrations",
+    href: "/integrations?view=google",
     label
   });
   appendTrace(config.instance, taskId, {

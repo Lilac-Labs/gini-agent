@@ -210,3 +210,13 @@ export function filterTiles(
     return q.length === 0 || t.label.toLowerCase().includes(q);
   });
 }
+
+// The page's in-page view, deep-linkable via ?view=google|slack (the agent's
+// request_google_account CTA and the Google card's post-OAuth returnTo link
+// to /integrations?view=google). Absent or unknown values fall back to the
+// tiles grid.
+export type IntegrationsView = "list" | "google" | "slack";
+
+export function parseViewParam(value: string | null | undefined): IntegrationsView {
+  return value === "google" || value === "slack" ? value : "list";
+}

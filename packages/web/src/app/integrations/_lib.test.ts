@@ -13,6 +13,7 @@ import {
   buildTiles,
   configuredRecord,
   filterTiles,
+  parseViewParam,
   slackTile,
   tileCounts,
   type SlackBridgeLike
@@ -250,5 +251,19 @@ describe("tileCounts / filterTiles", () => {
 
   test("no matches -> empty list (empty state)", () => {
     expect(filterTiles(tiles, "all", "zzz")).toHaveLength(0);
+  });
+});
+
+describe("parseViewParam", () => {
+  test("google and slack deep-link their drilldowns", () => {
+    expect(parseViewParam("google")).toBe("google");
+    expect(parseViewParam("slack")).toBe("slack");
+  });
+
+  test("absent or unknown values fall back to the tiles grid", () => {
+    expect(parseViewParam(null)).toBe("list");
+    expect(parseViewParam(undefined)).toBe("list");
+    expect(parseViewParam("")).toBe("list");
+    expect(parseViewParam("gmail")).toBe("list");
   });
 });

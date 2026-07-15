@@ -80,6 +80,19 @@ rg -n "v0|v1|v2|v3|lane|v1-readiness|single HTML|src/state\\.ts|src/api" README.
 
 After a UI-related change or new feature, verify it end-to-end by driving the real running app the way the user would — through the browser — before declaring the task done. You are the user here: open the app, get to the change, and exercise it in context. Depending on the change, that's a **visual inspection** (does it render correctly — take a `screenshot` and look at it), a **flow** check (does the interaction path actually work — click, type, and navigate through it), or both.
 
+When testing a surface unrelated to onboarding on a fresh worktree instance,
+coding agents may bypass the funnel through its normal runtime contract after
+starting the gateway:
+
+```bash
+instance=$(basename "$(git rev-parse --abbrev-ref HEAD)")
+bun run gini onboarding skip --instance "$instance"
+```
+
+This completes onboarding only for the selected instance. Do not use the
+bypass when the change itself affects onboarding or Google sign-in, and do not
+edit `onboarding.json` by hand.
+
 - Web changes (`packages/web/`): run the Next.js dev server and drive it in a browser with `agent-browser` (run `agent-browser skills get dogfood` first for the exploratory-QA workflow, or `skills get core` for the command reference). Walk the flow by `@ref` from `snapshot -i`, wait with `--load networkidle`, `screenshot` to eyeball the result, and check `errors`/`console` per page.
 - Mobile changes (`packages/mobile/`): run it on the iOS simulator (`bun run mobile:ios`) AND in the RN Web target (`cd packages/mobile && bun run web`). The web target lets `agent-browser` drive the actual UI (flow and visual check); the iOS simulator is what catches native-only behavior (long-press selection, gesture handling, native text input, etc.).
 - Shared changes that affect both: verify on both.

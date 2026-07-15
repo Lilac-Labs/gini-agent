@@ -162,6 +162,10 @@ for every deployment.
   canonical zones browsers report, e.g. `Asia/Kolkata`); theme must be
   `"light" | "dark"`; `completed: true` stamps `completedAt` once. Violations
   throw `Invalid input: …` → 400.
+- `gini onboarding skip --instance <name>` is the explicit local-development
+  bypass for coding agents testing unrelated gated surfaces. It sends the same
+  authenticated `PATCH { completed: true }` to the selected running instance;
+  it does not introduce a second persistence path or a hosted auth bypass.
 - `POST /api/onboarding/scan` → `OnboardingRecord`. Starts the deterministic
   Gmail profile scan in the background and returns the `running` record
   immediately; idempotent while a scan is `running` or `ready`. With no

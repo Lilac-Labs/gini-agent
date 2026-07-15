@@ -9,12 +9,14 @@
 // that tool is irrelevant to the current request (a later turn may need it).
 //
 // Read-only and best-effort: a checker failure degrades to "unknown" and never
-// blocks the turn. Cheap (two short shell probes) and bounded by its own
-// timeout so it can sit on the critical path to the model.
+// blocks the turn. Cheap (one short shell probe for yc plus one per attached
+// Google account, in parallel) and bounded by its own timeout so it can sit on
+// the critical path to the model.
 
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { googleAccountsForInstance } from "../integrations/connectors/google-accounts";
+import { parseGwsAuthStatus } from "../integrations/connectors/gws-session";
 import { readGoogleAccounts } from "../state/google-accounts";
 import type { Instance } from "../types";
 
@@ -68,59 +70,77 @@ async function checkYc(env: NodeJS.ProcessEnv, run: CommandRunner): Promise<Tool
   };
 }
 
-// Resolve the gws config dir from the first account attached to this instance,
-// or undefined when none is attached. Injectable so tests can drive both the
-// "no account" and "account present" branches deterministically.
-export type AccountConfigDirLookup = (instance?: Instance) => string | undefined;
+// Resolve the gws config dirs of EVERY account attached to this instance ([]
+// when none is attached). Injectable so tests can drive the no-account,
+// mixed-liveness, and revoked branches deterministically.
+export type AccountConfigDirsLookup = (instance?: Instance) => string[];
 
-const realAccountConfigDir: AccountConfigDirLookup = (instance) =>
-  (instance ? googleAccountsForInstance(instance) : readGoogleAccounts())[0]?.configDir;
+const realAccountConfigDirs: AccountConfigDirsLookup = (instance) =>
+  (instance ? googleAccountsForInstance(instance) : readGoogleAccounts()).map((account) => account.configDir);
 
 async function checkGws(
   env: NodeJS.ProcessEnv,
   run: CommandRunner,
-  accountConfigDir: AccountConfigDirLookup,
+  accountConfigDirs: AccountConfigDirsLookup,
   instance?: Instance
 ): Promise<ToolStatus> {
-  const cfg = accountConfigDir(instance);
-  if (!cfg) {
+  const dirs = accountConfigDirs(instance);
+  // Probe every attached account (parallel; accounts are few). One live
+  // session anywhere means Google is usable, so nothing is injected — a dead
+  // account among live ones surfaces at gws-call time through the skills' own
+  // auth guidance instead of ordering a reconnect on every turn.
+  const statuses = await Promise.all(
+    dirs.map(async (dir) => {
+      const r = await run(
+        "bash",
+        ["-lc", `export PATH="${YC_PATH_PREFIX}:$PATH"; GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${dir}" gws auth status`],
+        env
+      );
+      return parseGwsAuthStatus(r.stdout);
+    })
+  );
+  const live = statuses.find((s) => s.signedIn);
+  if (live) {
+    return { tool: "google (gws)", ok: true, detail: `signed in${live.email ? ` (${live.email})` : ""}`, action: "" };
+  }
+  // Genuine re-auth: no live session anywhere and at least one attached
+  // account holds a grant gws classified as revoked/expired. Only this state
+  // orders the reconnect button.
+  if (statuses.some((s) => s.tokenRevoked)) {
     return {
       tool: "google (gws)",
       ok: false,
-      detail: "no Google account attached to this Gini instance",
+      detail: "session expired / not signed in",
       action:
-        "No Google account is set up. On hosted, the Google account is connected at sign-in through the host, " +
-        "so this normally means the account has not finished provisioning yet. You MUST resolve this now, before " +
-        "continuing the task, even if the task does not use Google — then proceed. To resolve it, call " +
-        "`request_google_account`: it puts a connect button (→ the Integrations page) in the chat. Tell the user " +
+        "The Google session is expired (the account is already attached to this instance, so this is a " +
+        "RE-AUTH of the existing account, not first-time setup). You MUST resolve this now, before continuing " +
+        "the task, even if the task does not use Google — then proceed. To resolve it, call " +
+        "`request_google_account`: it puts a reconnect button (→ the Integrations page) in the chat. Tell the user " +
         "to click it, then stop and wait for them to say it's done. Never run `gws auth login`, and never drive a " +
         "Google sign-in page with the browser tools."
     };
   }
-  const r = await run("bash", ["-lc", `export PATH="${YC_PATH_PREFIX}:$PATH"; GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${cfg}" gws auth status`], env);
-  let tokenValid = false;
-  let user = "";
-  try {
-    const j = JSON.parse(r.stdout) as { token_valid?: boolean; user?: string };
-    tokenValid = j.token_valid === true;
-    user = j.user ?? "";
-  } catch {
-    /* fall through to not-ok */
-  }
-  if (tokenValid) {
-    return { tool: "google (gws)", ok: true, detail: `signed in${user ? ` (${user})` : ""}`, action: "" };
-  }
+  // No account attached, or accounts registered but none ever signed in (and
+  // none revoked). On hosted this is typically the post-sign-in provisioning
+  // window: the edge delivers the credential asynchronously, retrying for ~90s
+  // after the redirect, so the state usually heals itself — the agent must
+  // re-check before surfacing any button.
   return {
     tool: "google (gws)",
     ok: false,
-    detail: "session expired / not signed in",
+    detail:
+      dirs.length === 0
+        ? "no Google account attached to this Gini instance"
+        : "no live Google session on any attached account",
     action:
-      "The Google session is expired (the account is already attached to this instance, so this is a " +
-      "RE-AUTH of the existing account, not first-time setup). You MUST resolve this now, before continuing " +
-      "the task, even if the task does not use Google — then proceed. To resolve it, call " +
-      "`request_google_account`: it puts a reconnect button (→ the Integrations page) in the chat. Tell the user " +
-      "to click it, then stop and wait for them to say it's done. Never run `gws auth login`, and never drive a " +
-      "Google sign-in page with the browser tools."
+      "No Google account is signed in yet. On hosted, the account is connected at sign-in through the host, " +
+      "and right after a fresh sign-in the credential can still be landing (delivery retries for about 90 " +
+      "seconds) — so this often resolves on its own. You MUST resolve this now, before continuing the task, " +
+      "even if the task does not use Google — then proceed. First re-check once by calling `list_connectors`: " +
+      "it refreshes the Google account registry and re-probes sign-in. Only if it still reports no signed-in " +
+      "Google account, call `request_google_account`: it puts a connect button (→ the Integrations page) in " +
+      "the chat. Tell the user to click it, then stop and wait for them to say it's done. Never run " +
+      "`gws auth login`, and never drive a Google sign-in page with the browser tools."
   };
 }
 
@@ -132,7 +152,7 @@ async function checkGws(
 export async function buildAuthPreflightBlock(
   env: NodeJS.ProcessEnv = process.env,
   run: CommandRunner = realRun,
-  accountConfigDir: AccountConfigDirLookup = realAccountConfigDir,
+  accountConfigDirs: AccountConfigDirsLookup = realAccountConfigDirs,
   instance?: Instance
 ): Promise<string> {
   // Gate: only run on a provisioned machine. Absent/empty GINI_RELAY_PROVISIONED
@@ -142,7 +162,7 @@ export async function buildAuthPreflightBlock(
   if (!provisioned || provisioned.trim().length === 0) return "";
   let statuses: ToolStatus[];
   try {
-    statuses = await Promise.all([checkYc(env, run), checkGws(env, run, accountConfigDir, instance)]);
+    statuses = await Promise.all([checkYc(env, run), checkGws(env, run, accountConfigDirs, instance)]);
   } catch {
     return "";
   }

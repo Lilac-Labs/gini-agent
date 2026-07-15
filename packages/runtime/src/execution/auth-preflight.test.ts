@@ -11,7 +11,7 @@ import { describe, expect, test, beforeAll } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildAuthPreflightBlock, type CommandRunner, type AccountConfigDirLookup } from "./auth-preflight";
+import { buildAuthPreflightBlock, type CommandRunner, type AccountConfigDirsLookup } from "./auth-preflight";
 
 // An env that gets past the provisioned gate. The PATH no longer matters for
 // the probe outcome (the injected runner below decides that), but we keep a
@@ -27,12 +27,26 @@ beforeAll(() => {
 
 // Stub runner: every probe resolves as "not authenticated" — `yc me` exits
 // non-zero (command-not-found, no "(" in stdout) and `gws auth status` returns
-// stdout with no valid token. This reproduces the real not-signed-in outcome
-// the tests pin, with zero subprocess boots.
+// stdout with no valid token AND no refresh token (a never-signed-in dir, not
+// a revoked grant). This reproduces the real not-signed-in outcome the tests
+// pin, with zero subprocess boots.
 const notAuthedRun: CommandRunner = async (_cmd, args) => {
   const script = args[args.length - 1] ?? "";
   if (script.includes("yc me")) return { code: 127, stdout: "", stderr: "bash: yc: command not found" };
   return { code: 0, stdout: JSON.stringify({ token_valid: false }), stderr: "" };
+};
+
+// Revoked runner: `gws auth status` reports a stored refresh token that no
+// longer yields a session — the classification parseGwsAuthStatus maps to
+// tokenRevoked, i.e. the genuine re-auth case (vs never signed in).
+const revokedRun: CommandRunner = async (_cmd, args) => {
+  const script = args[args.length - 1] ?? "";
+  if (script.includes("yc me")) return { code: 127, stdout: "", stderr: "bash: yc: command not found" };
+  return {
+    code: 0,
+    stdout: JSON.stringify({ token_valid: false, has_refresh_token: true, token_error: "Token has been expired or revoked." }),
+    stderr: ""
+  };
 };
 
 // Hostile runner: throws, standing in for an environment where even spawning
@@ -55,17 +69,17 @@ const authedRun: CommandRunner = async (_cmd, args) => {
 // Account-config lookups, injected so the gws branch is decided by the test,
 // not by whatever ~/.gini/google-accounts/accounts.json holds on this machine
 // (homedir() is not env-overridable at runtime, so the real lookup can't be
-// sandboxed via HOME). `withAccount` drives the "account present -> issue the
-// gws probe" path; `noAccount` drives the "no Google account" early-return.
-const withAccount: AccountConfigDirLookup = () => "/tmp/gws-cfg";
-const noAccount: AccountConfigDirLookup = () => undefined;
+// sandboxed via HOME). `withAccount` drives the "account attached -> probe its
+// dir" path; `noAccount` drives the "no Google account" branch.
+const withAccount: AccountConfigDirsLookup = () => ["/tmp/gws-cfg"];
+const noAccount: AccountConfigDirsLookup = () => [];
 
 describe("buildAuthPreflightBlock", () => {
   test("passes the runtime instance to the Google account lookup", async () => {
     let requestedInstance: string | undefined;
-    const lookup: AccountConfigDirLookup = (instance) => {
+    const lookup: AccountConfigDirsLookup = (instance) => {
       requestedInstance = instance;
-      return "/tmp/gws-cfg";
+      return ["/tmp/gws-cfg"];
     };
     await buildAuthPreflightBlock(sanitizedEnv, authedRun, lookup, "inst-a");
     expect(requestedInstance).toBe("inst-a");
@@ -91,8 +105,8 @@ describe("buildAuthPreflightBlock", () => {
   });
 
   test("gws branches direct the agent to request_google_account (reauth and first-time)", async () => {
-    // Reauth: an account is registered but its token is invalid.
-    const reauth = await buildAuthPreflightBlock(sanitizedEnv, notAuthedRun, withAccount);
+    // Reauth: an account is attached and gws classifies its grant as revoked.
+    const reauth = await buildAuthPreflightBlock(sanitizedEnv, revokedRun, withAccount);
     expect(reauth).toContain("RE-AUTH");
     // First-time: no account attached to this instance at all.
     const firstTime = await buildAuthPreflightBlock(sanitizedEnv, notAuthedRun, noAccount);
@@ -108,6 +122,50 @@ describe("buildAuthPreflightBlock", () => {
       expect(gwsLine).toContain("gws auth login");
       expect(gwsLine).not.toContain("act, not how");
     }
+  });
+
+  test("any live account silences the gws directive even when others are revoked", async () => {
+    // Two attached accounts: one revoked, one live. One live session means
+    // Google is usable — the preflight must not order a reconnect (the dead
+    // account surfaces at gws-call time through the skills' auth guidance).
+    const dirs: AccountConfigDirsLookup = () => ["/tmp/gws-dead", "/tmp/gws-live"];
+    const run: CommandRunner = async (_cmd, args) => {
+      const script = args[args.length - 1] ?? "";
+      if (script.includes("yc me")) return { code: 0, stdout: "user@example.com (org-1)\n", stderr: "" };
+      if (script.includes("/tmp/gws-dead")) {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ token_valid: false, has_refresh_token: true, token_error: "Token has been expired or revoked." }),
+          stderr: ""
+        };
+      }
+      return { code: 0, stdout: JSON.stringify({ token_valid: true, user: "live@example.com" }), stderr: "" };
+    };
+    // Nothing to flag at all: yc is authed and gws has a live session.
+    expect(await buildAuthPreflightBlock(sanitizedEnv, run, dirs)).toBe("");
+  });
+
+  test("first-time branch is provisioning-aware: re-check via list_connectors before the button", async () => {
+    // Right after a hosted sign-in the credential delivery can still be in
+    // flight, so the no-account text routes through a list_connectors re-check
+    // (which self-heals the registry and re-probes) BEFORE any CTA.
+    const block = await buildAuthPreflightBlock(sanitizedEnv, notAuthedRun, noAccount);
+    const gwsLine = block.split("\n").find((line) => line.startsWith("- google (gws):")) ?? "";
+    expect(gwsLine).toContain("list_connectors");
+    expect(gwsLine).toContain("request_google_account");
+    expect(gwsLine.indexOf("list_connectors")).toBeLessThan(gwsLine.indexOf("request_google_account"));
+    expect(gwsLine).not.toContain("RE-AUTH");
+  });
+
+  test("attached-but-never-signed-in accounts get the provisioning-aware text, not the reauth CTA", async () => {
+    // An attached row whose dir holds no live grant and no revoked token (e.g.
+    // a credential delivery still landing). Ordering a reconnect here is the
+    // false positive this branch exists to avoid.
+    const block = await buildAuthPreflightBlock(sanitizedEnv, notAuthedRun, withAccount);
+    const gwsLine = block.split("\n").find((line) => line.startsWith("- google (gws):")) ?? "";
+    expect(gwsLine).toContain("no live Google session on any attached account");
+    expect(gwsLine).toContain("list_connectors");
+    expect(gwsLine).not.toContain("RE-AUTH");
   });
 
   test("the directive is unconditional — act even if the tool is irrelevant", async () => {

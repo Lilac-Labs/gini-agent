@@ -140,4 +140,55 @@ describe("homeView", () => {
     expect(plain).toBeDefined();
     expect(plain?.routineJobId).toBeUndefined();
   });
+
+  test("acknowledged completions move to done; unacknowledged stay task rows; acknowledged failures vanish", async () => {
+    const config = testConfig("views-home-done");
+    readState(config.instance);
+    const ids = await mutateState(config.instance, (state) => {
+      // Completed and acknowledged after the outcome → a Done row carrying
+      // the outcome's timestamp and summary first line.
+      const acked = createTopic(state, { title: "Ship the report", startedAs: "task" });
+      seedTask(state, acked.id, "completed", "2026-07-01T10:00:00.000Z");
+      acked.acknowledgedAt = "2026-07-01T10:05:00.000Z";
+
+      // Completed but never acknowledged → still a done_unacknowledged task
+      // row, never a Done row.
+      const unacked = createTopic(state, { title: "Book flights", startedAs: "task" });
+      seedTask(state, unacked.id, "completed", "2026-07-01T11:00:00.000Z");
+
+      // Failed and acknowledged → neither list (Done shows only successes).
+      const failedAcked = createTopic(state, { title: "Broken errand", startedAs: "task" });
+      seedTask(state, failedAcked.id, "failed", "2026-07-01T09:00:00.000Z");
+      failedAcked.acknowledgedAt = "2026-07-01T09:05:00.000Z";
+
+      return { acked: acked.id, unacked: unacked.id, failedAcked: failedAcked.id };
+    });
+
+    const home = homeView(config);
+    expect(home.tasks.map((t) => t.id)).toEqual([ids.unacked]);
+    expect(home.tasks[0]?.attention).toBe("done_unacknowledged");
+    expect(home.done.map((d) => d.id)).toEqual([ids.acked]);
+    expect(home.done[0]?.completedAt).toBe("2026-07-01T10:00:00.000Z");
+    expect(home.done[0]?.outcomeLine).toBe("Done.");
+  });
+
+  test("done sorts by completedAt desc and caps at 10", async () => {
+    const config = testConfig("views-home-done-cap");
+    readState(config.instance);
+    await mutateState(config.instance, (state) => {
+      for (let hour = 0; hour <= 10; hour++) {
+        const topic = createTopic(state, { title: `Errand ${hour}`, startedAs: "task" });
+        seedTask(state, topic.id, "completed", `2026-07-01T${String(hour).padStart(2, "0")}:00:00.000Z`);
+        topic.acknowledgedAt = "2026-07-02T00:00:00.000Z";
+      }
+    });
+
+    const home = homeView(config);
+    expect(home.done).toHaveLength(10);
+    // Newest first; the cap drops the oldest completion (hour 00).
+    expect(home.done[0]?.completedAt).toBe("2026-07-01T10:00:00.000Z");
+    expect(home.done[9]?.completedAt).toBe("2026-07-01T01:00:00.000Z");
+    const stamps = home.done.map((d) => d.completedAt);
+    expect(stamps).toEqual([...stamps].sort().reverse());
+  });
 });

@@ -1210,6 +1210,20 @@ export interface HomeTaskItem {
   updatedAt: string;
 }
 
+// One row of the home Done section (GET /api/home): a container whose latest
+// terminal run outcome is completed AND acknowledged. Acknowledged failures
+// and cancellations never appear — Done shows only successful work.
+export interface HomeDoneItem {
+  // Container (chat session) id — the row deep-links to /chat?session=<id>.
+  id: string;
+  title: string;
+  // First line of the completed run's summary (same derivation as
+  // HomeTaskItem.outcomeLine); absent when the run recorded no summary.
+  outcomeLine?: string;
+  // The outcome's `at` timestamp — what the row's relative time renders.
+  completedAt: string;
+}
+
 // One row of the home Recents feed (GET /api/home): one entry per
 // home-eligible container, carrying its newest completed run. Follow-up
 // runs in the same container update the entry's recency instead of adding

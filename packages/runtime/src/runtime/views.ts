@@ -2,6 +2,7 @@ import type {
   Authorization,
   ChatSessionRecord,
   ContainerAttention,
+  HomeDoneItem,
   HomeTaskItem,
   JobRecord,
   RecentItem,
@@ -89,6 +90,9 @@ const HOME_ATTENTION_ORDER: Record<ContainerAttention, number> = {
 // Bound the Recents artifact feed — home is a daily surface, not an archive.
 const HOME_RECENTS_CAP = 10;
 
+// Same bound for the collapsible Done section.
+const HOME_DONE_CAP = 10;
+
 // Truncation cap for a home row's outcome line — same one-liner budget as
 // the chat list's lastMessagePreview.
 const HOME_OUTCOME_LINE_CHARS = 140;
@@ -137,8 +141,8 @@ function reviewForAuthorization(auth: { id: string; action: string }): NonNullab
 // only needs derived attention + a few facts per container.
 //
 // A container is a home task row iff its derived attention ≠ none (an
-// acknowledged/quiet container never appears — this IS the server-side
-// acknowledged filter) AND the inclusion predicate holds:
+// acknowledged/quiet container never appears as a task row — this IS the
+// server-side acknowledged filter) AND the inclusion predicate holds:
 //   startedBy === "user"
 //   OR attention ∈ {needs_input, review}
 //   OR surfaced === true.
@@ -150,10 +154,14 @@ function reviewForAuthorization(auth: { id: string; action: string }): NonNullab
 // Message-mode conversations (startedAs === "message") also skip the TASKS
 // list — they live in the sidebar Messages section, so a parked question or
 // finished reply there never reads as a task row. They still feed Recents.
+//
+// Acknowledged containers whose latest outcome is a completed run resurface
+// in `done` (the collapsible Done section) under the same visibility rules;
+// acknowledged failures and cancellations disappear entirely.
 export function homeView(
   config: RuntimeConfig,
   agentId?: string
-): { owner?: { firstName: string }; tasks: HomeTaskItem[]; recents: RecentItem[] } {
+): { owner?: { firstName: string }; tasks: HomeTaskItem[]; done: HomeDoneItem[]; recents: RecentItem[] } {
   const state = readState(config.instance);
   const index = buildContainerAttentionIndex(state);
   // Tasks that produced an outbound-message draft render with the draft icon
@@ -175,6 +183,7 @@ export function homeView(
     if (!current || job.createdAt > current.createdAt) routineJobBySession.set(job.chatSessionId, job);
   }
   const tasks: HomeTaskItem[] = [];
+  const done: HomeDoneItem[] = [];
   const recents: RecentItem[] = [];
   for (const session of state.chatSessions) {
     if (session.kind !== "topic" && session.kind !== "channel") continue;
@@ -207,7 +216,20 @@ export function homeView(
     // keeps the row exactly as before.
     if (session.startedAs === "message") continue;
     const attention = deriveContainerAttention(state, session, index);
-    if (attention === "none") continue;
+    if (attention === "none") {
+      // Acknowledged containers leave the task queue; the ones whose latest
+      // outcome is a success resurface in the Done section. Acknowledged
+      // failures/cancellations disappear entirely, and agent-spawned
+      // internal errands never show (same visibility rule as task rows).
+      if (!userFacing) continue;
+      const outcome = latestRunOutcome(state, session, index);
+      if (outcome && outcome.status === "completed") {
+        const doneItem: HomeDoneItem = { id: session.id, title: session.title, completedAt: outcome.at };
+        if (outcome.summary) doneItem.outcomeLine = outcomeLineFor(outcome);
+        done.push(doneItem);
+      }
+      continue;
+    }
     if (!userFacing && attention !== "needs_input" && attention !== "review") continue;
     const outcome = latestRunOutcome(state, session, index);
     const item: HomeTaskItem = {
@@ -262,11 +284,13 @@ export function homeView(
     const byAttention = HOME_ATTENTION_ORDER[a.attention] - HOME_ATTENTION_ORDER[b.attention];
     return byAttention !== 0 ? byAttention : b.updatedAt.localeCompare(a.updatedAt);
   });
+  done.sort((a, b) => b.completedAt.localeCompare(a.completedAt));
   recents.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   const firstName = config.ownerFirstName?.trim();
   return {
     ...(firstName ? { owner: { firstName } } : {}),
     tasks,
+    done: done.slice(0, HOME_DONE_CAP),
     recents: recents.slice(0, HOME_RECENTS_CAP)
   };
 }

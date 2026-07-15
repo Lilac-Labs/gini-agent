@@ -29,6 +29,7 @@ import type {
   RiskLevel,
   SetupRequestAction,
   SystemNoteAuthError,
+  SystemNoteCta,
   ThreadSummary,
   ToolCallBlock,
   ToolCallStatus
@@ -298,11 +299,22 @@ function rowToBlock(row: ChatBlockRow): ChatBlock {
             reauthUrl: typeof raw.reauthUrl === "string" ? raw.reauthUrl : "/settings"
           }
         : undefined;
+      // A cta needs both fields to render a working button; drop a
+      // half-formed one (hand-edited row) rather than surface a dead link.
+      const rawCta =
+        payload.cta && typeof payload.cta === "object"
+          ? (payload.cta as Partial<SystemNoteCta>)
+          : undefined;
+      const cta: SystemNoteCta | undefined =
+        rawCta && typeof rawCta.href === "string" && rawCta.href.length > 0 && typeof rawCta.label === "string" && rawCta.label.length > 0
+          ? { href: rawCta.href, label: rawCta.label }
+          : undefined;
       return {
         ...base,
         kind: "system_note",
         text: String(payload.text ?? ""),
         ...(authError ? { authError } : {}),
+        ...(cta ? { cta } : {}),
         ...(typeof payload.forwardedFromTopicId === "string"
           ? { forwardedFromTopicId: payload.forwardedFromTopicId }
           : {}),
@@ -392,6 +404,7 @@ function payloadFor(block: ChatBlock): string {
       return JSON.stringify({
         text: block.text,
         ...(block.authError ? { authError: block.authError } : {}),
+        ...(block.cta ? { cta: block.cta } : {}),
         ...(block.forwardedFromTopicId ? { forwardedFromTopicId: block.forwardedFromTopicId } : {}),
         ...(block.forwardedFromTopicTitle ? { forwardedFromTopicTitle: block.forwardedFromTopicTitle } : {})
       });
@@ -524,6 +537,7 @@ export function insertChatBlock(
             kind: "system_note",
             text: input.text,
             ...(input.authError ? { authError: input.authError } : {}),
+            ...(input.cta ? { cta: input.cta } : {}),
             ...(input.forwardedFromTopicId ? { forwardedFromTopicId: input.forwardedFromTopicId } : {}),
             ...(input.forwardedFromTopicTitle ? { forwardedFromTopicTitle: input.forwardedFromTopicTitle } : {})
           };

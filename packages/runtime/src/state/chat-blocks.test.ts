@@ -883,6 +883,36 @@ describe("chat-blocks persistence", () => {
     expect(plainNote.authError).toBeUndefined();
   });
 
+  test("system_note round-trips cta metadata; a half-formed cta is dropped on read", () => {
+    const instance = "chat-blocks-cta";
+
+    insertChatBlock(instance, {
+      kind: "system_note",
+      sessionId: "chat_cta",
+      text: "Google sign-in for me@gmail.com needs to be reconnected.",
+      cta: { href: "/integrations", label: "Reconnect Google account" }
+    });
+    const malformed = insertChatBlock(instance, {
+      kind: "system_note",
+      sessionId: "chat_cta",
+      text: "note with a broken cta"
+    });
+    // Rewrite to a label-less cta payload (hand-edited / truncated row): the
+    // read normalizer must drop it rather than surface a dead button.
+    getMemoryDb(instance).run("UPDATE chat_blocks SET payload_json = ? WHERE id = ?", [
+      JSON.stringify({ text: "note with a broken cta", cta: { href: "/integrations" } }),
+      malformed.id
+    ]);
+
+    const [ctaNote, brokenNote] = listChatBlocks(instance, "chat_cta");
+    if (ctaNote?.kind !== "system_note" || brokenNote?.kind !== "system_note") {
+      throw new Error("expected two system_note blocks");
+    }
+    expect(ctaNote.cta).toEqual({ href: "/integrations", label: "Reconnect Google account" });
+    expect(ctaNote.authError).toBeUndefined();
+    expect(brokenNote.cta).toBeUndefined();
+  });
+
   test("system_note preserves the aws reauthKind through the read normalizer", () => {
     const instance = "chat-blocks-autherror-aws";
     insertChatBlock(instance, {

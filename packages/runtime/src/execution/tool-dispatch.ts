@@ -13,7 +13,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { extname, join, relative } from "node:path";
 import { isIP } from "node:net";
 import { lookup } from "node:dns/promises";
-import type { RuntimeConfig, RuntimeState, Task } from "../types";
+import type { GoogleAccountStatus, RuntimeConfig, RuntimeState, Task } from "../types";
 import {
   addAudit,
   appendTrace,
@@ -63,12 +63,13 @@ import { resolveEffectiveContext } from "./effective-context";
 import { importTableFromFile } from "../data/import-table";
 import { dbExecute, dbListTables, dbQuery } from "../state";
 import { uploadTagFor } from "../lib/upload-ref";
-import { resolveEmitContext, setToolCallRunningHint } from "./chat-task-emit";
+import { emitSystemNote, resolveEmitContext, setToolCallRunningHint } from "./chat-task-emit";
 import { searchSessions } from "./search";
 import { installSkillFromBody, setSkillStatus } from "../capabilities/skills";
 import { recordFeedbackOutcome } from "../learning/outcomes";
 import { connectorIsUsable, credentialTemplateForProvider, firstUngrantedCredential, isSkillActive } from "../integrations/connectors";
 import { getProvider } from "../integrations/connectors/registry";
+import { listAccountsWithStatus } from "../integrations/connectors/google-accounts";
 import { resolveConnectorSecret } from "../integrations/connectors";
 import { invokeMcpTool } from "../integrations/mcp";
 import { braveWebSearch, exaWebSearch, formatWebSearchResults } from "../tools/web-search";
@@ -296,6 +297,8 @@ async function dispatchToolCallInner(
       return { kind: "sync", result: await visionQueryTool(config, taskId, args) };
     case "request_connector":
       return await requestConnectorTool(config, taskId, toolCallId, args, messageHistory);
+    case "request_google_account":
+      return await requestGoogleAccountTool(config, taskId, args);
     case "ask_user":
       return await askUserTool(config, taskId, toolCallId, args);
     case "request_confirmation":
@@ -4552,6 +4555,90 @@ async function requestConnectorTool(
     return approval.id;
   });
   return { kind: "pending", approvalId };
+}
+
+// Live per-account Google sign-in provider for request_google_account.
+// Defaults to the status-augmented machine-global registry (one `gws auth
+// status` spawn per account config dir, ~15s cached); a test swaps it via
+// setRequestGoogleAccountStatusProvider so the dispatch never spawns `gws`.
+// Same seam shape as self-registry's setGoogleAccountsStatusProvider.
+type RequestGoogleAccountStatusProvider = () => Promise<GoogleAccountStatus[]>;
+
+let activeRequestGoogleAccountStatusProvider: RequestGoogleAccountStatusProvider = listAccountsWithStatus;
+
+// Test seam for the Google accounts status provider. Production never calls this.
+export function setRequestGoogleAccountStatusProvider(provider: RequestGoogleAccountStatusProvider): () => void {
+  const previous = activeRequestGoogleAccountStatusProvider;
+  activeRequestGoogleAccountStatusProvider = provider;
+  return () => {
+    activeRequestGoogleAccountStatusProvider = previous;
+  };
+}
+
+// request_google_account tool. Google OAuth (connect and reconnect alike)
+// lives on the Integrations page — never in chat, never agent-driven (ADR
+// google-multi-account.md). This tool emits ONE system_note block whose
+// `cta` renders as an inline button to /integrations, then returns a sync
+// result steering the model to hand off to the user and wait. Deliberately
+// fire-and-forget: no SetupRequest gate to resolve, because the user
+// completes OAuth on another page and reports back in their own words. No
+// surface hard-fail either — on a non-web surface the note still persists
+// to the session, and the result text covers the "open the web app" path.
+async function requestGoogleAccountTool(
+  config: RuntimeConfig,
+  taskId: string,
+  args: Record<string, unknown>
+): Promise<DispatchResult> {
+  const message = optionalString(args, "message", "").trim();
+  // Live status decides the label: any registered account whose grant was
+  // revoked/expired → the button reads as a reconnect; otherwise it offers
+  // a fresh connect. Best-effort — the button is still correct without
+  // status (the Integrations page shows the real per-account state).
+  let accounts: GoogleAccountStatus[] = [];
+  try {
+    accounts = await activeRequestGoogleAccountStatusProvider();
+  } catch {
+    /* degrade to the connect wording */
+  }
+  const revoked = accounts.filter((a) => a.tokenRevoked === true);
+  const label = revoked.length > 0 ? "Reconnect Google account" : "Connect Google account";
+  const revokedNames = revoked.map((a) => a.email || a.tag).join(", ");
+  const text =
+    message ||
+    (revoked.length > 0
+      ? `Google sign-in for ${revokedNames} needs to be reconnected.`
+      : "Connect a Google account to continue.");
+  emitSystemNote(resolveEmitContext(config, taskId), text, undefined, {
+    href: "/integrations",
+    label
+  });
+  appendTrace(config.instance, taskId, {
+    type: "tool",
+    message: "Surfaced Google account CTA",
+    data: { label, revokedCount: revoked.length }
+  });
+  await mutateState(config.instance, (state: RuntimeState) => {
+    const item = findTask(state, taskId);
+    addAudit(
+      state,
+      {
+        actor: "agent",
+        action: "google_account.requested",
+        target: "/integrations",
+        risk: "low",
+        taskId: item.id,
+        runId: item.runId,
+        evidence: { label, revoked: revoked.map((a) => a.tag) }
+      },
+      { taskId: item.id }
+    );
+    item.updatedAt = now();
+  });
+  return {
+    kind: "sync",
+    result:
+      `A "${label}" button linking to the Integrations page is now in the chat. Tell the user to click it (or, if they're not in the web app, to open the Integrations page there) and complete the Google sign-in in their browser, then STOP and wait for them to say it's done. Do not run \`gws auth login\` and do not drive a Google sign-in page with the browser tools.`
+  };
 }
 
 // ask_user tool. Mints a chat.choice SetupRequest whose payload carries the

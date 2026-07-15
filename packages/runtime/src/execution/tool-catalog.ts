@@ -827,6 +827,34 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
     }
   },
   {
+    // Google-account affordance. Google sign-in (connect and reconnect
+    // alike) is browser OAuth on the Integrations page — never an in-chat
+    // credential entry and never agent-driven (ADR google-multi-account.md).
+    // This tool surfaces an inline button in chat that takes the user
+    // there; the agent then waits. Fire-and-forget (no SetupRequest gate):
+    // the user navigates away, completes OAuth, and tells the agent when
+    // they're done. Always-on like request_connector: an expired Google
+    // session can surface on any instance regardless of toolset state.
+    // Deferred (like list_connectors): the steering that routes the model
+    // here (auth preflight, accounts block, google skills) names the tool,
+    // so the on-demand index line is enough to make it load the schema.
+    toolset: "connectors",
+    displayLabel: "Request Google account",
+    deferred: true,
+    indexSummary: "Show the user an inline button to the Integrations page to connect or reconnect a Google account; never run `gws auth login` yourself.",
+    type: "function",
+    function: {
+      name: "request_google_account",
+      description: "Show the user an inline button in chat that opens the Integrations page, where they connect or reconnect Google accounts via browser OAuth. Call it when a `gws` call fails with an auth error, an account's sign-in is expired or revoked, no Google account is set up, or the user wants to add one. This button is the ONLY path: NEVER run `gws auth login`, and NEVER drive a Google sign-in page with the browser tools. After calling it, tell the user to click the button, then STOP and wait for them to say it's done.",
+      parameters: {
+        type: "object",
+        properties: {
+          message: { type: "string", description: "Optional one-line context shown above the button. Omit to let the runtime compose it from live account status." }
+        }
+      }
+    }
+  },
+  {
     // User-choice affordance. The agent calls this mid-turn to present a
     // concrete single-select choice: the web chat renders the question as
     // the agent's own message with the options beneath, and the task pauses
@@ -2284,6 +2312,12 @@ export function buildToolCatalog(state: RuntimeState, agentToolsetFilter?: Set<s
     // inactive — gating on a legacy toolset would silently disable the
     // onboarding path.
     if (tool.function.name === "request_connector") return true;
+    // request_google_account is the in-chat affordance that puts a
+    // connect/reconnect-Google button (→ Integrations page) in front of
+    // the user. Same always-on rationale as request_connector: a revoked
+    // Google session can strand any instance, and the recovery path must
+    // be reachable with no toolsets toggled.
+    if (tool.function.name === "request_google_account") return true;
     // ask_user is the in-chat affordance for putting a single-select
     // question card in front of the user mid-turn. Always-on for the
     // same reason as request_connector: offering setup-vs-alternative

@@ -548,6 +548,18 @@ export interface SystemNoteAuthError {
   reauthUrl: string;
 }
 
+// Generic navigation call-to-action attached to a system note: the web chat
+// renders an inline button linking to `href`. Hrefs are app-relative routes
+// ("/integrations"), valid on local and hosted alike because chat and the
+// target page are routes of the one web app served from a single origin
+// (ADR gateway-web-reverse-proxy.md). Unlike SystemNoteAuthError this
+// carries no provider semantics — it's for runtime affordances like
+// request_google_account's "Reconnect Google account" button.
+export interface SystemNoteCta {
+  href: string;
+  label: string;
+}
+
 export interface SystemNoteBlock extends ChatBlockBase {
   kind: "system_note";
   text: string;
@@ -555,6 +567,9 @@ export interface SystemNoteBlock extends ChatBlockBase {
   // (see SystemNoteAuthError). Absent for ordinary notes (cancellation,
   // iteration-cap, approval-denied).
   authError?: SystemNoteAuthError;
+  // Present only when this note carries an inline navigation button (see
+  // SystemNoteCta). A note carries authError OR cta, never both.
+  cta?: SystemNoteCta;
 }
 
 // Persistent per-provider auth-failure record (issue #233). Written when a

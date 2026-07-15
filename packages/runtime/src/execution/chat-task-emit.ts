@@ -45,6 +45,7 @@ import type {
   RuntimeConfig,
   SetupRequestAction,
   SystemNoteAuthError,
+  SystemNoteCta,
   Task,
   ToolCallStatus
 } from "../types";
@@ -168,16 +169,20 @@ export function emitPhase(
 // tool ran) — anything that's runtime-level rather than user- or
 // assistant-authored. Pass `authError` for a provider-credential failure
 // so the client can name the provider and offer a re-auth CTA (issue #205).
+// Pass `cta` for a generic inline navigation button (e.g.
+// request_google_account's "Reconnect Google account" → /integrations).
 export function emitSystemNote(
   ctx: ChatEmitContext | undefined,
   text: string,
-  authError?: SystemNoteAuthError
+  authError?: SystemNoteAuthError,
+  cta?: SystemNoteCta
 ): ChatBlock | undefined {
   if (!ctx) return undefined;
   const block = insertChatBlock(ctx.instance, {
     kind: "system_note",
     text,
     ...(authError ? { authError } : {}),
+    ...(cta ? { cta } : {}),
     ...bookkeepingFor(ctx)
   });
   mirrorInsert(ctx, (forward) => ({
@@ -185,6 +190,7 @@ export function emitSystemNote(
     sessionId: forward.sessionId,
     text,
     ...(authError ? { authError } : {}),
+    ...(cta ? { cta } : {}),
     taskId: ctx.taskId,
     runId: ctx.runId,
     agentId: ctx.agentId,

@@ -261,8 +261,13 @@ remote previews, screen readers) would need the same translation code.
   falls back to the bare id when the job can't be resolved. `terminal_exec`
   masks its `argsPreview` (returns `""`) because a raw shell command line is
   noise — and a path/secret-leak risk — in an end-user inline preview; the
-  full command stays in `argsFull.command` and clients surface it on row
-  expansion.
+  full command stays in `argsFull.command` and clients normally surface it on
+  row expansion. The web client treats direct `gws gmail` invocations as an
+  end-user presentation exception: `tool-call-presentation.ts` maps them to
+  `Search email`, `Read email`, `Draft email`, or `Send email` (with `Use Gmail`
+  as the fallback) and withholds the command detail while leaving the result
+  preview expandable. The durable block still retains `argsFull.command`; the
+  exception changes presentation, not transcript or audit data.
 
 - The SSE endpoint is its own handler (`chatBlockStream` in
   `packages/runtime/src/http.ts`), not a reuse of the existing global `eventStream`.

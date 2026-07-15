@@ -65,6 +65,8 @@ describe("GoogleAccountsCard disclosures", () => {
   test("accounts start collapsed and expand independently", () => {
     renderAccounts();
 
+    expect(screen.queryByRole("button", { name: "Disconnect" })).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Sign out of this instance" })).toBeNull();
     expect(screen.queryByText("Gmail")).toBeNull();
     expect(screen.queryByText("Google Calendar")).toBeNull();
 

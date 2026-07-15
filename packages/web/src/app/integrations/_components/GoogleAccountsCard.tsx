@@ -125,7 +125,7 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
   const signOut = useMutation({
     mutationFn: () => api<{ ok: true }>("/google/session/signout", { method: "POST" }),
     onSuccess: () => {
-      toast.success("Signed out of this instance");
+      toast.success("Disconnected");
       invalidate(["connectors", "connector-providers", "google-accounts"]);
     },
     onError: (error: Error) => toast.error(error.message)
@@ -285,7 +285,7 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
                         disabled={signOut.isPending}
                         onClick={() => signOut.mutate()}
                       >
-                        {signOut.isPending ? "Signing out..." : "Sign out of this instance"}
+                        {signOut.isPending ? "Disconnecting…" : "Disconnect"}
                       </Button>
                     ) : account.signedIn ? (
                       <Button

@@ -245,7 +245,12 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
-        <div className="flex flex-col gap-[18px] px-3 py-2">
+        <div
+          className={cn(
+            "flex flex-col px-3 py-2",
+            topics.length > 0 ? "gap-[18px]" : "gap-0.5"
+          )}
+        >
           {/* Home — the daily surface */}
           <ul className="flex flex-col gap-0.5">
             <li>

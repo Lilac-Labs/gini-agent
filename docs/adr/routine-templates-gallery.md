@@ -161,8 +161,8 @@ user-facing delivery.
 `GET /api/routines/templates` exposes the session as
 `installed.chatSessionId` only for visible delivery conversations (absent
 for Auto-inbox and on installs predating provisioning), which the detail
-page's Open messages action deep-links as `/chat?session=<id>`. The web
-sidebar's Messages section lists live job delivery channels
+page's Open messages action deep-links as `/chat?session=<id>`. Home's Chats
+section lists live job delivery channels
 (`kind:"channel"` + `origin:"job"`, not headless, no feature owner like
 email-watch) alongside the user's own conversations, so an installed
 message-delivering routine's conversation is visible without a deep link.

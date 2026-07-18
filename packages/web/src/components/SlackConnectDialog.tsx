@@ -3,10 +3,9 @@
 // Focused, reusable dialog for connecting a bring-your-own Socket-Mode Slack
 // bridge (name + bot token xoxb- + app-level token xapp-, POST /api/messaging
 // kind:"slack"). Used from both the Settings Messaging card ("Add Slack") and
-// the Integrations Slack drilldown ("Connect workspace" on local/loopback), so
-// there is one implementation of the create form and its safety behavior. The
-// hosted (edge) install path is a separate OAuth redirect and does not use this
-// dialog. Controlled component: the caller owns open/onOpenChange.
+// the Integrations Slack drilldown ("Connect workspace"), so there is one
+// implementation of the create form and its safety behavior. Controlled
+// component: the caller owns open/onOpenChange.
 
 import { useEffect, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";

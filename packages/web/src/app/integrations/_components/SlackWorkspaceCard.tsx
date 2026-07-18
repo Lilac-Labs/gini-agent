@@ -15,16 +15,9 @@ import type { SlackBridgeLike } from "../_lib";
 // a count line + "Connect workspace" action, then one row per slack messaging
 // bridge (workspace name, teamId/slackUserId meta, connected/needs-attention
 // status). Disconnect fully removes the bridge (POST /api/messaging/<id>/remove
-// — disable is the softer state the Settings Messaging card owns). `mode` is the
-// resolved Google auth mode: hosted (edge) runs the /auth/slack/install OAuth
-// flow; everywhere else Connect opens the BYO Socket-Mode dialog inline.
-export function SlackWorkspaceCard({
-  bridges,
-  mode
-}: {
-  bridges: SlackBridgeLike[];
-  mode?: "edge" | "loopback";
-}) {
+// — disable is the softer state the Settings Messaging card owns). Connect
+// opens the local bring-your-own Socket Mode dialog inline.
+export function SlackWorkspaceCard({ bridges }: { bridges: SlackBridgeLike[] }) {
   const invalidate = useInvalidate();
   const [connectOpen, setConnectOpen] = useState(false);
 
@@ -39,24 +32,13 @@ export function SlackWorkspaceCard({
 
   const slack = bridges.filter((b) => b.kind === "slack");
 
-  const connect = () => {
-    if (mode === "edge") {
-      window.location.assign(`/auth/slack/install?returnTo=${encodeURIComponent("/integrations")}`);
-    } else {
-      // Local / self-host: open the BYO Socket-Mode connect dialog inline on
-      // this page — no hop to Settings. On success the messaging query is
-      // invalidated, so the new bridge row appears in the table below.
-      setConnectOpen(true);
-    }
-  };
-
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between gap-3">
         <p className="text-[13px] text-muted-foreground">
           {slack.length} workspace{slack.length === 1 ? "" : "s"} connected
         </p>
-        <Button variant="outline" size="sm" onClick={connect}>
+        <Button variant="outline" size="sm" onClick={() => setConnectOpen(true)}>
           <PlusIcon className="size-3.5" />
           Connect workspace
         </Button>

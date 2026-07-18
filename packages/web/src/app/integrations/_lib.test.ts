@@ -1,6 +1,6 @@
 // Pure-JS tests (no React/DOM) for the Integrations directory logic: which
 // providers become tiles, when a tile counts as connected (configured record
-// vs the hosted externallySatisfied path), the Google account-count status
+// vs an externally-satisfied local account), the Google account-count status
 // line, and chip/search filtering. After the usability fix: tiles reflect
 // the three states (connected / needs-attention / available).
 
@@ -99,7 +99,7 @@ describe("buildTiles", () => {
     expect(tile!.status).toBeNull();
   });
 
-  test("externallySatisfied provider is connected with no record (hosted Google)", () => {
+  test("externallySatisfied provider is connected with no connector record", () => {
     const [tile] = buildTiles([provider({ externallySatisfied: true })], [], 0);
     expect(tile!.connected).toBe(true);
     expect(tile!.state).toBe("connected");

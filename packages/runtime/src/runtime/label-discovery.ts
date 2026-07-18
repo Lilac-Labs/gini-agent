@@ -5,9 +5,8 @@
 // into per-account filtering-label defaults for Auto-inbox:
 //   1. fetchLabelUsage — deterministic Gmail reads off an in-memory access
 //      token, with the same auth gate as onboarding-scan's fetchMailbox
-//      (the shared toolkit): the account's plaintext `authorized_user`
-//      credentials.json when present, else one `gws auth export --unmasked`
-//      spawn for keyring-established logins. It gathers the user-created
+//      (the shared toolkit): one `gws auth export --unmasked` spawn reads the
+//      account's locally managed credential. It gathers the user-created
 //      label list — excluding the routine's own `Gini/` output namespace,
 //      which is Auto-inbox's product, not the user's scheme — plus, per
 //      label, its message count and a few recent From/Subject samples.
@@ -34,7 +33,6 @@ import { generateStructured, type StructuredValidator } from "../provider";
 import { readLabelProfile, writeLabelProfile } from "../state/google-label-profiles";
 import { now } from "../state/ids";
 import {
-  credentialsFromConfigDir,
   defaultGwsSpawn,
   gmailGet,
   mapWithConcurrency,
@@ -85,9 +83,8 @@ export interface LabelUsageBundle {
 }
 
 // Assemble the deterministic label-usage bundle. The auth gate mirrors
-// onboarding-scan's fetchMailbox: the plaintext credentials.json when
-// present, else one `gws auth export --unmasked` spawn (keyring-established
-// logins); a missing credential either way or a refused mint returns
+// onboarding-scan's fetchMailbox: one `gws auth export --unmasked` spawn;
+// a missing credential or a refused mint returns
 // { tokenValid: false } without a synthesis call. Token and labels-list
 // faults throw (the discovery fails); a single label's detail or sample
 // reads failing degrade that label to name-only.
@@ -96,9 +93,9 @@ export async function fetchLabelUsage(
   opts: { configDir?: string; fetchImpl?: FetchImpl } = {}
 ): Promise<{ tokenValid: true; bundle: LabelUsageBundle } | { tokenValid: false }> {
   const fetchImpl: FetchImpl = opts.fetchImpl ?? globalThis.fetch;
-  const credentials =
-    credentialsFromConfigDir(opts.configDir) ??
-    parseExportedCredentials(await gwsSpawn(["auth", "export", "--unmasked"], opts.configDir));
+  const credentials = parseExportedCredentials(
+    await gwsSpawn(["auth", "export", "--unmasked"], opts.configDir)
+  );
   if (!credentials) return { tokenValid: false };
   const accessToken = await mintAccessToken(fetchImpl, credentials);
   if (!accessToken) return { tokenValid: false };
@@ -364,8 +361,8 @@ const inFlight = new Set<string>();
 // gallery-read backfill (listRoutineTemplates) only fires for accounts with
 // NO profile at all, so a persistent failure never loops on a poll-driven
 // read. Whether a credential exists is the async run's call — the auth gate
-// in fetchLabelUsage (plaintext file, else gws export) decides, and an
-// account with neither resolves to a failed profile there.
+// in fetchLabelUsage decides, and a signed-out account resolves to a failed
+// profile there.
 export function ensureLabelProfile(
   config: RuntimeConfig,
   account: GoogleAccount,

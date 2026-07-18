@@ -1,7 +1,7 @@
 // Unit tests for the Gmail label-discovery pipeline
 // (src/runtime/label-discovery.ts): the deterministic fetch stage over a
-// fake fetchImpl + injected gws spawn (the fetchMailbox-mirrored auth gate —
-// plaintext credential first, gws export fallback for keyring-backed logins;
+// fake fetchImpl + injected gws spawn (the fetchMailbox-mirrored gws export
+// auth gate;
 // the user-label filter incl. the routine's own Gini/ output namespace;
 // per-label samples; best-effort enrichment), the digest validator's
 // clamp-never-reject rules (name must match a real input label, bounds,
@@ -14,7 +14,7 @@
 // subprocess.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { clearEchoStructuredResponses, setEchoStructuredResponse } from "../provider";
@@ -30,18 +30,10 @@ import {
 } from "./label-discovery";
 import type { GoogleAccount, RuntimeConfig } from "../types";
 
-// The plaintext authorized_user credential the fetch stage reads (the same
-// shape provisionAccount persists).
-const CREDENTIALS = { type: "authorized_user", client_id: "cid-1", client_secret: "csec-9", refresh_token: "rtok-7" };
+const validExportSpawn: GwsSpawn = async () =>
+  JSON.stringify({ client_id: "cid-1", client_secret: "csec-9", refresh_token: "rtok-7" });
 
-// A gws spawn that must never run: pins that a present plaintext
-// credentials.json short-circuits the export fallback.
-const neverSpawn: GwsSpawn = async () => {
-  throw new Error("unexpected gws spawn");
-};
-
-// A keyring-established login with no plaintext file: `gws auth export
-// --unmasked` emits its keyring preamble followed by the credential JSON.
+// `gws auth export --unmasked` may emit a keyring preamble before the JSON.
 function exportSpawn(): { gwsSpawn: GwsSpawn; calls: Array<{ args: string[]; configDir?: string }> } {
   const calls: Array<{ args: string[]; configDir?: string }> = [];
   const gwsSpawn: GwsSpawn = async (args, configDir) => {
@@ -51,7 +43,7 @@ function exportSpawn(): { gwsSpawn: GwsSpawn; calls: Array<{ args: string[]; con
   return { gwsSpawn, calls };
 }
 
-// A signed-out dir: no plaintext file AND the export has nothing to emit.
+// A signed-out config has no credential to export.
 const failedExportSpawn: GwsSpawn = async () => "No encrypted credentials found. Run 'gws auth login' first.";
 
 // Fake fetch routing the token mint + the Gmail label/message endpoints from
@@ -120,17 +112,13 @@ describe("label discovery", () => {
     clearEchoStructuredResponses();
   });
 
-  function seedAccount(id: string, email: string, withCredentials: boolean): GoogleAccount {
+  function seedAccount(id: string, email: string, _withCredentials: boolean): GoogleAccount {
     const configDir = configDirForAccount(id);
-    if (withCredentials) {
-      mkdirSync(configDir, { recursive: true });
-      writeFileSync(join(configDir, "credentials.json"), JSON.stringify(CREDENTIALS));
-    }
     return { id, tag: id, email, configDir, addedAt: new Date().toISOString() };
   }
 
   test("fetchLabelUsage mirrors the fetchMailbox auth gate and assembles per-label usage", async () => {
-    // No credentials.json AND a failed export ⇒ no token attempt, no Gmail read.
+    // A failed export means no token attempt and no Gmail read.
     const gated = fakeFetch({});
     expect(
       await fetchLabelUsage(failedExportSpawn, { configDir: configDirForAccount("gacct_none"), fetchImpl: gated.fetchImpl })
@@ -151,7 +139,7 @@ describe("label discovery", () => {
         m2: { from: "Stripe <receipts@stripe.com>", subject: "x".repeat(200) }
       }
     });
-    const fetched = await fetchLabelUsage(neverSpawn, { configDir: account.configDir, fetchImpl });
+    const fetched = await fetchLabelUsage(validExportSpawn, { configDir: account.configDir, fetchImpl });
     if (!fetched.tokenValid) throw new Error("expected a valid token");
     // System labels are never the user's scheme; names trim; the email
     // lowercases; oversized sample subjects truncate.
@@ -169,7 +157,7 @@ describe("label discovery", () => {
 
     // A refused mint is the same tokenValid:false gate.
     const refused = fakeFetch({ tokenStatus: 400 });
-    expect(await fetchLabelUsage(neverSpawn, { configDir: account.configDir, fetchImpl: refused.fetchImpl })).toEqual({
+    expect(await fetchLabelUsage(validExportSpawn, { configDir: account.configDir, fetchImpl: refused.fetchImpl })).toEqual({
       tokenValid: false
     });
 
@@ -183,7 +171,7 @@ describe("label discovery", () => {
       messageIdsByLabel: { L2: [] },
       failDetailIds: ["L1"]
     });
-    const partial = await fetchLabelUsage(neverSpawn, { configDir: account.configDir, fetchImpl: flaky.fetchImpl });
+    const partial = await fetchLabelUsage(validExportSpawn, { configDir: account.configDir, fetchImpl: flaky.fetchImpl });
     if (!partial.tokenValid) throw new Error("expected a valid token");
     expect(partial.bundle.labels).toEqual([
       { name: "Receipts", samples: [] },
@@ -191,7 +179,7 @@ describe("label discovery", () => {
     ]);
   });
 
-  test("a keyring-backed account (no credentials.json) succeeds via the gws export fallback", async () => {
+  test("a locally managed account succeeds via gws credential export", async () => {
     const account = seedAccount("gacct_keyring", "me@example.com", false);
     const { fetchImpl } = fakeFetch({
       labels: [{ id: "L1", name: "Receipts", type: "user" }],
@@ -227,7 +215,7 @@ describe("label discovery", () => {
     // The fetch stage drops the namespace entirely: never in the bundle,
     // never enriched. The match is case-sensitive — "gini/personal" is a
     // user's own label, not the routine's output, and stays.
-    const fetched = await fetchLabelUsage(neverSpawn, { configDir: account.configDir, fetchImpl });
+    const fetched = await fetchLabelUsage(validExportSpawn, { configDir: account.configDir, fetchImpl });
     if (!fetched.tokenValid) throw new Error("expected a valid token");
     expect(fetched.bundle.labels.map((label) => label.name)).toEqual(["Receipts", "gini/personal"]);
     expect(buildLabelDigestPrompt(fetched.bundle).user).not.toContain("Gini/");
@@ -242,7 +230,7 @@ describe("label discovery", () => {
         { name: "Receipts", rule: "Order receipts" }
       ]
     });
-    const outcome = await runLabelDiscovery(echoConfig(), account, { gwsSpawn: neverSpawn, fetchImpl });
+    const outcome = await runLabelDiscovery(echoConfig(), account, { gwsSpawn: validExportSpawn, fetchImpl });
     expect(outcome).toEqual({
       status: "ready",
       email: "me@example.com",
@@ -325,7 +313,7 @@ describe("label discovery", () => {
       labels: [{ name: "Receipts", rule: "Order confirmations and payment receipts" }],
       coveredStandard: ["orders"]
     });
-    const outcome = await runLabelDiscovery(echoConfig(), account, { gwsSpawn: neverSpawn, fetchImpl });
+    const outcome = await runLabelDiscovery(echoConfig(), account, { gwsSpawn: validExportSpawn, fetchImpl });
     expect(outcome).toEqual({
       status: "ready",
       email: "me@example.com",
@@ -339,14 +327,14 @@ describe("label discovery", () => {
     // and carries no coveredStandard, since the digest never ran.
     clearEchoStructuredResponses();
     const empty = fakeFetch({ labels: [{ id: "SPAM", name: "SPAM", type: "system" }] });
-    expect(await runLabelDiscovery(echoConfig(), account, { gwsSpawn: neverSpawn, fetchImpl: empty.fetchImpl })).toEqual({
+    expect(await runLabelDiscovery(echoConfig(), account, { gwsSpawn: validExportSpawn, fetchImpl: empty.fetchImpl })).toEqual({
       status: "ready",
       email: "me@example.com",
       labels: [],
       sourceLabelCount: 0
     });
 
-    // A signed-out account (no plaintext file, empty export) resolves to
+    // A signed-out account (empty export) resolves to
     // failed — never a throw.
     const gone = seedAccount("gacct_gone", "gone@example.com", false);
     const failed = await runLabelDiscovery(echoConfig(), gone, {
@@ -356,7 +344,7 @@ describe("label discovery", () => {
     expect(failed.status).toBe("failed");
   });
 
-  test("ensureLabelProfile records a failed profile when the plaintext credential and the export both fail", async () => {
+  test("ensureLabelProfile records a failed profile when credential export fails", async () => {
     const account = seedAccount("gacct_nocred", "NoCred@Example.com", false);
     ensureLabelProfile(echoConfig(), account, { gwsSpawn: failedExportSpawn, fetchImpl: fakeFetch({}).fetchImpl });
     // Whether a credential exists is the async run's call now: the record
@@ -382,11 +370,11 @@ describe("label discovery", () => {
     });
 
     const config = echoConfig();
-    ensureLabelProfile(config, account, { gwsSpawn: neverSpawn, fetchImpl });
+    ensureLabelProfile(config, account, { gwsSpawn: validExportSpawn, fetchImpl });
     // The running record lands synchronously; a second call while in flight
     // is a no-op (in-memory guard).
     expect(readLabelProfile(account.id)!.status).toBe("running");
-    ensureLabelProfile(config, account, { gwsSpawn: neverSpawn, fetchImpl });
+    ensureLabelProfile(config, account, { gwsSpawn: validExportSpawn, fetchImpl });
     await waitForStatus(account.id, "ready");
     const ready = readLabelProfile(account.id)!;
     expect(ready.labels.map((label) => label.name)).toEqual(["Receipts"]);
@@ -396,7 +384,7 @@ describe("label discovery", () => {
     expect(mintsAfterFirst).toBe(1);
 
     // Ready skips — no new pipeline, no new requests.
-    ensureLabelProfile(config, account, { gwsSpawn: neverSpawn, fetchImpl });
+    ensureLabelProfile(config, account, { gwsSpawn: validExportSpawn, fetchImpl });
     expect(requests.filter((url) => url.includes("oauth2")).length).toBe(1);
 
     // A fresh running record (younger than the stale window) skips too.
@@ -408,7 +396,7 @@ describe("label discovery", () => {
       labels: [],
       startedAt: new Date().toISOString()
     });
-    ensureLabelProfile(config, account, { gwsSpawn: neverSpawn, fetchImpl });
+    ensureLabelProfile(config, account, { gwsSpawn: validExportSpawn, fetchImpl });
     expect(requests.filter((url) => url.includes("oauth2")).length).toBe(1);
 
     // A stale running record (orphaned by a process death) re-runs.
@@ -420,7 +408,7 @@ describe("label discovery", () => {
       labels: [],
       startedAt: new Date(Date.now() - 10 * 60_000).toISOString()
     });
-    ensureLabelProfile(config, account, { gwsSpawn: neverSpawn, fetchImpl });
+    ensureLabelProfile(config, account, { gwsSpawn: validExportSpawn, fetchImpl });
     await waitForStatus(account.id, "ready");
     expect(requests.filter((url) => url.includes("oauth2")).length).toBe(2);
   });

@@ -298,9 +298,8 @@ backfillEmailWatcherJobs(config)
     });
   });
 
-// CRM extraction reconcile: a pipeline that was running when the previous
-// process died resumes its backfill/watcher loop; a paused one stays paused.
-// See ADR people-crm-extraction-pipeline.md.
+// A local restart pauses unfinished People extraction until the user explicitly
+// resumes it from the People page. See ADR people-crm-extraction-pipeline.md.
 reconcileCrmExtraction(config);
 
 // APNs push dispatcher. Subscribes to the instance-wide chat-blocks

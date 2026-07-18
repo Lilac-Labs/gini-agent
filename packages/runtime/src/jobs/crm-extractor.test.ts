@@ -416,25 +416,19 @@ describe("crm-extractor", () => {
     __setCrmMailSourcesForTests(instance, undefined);
   }, 90_000);
 
-  test("boot reconcile resumes a pipeline that was running when the process died", async () => {
-    const instance = "crmx-reconcile";
+  test("boot reconcile pauses a pipeline that was running when the process died", async () => {
+    const instance = "crmx-reconcile-local";
     const config = makeConfig(instance);
     await install(config);
-    const provider = normalizeProvider(config.provider);
-    setEchoToolCallingResponse({ provider, text: "ok", toolCalls: [], finishReason: "stop" });
     setCrmMeta(instance, "self_email", SELF);
-    __setCrmMailSourceForTests(
-      instance,
-      mutableSource([
-        mail({ id: "r1", threadId: "T-r", date: 1_000, from: { address: SELF }, to: [{ address: "pal@z.com" }] }),
-      ]),
-    );
+    __setCrmMailSourceForTests(instance, mutableSource([]));
     // Simulate "was running when the process died": persisted run state only.
     setCrmRunState(instance, "running");
     reconcileCrmExtraction(config);
-    await until("reconciled loop drains the backfill", () => crmQueueCounts(instance).done === 1);
-    await pauseCrmExtraction(config);
-    await __awaitCrmLoopExitForTests(instance);
+    await Bun.sleep(100);
+    expect(getCrmRunState(instance)).toBe("paused");
+    expect(crmQueueCounts(instance).done).toBe(0);
+    __setCrmMailSourceForTests(instance, undefined);
   }, 30_000);
 
   test("mail listing is incremental after the one-time backfill", async () => {
@@ -989,23 +983,6 @@ describe("crm-extractor", () => {
     const attempts = listCrmThreads("crmx-turn-timeout", ["error"])[0]!.attempts;
     expect(attempts).toBeGreaterThanOrEqual(1);
   }, 120_000);
-
-  test("boot reconcile survives a start failure (broken agent database)", async () => {
-    const instance = "crmx-reconcile-broken";
-    const config = makeConfig(instance);
-    await install(config);
-    setCrmMeta(instance, "self_email", SELF);
-    __setCrmMailSourceForTests(instance, mutableSource([]));
-    // Replace the contacts table with a shape the self-row seed can't query.
-    dbExecute(instance, "agent_default", "DROP TABLE contacts");
-    dbExecute(instance, "agent_default", "CREATE TABLE contacts (x TEXT)");
-    setCrmRunState(instance, "running");
-    reconcileCrmExtraction(config); // must not throw
-    await Bun.sleep(300);
-    expect(crmExtractionStatus(config).inFlightTurns).toBe(0);
-    await __awaitCrmLoopExitForTests(instance); // no loop was started
-    __setCrmMailSourceForTests(instance, undefined);
-  }, 30_000);
 
   test("onboarding autostart: fires when idle with a source, never otherwise, and survives failure", async () => {
     // (a) idle + source → starts.

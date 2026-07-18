@@ -140,11 +140,11 @@ export function setCrmMeta(instance: Instance, key: string, value: string): void
   );
 }
 
-// The desired run state survives restarts: a pipeline paused by the user
-// stays paused across reboots; a running one is resumed by the boot
-// reconcile; a disabled one stays off until explicitly re-enabled ("paused"
-// is a temporary halt, "disabled" is the master switch — it also blocks the
-// onboarding autostart). "idle" means never started.
+// The desired run state survives restarts: paused stays paused, and boot
+// reconcile converts a stale running marker to paused until an explicit Sync.
+// A disabled pipeline stays off until explicitly re-enabled ("paused" is a
+// temporary halt, "disabled" is the master switch — it also blocks onboarding
+// autostart). "idle" means never started.
 export function getCrmRunState(instance: Instance): CrmRunState {
   const value = getCrmMeta(instance, "run_state");
   return value === "running" || value === "paused" || value === "disabled" ? value : "idle";

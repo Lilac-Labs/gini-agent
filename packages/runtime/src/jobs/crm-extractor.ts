@@ -826,15 +826,14 @@ export async function enableCrmExtraction(config: RuntimeConfig): Promise<CrmExt
   return crmExtractionStatus(config);
 }
 
-// Boot reconcile: a pipeline that was running when the runtime died resumes
-// automatically; a paused one stays paused.
+// Local boot reconcile: a pipeline that was running when the runtime died is
+// paused. Resuming mailbox work is an explicit People-page Sync action, so a
+// desktop restart never starts model or Gmail work in the background.
 export function reconcileCrmExtraction(config: RuntimeConfig): void {
-  if (getCrmRunState(config.instance) !== "running") return;
-  void startCrmExtraction(config).catch((error) => {
-    appendLog(config.instance, "crm.extraction.reconcile_failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  });
+  const instance = config.instance;
+  if (getCrmRunState(instance) !== "running") return;
+  setCrmRunState(instance, "paused");
+  appendLog(instance, "crm.extraction.paused", { reason: "local_boot" });
 }
 
 // Onboarding hook: fire-and-forget autostart once the user finishes

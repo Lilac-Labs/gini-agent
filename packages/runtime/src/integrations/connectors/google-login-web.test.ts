@@ -13,7 +13,6 @@ import { join } from "node:path";
 import type { RuntimeConfig } from "../../types";
 import { getGoogleAccountBindings } from "../../state/google-account-bindings";
 import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../../state/google-accounts";
-import { GOOGLE_DESKTOP_OAUTH_CLIENT } from "./google-oauth-client";
 import {
   DEFAULT_LOGIN_RETURN_TO,
   LOGIN_SCOPES,
@@ -23,12 +22,14 @@ import {
   parseLoopbackOrigin,
   resetGoogleLoginWebState,
   sanitizeReturnTo,
+  setGoogleLoginWebClientForTests,
   setGoogleLoginWebFetchForTests,
   startGoogleLoginWeb
 } from "./google-login-web";
 
 const config = { instance: "google-login-web-test" } as RuntimeConfig;
 const ORIGIN = "http://127.0.0.1:3059";
+const TEST_OAUTH_CLIENT = { clientId: "test-client-id", clientSecret: "test-client-secret" };
 
 let scratchHome: string;
 let prevHome: string | undefined;
@@ -41,6 +42,7 @@ beforeEach(() => {
   prevStateRoot = process.env.GINI_STATE_ROOT;
   process.env.GINI_STATE_ROOT = join(scratchHome, ".gini");
   resetGoogleLoginWebState();
+  setGoogleLoginWebClientForTests(TEST_OAUTH_CLIENT);
 });
 
 afterEach(() => {
@@ -134,6 +136,17 @@ describe("parseLoopbackOrigin", () => {
 });
 
 describe("startGoogleLoginWeb", () => {
+  test("requires a locally configured Desktop OAuth client", async () => {
+    setGoogleLoginWebClientForTests(undefined);
+    const result = await startGoogleLoginWeb(config, { returnTo: "/onboarding", origin: ORIGIN });
+    expect(result).toEqual({
+      ok: false,
+      error:
+        "Google OAuth is not configured. Add your own Desktop OAuth client " +
+        "in Integrations before connecting an account."
+    });
+  });
+
   test("rejects a missing or non-loopback origin with a clear error", async () => {
     for (const origin of [null, "https://evil.example", "http://10.0.0.4:3000"]) {
       const result = await startGoogleLoginWeb(config, { returnTo: "/onboarding", origin });
@@ -158,8 +171,7 @@ describe("startGoogleLoginWeb", () => {
     expect(location.origin).toBe("https://accounts.google.com");
     expect(location.pathname).toBe("/o/oauth2/v2/auth");
     const params = location.searchParams;
-    // No connector in the scratch state — the bundled Desktop client.
-    expect(params.get("client_id")).toBe(GOOGLE_DESKTOP_OAUTH_CLIENT.clientId);
+    expect(params.get("client_id")).toBe(TEST_OAUTH_CLIENT.clientId);
     expect(params.get("redirect_uri")).toBe(`${ORIGIN}/api/runtime/google/login/callback`);
     expect(params.get("response_type")).toBe("code");
     expect(params.get("access_type")).toBe("offline");
@@ -246,8 +258,8 @@ describe("handleGoogleLoginWebCallback", () => {
     const body = google.exchangeBodies[0]!;
     expect(body.get("grant_type")).toBe("authorization_code");
     expect(body.get("code")).toBe("auth-code-1");
-    expect(body.get("client_id")).toBe(GOOGLE_DESKTOP_OAUTH_CLIENT.clientId);
-    expect(body.get("client_secret")).toBe(GOOGLE_DESKTOP_OAUTH_CLIENT.clientSecret);
+    expect(body.get("client_id")).toBe(TEST_OAUTH_CLIENT.clientId);
+    expect(body.get("client_secret")).toBe(TEST_OAUTH_CLIENT.clientSecret);
     expect(body.get("redirect_uri")).toBe(consent.searchParams.get("redirect_uri") ?? "");
     const digest = createHash("sha256").update(body.get("code_verifier") ?? "").digest("base64url");
     expect(digest).toBe(consent.searchParams.get("code_challenge") ?? "");
@@ -263,8 +275,8 @@ describe("handleGoogleLoginWebCallback", () => {
     const cred = JSON.parse(readFileSync(credPath, "utf8"));
     expect(cred).toEqual({
       type: "authorized_user",
-      client_id: GOOGLE_DESKTOP_OAUTH_CLIENT.clientId,
-      client_secret: GOOGLE_DESKTOP_OAUTH_CLIENT.clientSecret,
+      client_id: TEST_OAUTH_CLIENT.clientId,
+      client_secret: TEST_OAUTH_CLIENT.clientSecret,
       refresh_token: "rt-1"
     });
 

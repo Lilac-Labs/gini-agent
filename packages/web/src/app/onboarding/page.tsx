@@ -1,14 +1,21 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import { Fraunces } from "next/font/google";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ChevronLeftIcon } from "lucide-react";
 import { toast } from "sonner";
+import type { ConnectorRecord } from "@runtime/types";
+import { ManualCredentialDialog } from "@/components/ManualCredentialDialog";
+import type { CreateConnectorBody } from "@/components/AddConnectorDialog";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
+  useConnectors,
   useInvalidate,
   useOnboarding,
+  useProviders,
   useSetupStatus,
   useStartOnboardingScan,
   useUpdateOnboarding
@@ -16,6 +23,7 @@ import {
 import { Dots, serif } from "./_components/bits";
 import {
   defaultRoutinesState,
+  connectGoogleUrl,
   initialOnboardingStep,
   needsProviderStep,
   onboardingSteps,
@@ -58,6 +66,34 @@ export default function OnboardingPage() {
   // numeric position could silently re-label the step the user is on.
   const [step, setStep] = useState<OnboardingStep>(() => initialOnboardingStep(params?.get("step")));
   const setupStatus = useSetupStatus();
+  const connectors = useConnectors();
+  const providers = useProviders();
+  const googleOAuthProvider = providers.data?.find((provider) => provider.id === "google-oauth-desktop") ?? null;
+  const googleOAuthConfigured =
+    connectors.data?.some(
+      (connector) => connector.provider === "google-oauth-desktop" && connector.status === "configured"
+    ) ?? false;
+  const [googleSetupOpen, setGoogleSetupOpen] = useState(false);
+  const googleSetup = useMutation({
+    mutationFn: (body: CreateConnectorBody) =>
+      api<ConnectorRecord>("/connectors", {
+        method: "POST",
+        body: JSON.stringify(body)
+      }),
+    onSuccess: () => {
+      invalidate(["connectors", "connector-providers", "skills", "events"]);
+      setGoogleSetupOpen(false);
+      window.location.assign(connectGoogleUrl("/onboarding", window.location.origin, "signin"));
+    },
+    onError: (error: Error) => toast.error(error.message)
+  });
+  const openGoogleSetup = () => {
+    if (!googleOAuthProvider) {
+      toast.error("Google OAuth setup is unavailable. Reload and try again.");
+      return;
+    }
+    setGoogleSetupOpen(true);
+  };
   // True only on a definite "no provider configured" answer.
   // Gates both the provider step's presence and the scan kickoff (the scan's
   // synthesis calls need the model, so without a provider it could only fail).
@@ -216,6 +252,9 @@ export default function OnboardingPage() {
               }}
               onSkip={skipSignIn}
               skipPending={patch.isPending}
+              oauthConfigured={googleOAuthConfigured}
+              onSetupOAuth={openGoogleSetup}
+              oauthSetupPending={googleSetup.isPending || connectors.isPending || providers.isPending}
             />
           ) : step === "provider" ? (
             <StepProvider
@@ -255,6 +294,13 @@ export default function OnboardingPage() {
           )}
         </section>
       </div>
+      <ManualCredentialDialog
+        open={googleSetupOpen}
+        onOpenChange={setGoogleSetupOpen}
+        provider={googleOAuthProvider}
+        onSubmit={(body) => googleSetup.mutate(body)}
+        pending={googleSetup.isPending}
+      />
     </main>
   );
 }

@@ -10,7 +10,10 @@ import { getOrCreateAgentChat } from "./execution/chat";
 import { createScheduledJob } from "./jobs";
 import { removeMemoryDb } from "./state/memory-db";
 import { listProviders } from "./integrations/connectors/registry";
-import { resetGoogleLoginWebState } from "./integrations/connectors/google-login-web";
+import {
+  resetGoogleLoginWebState,
+  setGoogleLoginWebClientForTests
+} from "./integrations/connectors/google-login-web";
 import { awaitTunnelSettled, setTunnelDeps, type TunnelChild } from "./integrations/tunnel";
 import type { RuntimeConfig } from "./types";
 import type { LoginHandle, RelayDefaults, Session, Store, TunnelOptions } from "gini-relay";
@@ -930,6 +933,7 @@ describe("email watcher routes", () => {
     const config = testConfig("http-google-login-start");
     const handler = createHandler(config);
     resetGoogleLoginWebState();
+    setGoogleLoginWebClientForTests({ clientId: "test-client-id", clientSecret: "test-client-secret" });
     try {
       const origin = encodeURIComponent("http://127.0.0.1:3059");
       const response = await rawCall(
@@ -947,6 +951,26 @@ describe("email watcher routes", () => {
       );
       expect(location.searchParams.get("code_challenge_method")).toBe("S256");
       expect(location.searchParams.get("state")).toBeTruthy();
+    } finally {
+      resetGoogleLoginWebState();
+    }
+  });
+
+  test("GET /api/google/login/start requires a locally configured OAuth client", async () => {
+    const config = testConfig("http-google-login-unconfigured");
+    const handler = createHandler(config);
+    resetGoogleLoginWebState();
+    try {
+      const origin = encodeURIComponent("http://127.0.0.1:3059");
+      const response = await rawCall(
+        handler,
+        config,
+        `/api/google/login/start?returnTo=%2Fonboarding&origin=${origin}`,
+        {},
+        config.token
+      );
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toContain("not configured");
     } finally {
       resetGoogleLoginWebState();
     }

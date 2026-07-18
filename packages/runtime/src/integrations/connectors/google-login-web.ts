@@ -31,7 +31,7 @@ import { ensureLabelProfile } from "../../runtime/label-discovery";
 import { readState } from "../../state";
 import { bindingsForCredentials, resolveConnectorSecret } from "./index";
 import { primaryGoogleAccountForInstance, saveGoogleAccountCredential } from "./google-accounts";
-import { GOOGLE_DESKTOP_OAUTH_CLIENT, type GoogleOAuthClient } from "./google-oauth-client";
+import type { GoogleOAuthClient } from "./google-oauth-client";
 
 const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -144,6 +144,7 @@ const PENDING_TTL_MS = 10 * 60 * 1000;
 
 let pending: PendingLogin | undefined;
 let testFetch: typeof fetch | undefined;
+let testOAuthClient: GoogleOAuthClient | undefined;
 
 export type StartGoogleLoginWebResult =
   | { ok: true; location: string }
@@ -170,6 +171,14 @@ export async function startGoogleLoginWeb(
     return { ok: false, error: 'intent must be "signin" or "add"' };
   }
   const client = await resolveOAuthClient(config);
+  if (!client) {
+    return {
+      ok: false,
+      error:
+        "Google OAuth is not configured. Add your own Desktop OAuth client " +
+        "in Integrations before connecting an account."
+    };
+  }
   const verifier = randomBytes(32).toString("base64url");
   const state = randomBytes(16).toString("base64url");
   const redirectUri = `${origin}${CALLBACK_PATH}`;
@@ -263,12 +272,11 @@ export async function handleGoogleLoginWebCallback(
 // the pending record carries the pair to the callback's token exchange, so
 // the connector secret is decrypted (and its connector.secret.use audit row
 // written) a single time per login rather than once per leg. The
-// google-workspace-oauth connector's client wins when BOTH vars resolve;
-// otherwise the bundled Desktop client, whose secret is distributable by
-// design (see ./google-oauth-client.ts). The pair is atomic — mixing a
-// half-resolved connector client with the bundled client's could never
-// complete an exchange.
-async function resolveOAuthClient(config: RuntimeConfig): Promise<GoogleOAuthClient> {
+// google-workspace-oauth connector must resolve BOTH values. The pair is
+// atomic because a refresh token can only be redeemed by the client that
+// minted it. No project-owned fallback is shipped in the public runtime.
+async function resolveOAuthClient(config: RuntimeConfig): Promise<GoogleOAuthClient | undefined> {
+  if (testOAuthClient) return testOAuthClient;
   const bindings = bindingsForCredentials(readState(config.instance), [GOOGLE_WORKSPACE_CREDENTIAL]);
   const id = bindings.GOOGLE_WORKSPACE_CLI_CLIENT_ID;
   const secret = bindings.GOOGLE_WORKSPACE_CLI_CLIENT_SECRET;
@@ -277,7 +285,7 @@ async function resolveOAuthClient(config: RuntimeConfig): Promise<GoogleOAuthCli
     const clientSecret = await resolveConnectorSecret(config, secret.credentialId, secret.purpose);
     if (clientId && clientSecret) return { clientId, clientSecret };
   }
-  return GOOGLE_DESKTOP_OAUTH_CLIENT;
+  return undefined;
 }
 
 // Token exchange for the runtime-owned PKCE flow.
@@ -321,8 +329,13 @@ export function setGoogleLoginWebFetchForTests(fetchImpl: typeof fetch | undefin
   testFetch = fetchImpl;
 }
 
+export function setGoogleLoginWebClientForTests(client: GoogleOAuthClient | undefined): void {
+  testOAuthClient = client;
+}
+
 export function resetGoogleLoginWebState(): void {
   pending = undefined;
+  testOAuthClient = undefined;
 }
 
 export function expireGoogleLoginWebPendingForTests(): void {

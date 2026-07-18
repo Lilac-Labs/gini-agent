@@ -76,8 +76,10 @@ by the runtime:
 The pending verifier lives in process memory for ten minutes and is consumed
 once. Authorization codes, access tokens, refresh tokens, and client secrets
 are never logged or returned in errors. A configured
-`google-workspace-oauth` connector supplies the Desktop OAuth client when
-present; otherwise the bundled distributable Desktop client is used.
+`google-workspace-oauth` connector supplies the operator's Desktop OAuth
+client. The public runtime contains no project-owned OAuth client id or secret;
+account connection stays unavailable until the local operator stores their own
+pair through the encrypted connector flow.
 
 The loopback restriction is intentional. Desktop OAuth redirects to the
 browser's own localhost, so a browser opened on another machine cannot safely
@@ -99,8 +101,10 @@ The owner-token-protected API exposes:
 - `POST /api/google/session/signout` — clear this instance's bindings; and
 - the two loopback login routes described above.
 
-There is no public API that accepts raw OAuth client secrets or refresh tokens.
-Credential persistence is an internal step of the local callback.
+The generic owner-token-protected connector API is the only entry point for an
+OAuth client pair and encrypts both values immediately. Google account routes
+never accept a raw client secret or refresh token; refresh-token persistence is
+an internal step of the local callback.
 
 ### Product behavior
 
@@ -117,6 +121,8 @@ connector record exists.
 
 - Credentials can be reused locally without becoming visible across instance
   boundaries.
+- The public runtime never distributes a shared Google Cloud OAuth client;
+  each installation uses a client supplied by its operator.
 - Account selection is deterministic for web requests, jobs, terminal tools,
   and connector probes.
 - Local browser OAuth has no dependency on an external control plane.

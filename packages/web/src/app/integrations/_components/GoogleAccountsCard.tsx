@@ -57,11 +57,21 @@ const SERVICE_META: Record<string, { label: string; description: string; icon: L
 // The tagged Google accounts attached to this instance (including the
 // selected primary account), rendered as one card per account —
 // email + tag badge, connected date, sign-in status, granted-service rows —
-// with retag / disconnect / add-another flows. "Add account" navigates
-// straight into the same-tab browser OAuth round trip onboarding uses
-// (connectGoogleUrl) — this page owns Google OAuth, so it never routes
-// through chat (the agent's request_google_account CTA points back HERE).
-export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus[] }) {
+// with retag / disconnect / add-another flows. A missing local OAuth client
+// opens the encrypted setup dialog owned by the parent; once configured,
+// "Add account" navigates into the same-tab browser OAuth round trip
+// onboarding uses (connectGoogleUrl). This page owns Google OAuth, so it never
+// routes through chat (the agent's request_google_account CTA points back
+// HERE).
+export function GoogleAccountsCard({
+  accounts,
+  oauthConfigured,
+  onSetupOAuth
+}: {
+  accounts: GoogleAccountStatus[];
+  oauthConfigured: boolean;
+  onSetupOAuth: () => void;
+}) {
   const invalidate = useInvalidate();
   // The PRIMARY row's revoked state heals through reloginPrimaryUrl (signin
   // intent re-persists the primary); a non-primary revoked row heals through
@@ -125,6 +135,20 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
       else next.add(id);
       return next;
     });
+  };
+  const addAccount = () => {
+    if (!oauthConfigured) {
+      onSetupOAuth();
+      return;
+    }
+    window.location.assign(connectGoogleUrl("/integrations?view=google", window.location.origin));
+  };
+  const reconnectPrimary = () => {
+    if (!oauthConfigured) {
+      onSetupOAuth();
+      return;
+    }
+    window.location.assign(reloginPrimaryUrl("/integrations?view=google", window.location.origin));
   };
 
   return (
@@ -228,11 +252,7 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
                         size="sm"
                         variant="outline"
                         aria-label={`Reconnect ${account.tag}`}
-                        onClick={() =>
-                          window.location.assign(
-                            reloginPrimaryUrl("/integrations?view=google", window.location.origin)
-                          )
-                        }
+                        onClick={reconnectPrimary}
                       >
                         <RotateCwIcon className="size-3" />
                         Reconnect
@@ -243,11 +263,7 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
                         size="sm"
                         variant="outline"
                         aria-label={`Reconnect ${account.tag}`}
-                        onClick={() =>
-                          window.location.assign(
-                            connectGoogleUrl("/integrations?view=google", window.location.origin)
-                          )
-                        }
+                        onClick={addAccount}
                       >
                         <RotateCwIcon className="size-3" />
                         Reconnect
@@ -327,16 +343,14 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
         })
       )}
 
-      <Button
-        variant="outline"
-        size="sm"
-        className="self-start"
-        onClick={() =>
-          window.location.assign(connectGoogleUrl("/integrations?view=google", window.location.origin))
-        }
-      >
+      {!oauthConfigured ? (
+        <p className="text-xs text-muted-foreground">
+          Add a Desktop OAuth client from your own Google Cloud project before connecting an account.
+        </p>
+      ) : null}
+      <Button variant="outline" size="sm" className="self-start" onClick={addAccount}>
         <PlusIcon className="size-3.5" />
-        Add account
+        {oauthConfigured ? "Add account" : "Set up Google OAuth"}
       </Button>
     </div>
   );

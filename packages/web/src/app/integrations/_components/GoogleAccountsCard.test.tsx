@@ -51,11 +51,13 @@ function account(overrides: Partial<GoogleAccountStatus>): GoogleAccountStatus {
   };
 }
 
-function renderAccounts() {
+function renderAccounts({ oauthConfigured = true, onSetupOAuth = () => {} } = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
       <GoogleAccountsCard
+        oauthConfigured={oauthConfigured}
+        onSetupOAuth={onSetupOAuth}
         accounts={[
           account({
             id: "gacct_work",
@@ -115,5 +117,15 @@ describe("GoogleAccountsCard disclosures", () => {
         method: "DELETE"
       });
     });
+  });
+
+  test("requires the operator's OAuth client before adding another account", () => {
+    const onSetupOAuth = mock(() => {});
+    renderAccounts({ oauthConfigured: false, onSetupOAuth });
+
+    const setup = screen.getByRole("button", { name: "Set up Google OAuth" });
+    fireEvent.click(setup);
+    expect(onSetupOAuth).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Add account" })).toBeNull();
   });
 });

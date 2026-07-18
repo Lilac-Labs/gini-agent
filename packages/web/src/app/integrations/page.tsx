@@ -168,6 +168,16 @@ export default function IntegrationsPage() {
 
   const managedRecord = managing ? configuredRecord(connectors.data ?? [], managing) : undefined;
   const managedProvider = managing ? (providers.data ?? []).find((p) => p.id === managing) : undefined;
+  const googleOAuthProvider =
+    (providers.data ?? []).find((provider) => provider.id === GOOGLE_PROVIDER_ID) ?? null;
+  const googleOAuthConfigured = Boolean(configuredRecord(connectors.data ?? [], GOOGLE_PROVIDER_ID));
+  const openGoogleOAuthSetup = () => {
+    if (!googleOAuthProvider) {
+      toast.error("Google OAuth setup is unavailable. Reload and try again.");
+      return;
+    }
+    setManualProvider(googleOAuthProvider);
+  };
 
   const openTile = (tile: IntegrationTile) => {
     const p = tile.provider;
@@ -236,7 +246,11 @@ export default function IntegrationsPage() {
                   </div>
                 </div>
               </div>
-              <GoogleAccountsCard accounts={googleAccounts.data ?? []} />
+              <GoogleAccountsCard
+                accounts={googleAccounts.data ?? []}
+                oauthConfigured={googleOAuthConfigured}
+                onSetupOAuth={openGoogleOAuthSetup}
+              />
             </div>
           ) : view === "slack" ? (
             <div className="flex flex-col gap-3">

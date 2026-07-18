@@ -42,12 +42,25 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-async function renderStep(opts: { onSkip?: () => void; skipPending?: boolean } = {}) {
+async function renderStep(
+  opts: {
+    onSkip?: () => void;
+    skipPending?: boolean;
+    oauthConfigured?: boolean;
+    onSetupOAuth?: () => void;
+  } = {}
+) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   await act(async () => {
     rtlRender(
       <QueryClientProvider client={client}>
-        <StepSignIn onContinue={() => {}} onSkip={opts.onSkip} skipPending={opts.skipPending} />
+        <StepSignIn
+          onContinue={() => {}}
+          onSkip={opts.onSkip}
+          skipPending={opts.skipPending}
+          oauthConfigured={opts.oauthConfigured ?? true}
+          onSetupOAuth={opts.onSetupOAuth ?? (() => {})}
+        />
       </QueryClientProvider>
     );
   });
@@ -74,5 +87,12 @@ describe("StepSignIn skip path", () => {
     await renderStep({ onSkip, skipPending: true });
     const skip = screen.getByRole("button", { name: /skip for now/i }) as HTMLButtonElement;
     expect(skip.disabled).toBe(true);
+  });
+
+  test("an unconfigured runtime opens local OAuth setup instead of starting Google login", async () => {
+    const onSetupOAuth = mock(() => {});
+    await renderStep({ oauthConfigured: false, onSetupOAuth });
+    fireEvent.click(screen.getByRole("button", { name: /set up google oauth/i }));
+    expect(onSetupOAuth).toHaveBeenCalledTimes(1);
   });
 });

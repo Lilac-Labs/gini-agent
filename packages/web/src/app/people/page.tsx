@@ -14,6 +14,7 @@ import type { CrmContactDetail, CrmContactSummary } from "@runtime/capabilities/
 import type { CrmExtractionStatus } from "@runtime/jobs/crm-extractor";
 import type { ChatSession } from "@/lib/view-types";
 import { api } from "@/lib/api";
+import { dossierDisplayMarkdown } from "@/lib/dossier";
 import { MarkdownContent } from "@/components/chat/MarkdownContent";
 import { EmptyState } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -314,7 +315,7 @@ export default function PeoplePage() {
             {detail.isLoading ? (
               <div className="text-sm text-muted-foreground">Loading profile…</div>
             ) : detail.data?.profile ? (
-              <MarkdownContent text={detail.data.profile} dropForeignImages />
+              <MarkdownContent text={dossierDisplayMarkdown(detail.data.profile)} dropForeignImages />
             ) : (
               <div className="text-sm text-muted-foreground">
                 No researched profile yet — the assistant writes one as it encounters this person.

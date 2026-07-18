@@ -21,17 +21,15 @@ export function defaultRoutinesState(): RoutinesState {
 }
 
 // Whether the wizard shows the capability-derived provider step between
-// sign-in and the welcome step: only on a DEFINITE "self-hosted and no
-// provider configured" answer from /api/setup/status. Managed deployments
-// provision the provider at the platform (ADR managed-deployment-mode.md),
-// and an unresolved/failed probe must not block the funnel on a guess — the
+// sign-in and the welcome step: only on a definite "no provider configured"
+// answer from /api/setup/status. An unresolved/failed probe must not block the funnel on a guess — the
 // scan gating below degrades gracefully either way. The same predicate gates
 // the Gmail scan kickoff: the scan's synthesis calls need the model, so
 // without a provider it could only ever fail.
 export function needsProviderStep(
-  status: { managed: boolean; providerConfigured: boolean } | undefined
+  status: { providerConfigured: boolean } | undefined
 ): boolean {
-  return status !== undefined && !status.managed && !status.providerConfigured;
+  return status !== undefined && !status.providerConfigured;
 }
 
 // Which body the step-3 profile card renders. "idle" normally means the

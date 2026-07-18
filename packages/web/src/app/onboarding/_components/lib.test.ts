@@ -99,20 +99,16 @@ describe("profileCardView", () => {
 });
 
 describe("needsProviderStep", () => {
-  test("true only on a definite self-hosted-and-unconfigured answer", () => {
-    expect(needsProviderStep({ managed: false, providerConfigured: false })).toBe(true);
+  test("true only on a definite unconfigured answer", () => {
+    expect(needsProviderStep({ providerConfigured: false })).toBe(true);
   });
 
   test("an unresolved probe never blocks the funnel on a guess", () => {
     expect(needsProviderStep(undefined)).toBe(false);
   });
 
-  test("managed deployments never see the provider step (ADR managed-deployment-mode.md)", () => {
-    expect(needsProviderStep({ managed: true, providerConfigured: false })).toBe(false);
-  });
-
   test("a configured provider needs no step", () => {
-    expect(needsProviderStep({ managed: false, providerConfigured: true })).toBe(false);
+    expect(needsProviderStep({ providerConfigured: true })).toBe(false);
   });
 });
 

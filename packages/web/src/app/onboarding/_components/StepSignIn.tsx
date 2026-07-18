@@ -20,12 +20,10 @@ import { useConnectGoogleAccount, useReloginPrimary } from "./useConnectGoogleAc
 //     offers the add flow as an escape hatch.
 //   - no usable account → "Continue with Google" starts the connect flow;
 //     once the account registers the button swaps to "Continue as".
-// The connect flow is a same-tab OAuth round trip in both auth modes (edge's
-// /auth/google/add or the gateway's loopback PKCE flow — see
+// The connect flow is a same-tab loopback PKCE OAuth round trip (see
 // useConnectGoogleAccount), returning to /onboarding so the funnel restarts
 // at this step with the fresh account visible.
-// `onSkip` (self-hosted only — the page withholds it when managed, where the
-// edge's Google sign-in is the session itself) renders a quiet "Skip for now"
+// `onSkip` renders a quiet "Skip for now"
 // that completes onboarding minimally, so a user without a Google account
 // still reaches the app; they can connect one later via settings or skills.
 // The design's Microsoft button is omitted — no Microsoft integration exists.
@@ -164,4 +162,3 @@ function GoogleG({ className }: { className?: string }) {
     </svg>
   );
 }
-

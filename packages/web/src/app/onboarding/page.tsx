@@ -34,7 +34,7 @@ import { StepWelcome } from "./_components/StepWelcome";
 const fraunces = Fraunces({ subsets: ["latin"], variable: "--font-fraunces", display: "swap" });
 
 // First-run onboarding flow (ADR web-onboarding-flow.md): prerequisite steps
-// (sign-in, and — self-hosted with no provider configured — the
+// (sign-in, and — with no provider configured — the
 // capability-derived provider step) plus five dotted wizard steps in one
 // client component tree, driven by the /api/onboarding endpoints. The Gmail
 // profile scan (idempotent endpoint) is kicked off the moment its two
@@ -48,17 +48,17 @@ export default function OnboardingPage() {
   const params = useSearchParams();
   const router = useRouter();
   const invalidate = useInvalidate();
-  // The edge add-account flow leaves and re-enters this page in the same tab,
+  // The add-account flow leaves and re-enters this page in the same tab,
   // naming the step to resume via ?step= (the gate only lets an incomplete
   // record this far, so honoring the param can never skip a completed funnel
   // back open). Read once as the initial state; in-wizard navigation owns the
   // step from then on. Steps are held by NAME: the provider step joins the
-  // sequence only when the setup-status probe resolves to "self-hosted and
-  // unconfigured" (needsProviderStep), and that can happen after mount — a
+  // sequence only when the setup-status probe resolves to "unconfigured"
+  // (needsProviderStep), and that can happen after mount — a
   // numeric position could silently re-label the step the user is on.
   const [step, setStep] = useState<OnboardingStep>(() => initialOnboardingStep(params?.get("step")));
   const setupStatus = useSetupStatus();
-  // True only on a definite "self-hosted and no provider configured" answer.
+  // True only on a definite "no provider configured" answer.
   // Gates both the provider step's presence and the scan kickoff (the scan's
   // synthesis calls need the model, so without a provider it could only fail).
   const scanUnavailable = needsProviderStep(setupStatus.data);
@@ -79,7 +79,7 @@ export default function OnboardingPage() {
     setTimezone((current) => current || Intl.DateTimeFormat().resolvedOptions().timeZone);
   }, []);
 
-  // A failed edge add-account round trip returns to this page with
+  // A failed add-account round trip returns to this page with
   // ?googleAddError=1 (appended to whichever step it left from). Surface it
   // once per mount — the ref keeps a dev-mode double-mount from stacking two
   // toasts.
@@ -120,15 +120,13 @@ export default function OnboardingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setupStatus.data, setupStatus.isError]);
 
-  // The sign-in step's "Skip for now" (self-hosted only — managed sign-in IS
-  // the session, so the page withholds it): complete onboarding minimally so
+  // The sign-in step's "Skip for now" completes onboarding minimally so
   // a user without a Google account still reaches the app. The browser
   // timezone (resolved by the mount effect above) rides along so the record
   // stays coherent for whatever reads it later (e.g. the routines endpoint's
   // fallback); theme keeps the app default. The PATCH response seeds the
   // ["onboarding"] cache (useUpdateOnboarding), so the onboarding gate sees
   // completed before the redirect lands.
-  const managed = setupStatus.data?.managed === true;
   const patch = useUpdateOnboarding();
   const skipSignIn = () =>
     patch.mutate(
@@ -216,7 +214,7 @@ export default function OnboardingPage() {
                 if (!scanUnavailable) scan.mutate();
                 next();
               }}
-              onSkip={managed ? undefined : skipSignIn}
+              onSkip={skipSignIn}
               skipPending={patch.isPending}
             />
           ) : step === "provider" ? (

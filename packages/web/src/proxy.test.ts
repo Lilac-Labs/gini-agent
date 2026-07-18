@@ -28,16 +28,13 @@ function makeRequest(opts: { url: string; host: string; method?: string; secFetc
   });
 }
 
-// Stub the setup-status probe the loopback setup gate calls. `managed`
-// mirrors the runtime's managed-deployment flag (ADR
-// managed-deployment-mode.md); omitting it exercises the pre-managed payload
-// shape, which the gate must read as self-hosted. The same payload also
+// Stub the setup-status probe the loopback setup gate calls. The same payload also
 // answers the follow-up /api/onboarding probe — it carries no `completed`
 // field, which the gate must read as "not definitively incomplete" and keep
 // the /setup bounce (the pre-onboarding behavior these tests pin).
-function stubSetupStatus(providerConfigured: boolean, managed?: boolean): void {
+function stubSetupStatus(providerConfigured: boolean): void {
   globalThis.fetch = (async () =>
-    new Response(JSON.stringify(managed === undefined ? { providerConfigured } : { providerConfigured, managed }), {
+    new Response(JSON.stringify({ providerConfigured }), {
       status: 200,
       headers: { "content-type": "application/json" }
     })) as unknown as typeof fetch;
@@ -56,7 +53,7 @@ function stubGateProbes(
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.endsWith("/api/setup/status")) {
-      return new Response(JSON.stringify({ providerConfigured, managed: false }), {
+      return new Response(JSON.stringify({ providerConfigured }), {
         status: 200,
         headers: { "content-type": "application/json" }
       });
@@ -142,24 +139,6 @@ describe("proxy loopback setup gate", () => {
     stubSetupStatus(true);
     const res = await proxy(makeRequest({ url: "http://localhost/chat", host: "localhost", secFetchDest: "document" }));
     expect(res.status).toBe(200);
-  });
-
-  test("managed deployment: no /setup redirect even while unconfigured", async () => {
-    // A managed (platform-hosted) runtime provisions its own provider, so the
-    // gate must never bounce it to /setup — even if the status probe reports
-    // providerConfigured false. See ADR managed-deployment-mode.md.
-    stubSetupStatus(false, true);
-    const res = await proxy(makeRequest({ url: "http://localhost/chat", host: "localhost", secFetchDest: "document" }));
-    expect(res.status).toBe(200);
-    expect(res.headers.get("location")).toBeNull();
-  });
-
-  test("managed false in the payload keeps the unconfigured redirect", async () => {
-    stubSetupStatus(false, false);
-    const res = await proxy(makeRequest({ url: "http://localhost/chat", host: "localhost", secFetchDest: "document" }));
-    expect(res.status).toBeGreaterThanOrEqual(300);
-    expect(res.status).toBeLessThan(400);
-    expect(res.headers.get("location")).toContain("/setup");
   });
 
   test("unconfigured + incomplete onboarding passes through — the wizard owns first-run provider setup", async () => {

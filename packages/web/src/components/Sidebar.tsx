@@ -31,7 +31,7 @@ import { useMemo, useState, useSyncExternalStore } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { useAllChatSessions, useInvalidate, useManagedMode, useStatus } from "@/lib/queries";
+import { useAllChatSessions, useInvalidate, useStatus } from "@/lib/queries";
 import { useChatReadState } from "@/lib/use-chat-read-state";
 import {
   DropdownMenu,
@@ -62,11 +62,6 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
   const [topicsCollapsed, toggleTopics] = useSectionCollapsed("topics");
 
   const status = useStatus();
-  // Managed (platform-hosted) deployments hide the self-serve footer: the
-  // tunnel menu (ingress is platform-provided) and the self-update row
-  // (updates are platform-rolled). Absent/failed answers render the footer —
-  // self-hosted behavior is the default. See ADR managed-deployment-mode.md.
-  const managed = useManagedMode().data?.managed === true;
   const activeAgentId = status.data?.activeAgent?.id;
   const agentsQuery = useQuery({
     queryKey: ["agents"],
@@ -363,15 +358,11 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
         </div>
       </ScrollArea>
 
-      {managed ? null : (
-        <>
-          <div className="px-3 pb-2 pt-3">
-            <TunnelMenu />
-          </div>
-          <div className="h-px bg-sidebar-border" />
-          <UpdateReminder />
-        </>
-      )}
+      <div className="px-3 pb-2 pt-3">
+        <TunnelMenu />
+      </div>
+      <div className="h-px bg-sidebar-border" />
+      <UpdateReminder />
       <CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} />
       <ArchiveAgentDialog
         agent={archiveTarget}

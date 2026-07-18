@@ -2,8 +2,7 @@
 
 // Sign-in step "Skip for now" (ADR web-onboarding-flow.md): the quiet skip —
 // the path that lets a user without a Google account reach the app — renders
-// exactly when the page provides `onSkip` (self-hosted; the page withholds it
-// when managed, so the managed funnel is unchanged), fires on click, and
+// exactly when the page provides `onSkip`, fires on click, and
 // locks while the completion PATCH is pending. fetch is stubbed to hang: the
 // account registry and auth mode stay unresolved, which is exactly the
 // fresh-instance state the skip must remain usable in.
@@ -63,7 +62,7 @@ describe("StepSignIn skip path", () => {
     expect(onSkip).toHaveBeenCalledTimes(1);
   });
 
-  test("no skip without onSkip — the managed funnel is unchanged", async () => {
+  test("no skip without onSkip", async () => {
     await renderStep();
     expect(screen.queryByRole("button", { name: /skip for now/i })).toBeNull();
     // The step still renders its sign-in surface.

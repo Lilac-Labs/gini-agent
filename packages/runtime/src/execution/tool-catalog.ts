@@ -836,7 +836,7 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
     // they're done. Always-on like request_connector: an expired Google
     // session can surface on any instance regardless of toolset state.
     // Deferred (like list_connectors): the steering that routes the model
-    // here (auth preflight, accounts block, google skills) names the tool,
+    // here (accounts block and Google skills) names the tool,
     // so the on-demand index line is enough to make it load the schema.
     toolset: "connectors",
     displayLabel: "Request Google account",

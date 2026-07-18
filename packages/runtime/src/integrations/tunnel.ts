@@ -26,7 +26,7 @@
 // store, browser opener, port resolver, drivers) is injectable so unit tests
 // never hit the network, OAuth, or the host browser. See `setTunnelDeps`.
 
-import { mkdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import {
   buildTunnel as realBuildTunnel,
@@ -53,9 +53,6 @@ import { appendLog } from "../state/trace";
 import { relayHome } from "../paths";
 import { isSupervisedWebChild } from "../runtime/health-probe";
 import { clearRuntimeTunnelTrust, setRuntimeTunnelTrust } from "../lib/origin-trust";
-import { registerAccount } from "./connectors/google-accounts";
-import { configDirForAccount, newAccountId, readGoogleAccounts } from "../state/google-accounts";
-import { buildAuthorizedUserCredential } from "./connectors/relay-workspace-client";
 
 // ---------------------------------------------------------------------------
 // Injectable gini-relay seams.
@@ -588,13 +585,6 @@ export interface TunnelDeps {
   // server-side revoke — which keeps the same stable subdomain/URL on reconnect
   // while still rotating the token. Called by disconnect (= sever the connector).
   logout: (config: RuntimeConfig) => Promise<void>;
-  // Persist a relay-provisioned Workspace grant: given the refresh token a
-  // provisioned relay login returned (and the relay principal it belongs to),
-  // write a gws-readable authorized_user credential and register it as a tagged
-  // Google account, so gws can use the provisioned Workspace services with no
-  // per-user OAuth setup.
-  // Best-effort — the caller never lets a failure here break the tunnel connect.
-  persistWorkspaceGrant: (refreshToken: string, principal?: string) => Promise<void>;
   // The manual tunnel drivers (tailscale / ngrok / cloudflared).
   drivers: Record<ManualProviderId, ManualDriver>;
 }
@@ -648,108 +638,6 @@ export async function defaultLogout(
   }
 }
 
-// Default tag for an auto-provisioned account. A relay-provisioned login doesn't
-// ask the user for a tag (it rides the tunnel connect), so seed a friendly one;
-// the user can retag later. Collisions fall back to a unique suffix.
-const PROVISIONED_TAG = "workspace";
-
-// Persist a relay-provisioned Workspace grant so gws can use it: write the
-// standard authorized_user credentials.json gws reads (tier 4 /
-// GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE) into a managed gws config dir, then
-// register it as a tagged account. The credential is trusted by construction
-// (the relay only issues a refresh token after a completed consent), so
-// registration skips the live `gws auth status` probe — gws may not even be
-// installed yet at connect time, and a probe gated on it would strand the valid
-// credential unregistered. The live email/liveness is back-filled by
-// listAccountsWithStatus on the next read. Seams injected for tests.
-//
-// IDEMPOTENT: runConnect calls this on every connect (fresh OR resume), so it
-// reuses an EXISTING provisioned account's config dir (found by its immutable
-// `provisioned` flag and matching relay `principal`, NOT the mutable tag)
-// instead of minting a fresh one. The refreshed credential is rewritten in place
-// and the registry row upserts by id, so a reconnect never accumulates duplicate
-// accounts, while a connect that follows a fresh login whose tunnel start failed
-// (session on disk, grant not yet persisted) still lands the grant.
-//
-// Tag handling: a reused account keeps its current tag (so a user retag sticks);
-// a freshly-minted dir seeds PROVISIONED_TAG and, on a uniqueness clash (a
-// DIFFERENT account already holds it), retries once with an id-suffixed tag so a
-// repeat never throws.
-type RegisterAccount = (input: {
-  tag: string;
-  configDir: string;
-  trusted?: boolean;
-  principal?: string;
-}) => Promise<unknown>;
-
-// The provisioned account already registered for this relay principal, or null.
-// Returned together so re-persist reuses BOTH the dir and the user's current tag
-// (forcing PROVISIONED_TAG on reuse would revert a user's retag on every
-// reconnect). Matched on the immutable principal so a second, DIFFERENT identity
-// provisioned on the same machine never clobbers the first's credential; when no
-// principal is known yet, fall back to any provisioned account (single-identity
-// machines, the common case).
-interface ProvisionedMatch {
-  configDir: string;
-  tag: string;
-}
-
-export async function defaultPersistWorkspaceGrant(
-  refreshToken: string,
-  principal: string | undefined = undefined,
-  register: RegisterAccount = registerAccount,
-  makeConfigDir: () => string = () => configDirForAccount(newAccountId()),
-  mkdir: (path: string) => void = (path) => void mkdirSync(path, { recursive: true, mode: 0o700 }),
-  // Atomic write (same-dir temp + rename): on a reused provisioned dir a
-  // concurrent gws calendar/gmail read must never see a truncated/half-written
-  // credentials.json, and a crash mid-write must not corrupt it. The temp is
-  // created at 0600 and rename makes the target adopt that mode.
-  writeFile: (path: string, body: string) => void = (path, body) => {
-    const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-    writeFileSync(tmp, body, { mode: 0o600 });
-    renameSync(tmp, path);
-  },
-  findProvisioned: (principal: string | undefined) => ProvisionedMatch | null = (p) => {
-    const provisioned = readGoogleAccounts().filter((a) => a.provisioned === true);
-    // Prefer the exact-principal match; only when this connect carries no
-    // principal do we reuse an unkeyed provisioned account (back-compat with a
-    // row registered before principals were recorded). We deliberately do NOT
-    // adopt a pre-`provisioned`-flag legacy row: a row from before this feature
-    // is indistinguishable from a user account merely tagged "workspace" by
-    // anything immutable (its credential's client_id is the public, baked relay
-    // id, not a secret), so inferring provenance from it risks clobbering a user
-    // account. The cost of not adopting is a one-time, non-destructive duplicate
-    // on the first post-upgrade reconnect for the narrow set of machines that
-    // provisioned successfully on the prior build; see ADR google-multi-account.md.
-    const match = (p && provisioned.find((a) => a.principal === p)) || (!p && provisioned.find((a) => !a.principal));
-    return match ? { configDir: match.configDir, tag: match.tag } : null;
-  }
-): Promise<void> {
-  const existing = findProvisioned(principal);
-  const configDir = existing?.configDir ?? makeConfigDir();
-  // Reuse keeps the user's current tag; a fresh dir seeds PROVISIONED_TAG.
-  const tag = existing?.tag ?? PROVISIONED_TAG;
-  mkdir(configDir);
-  writeFile(join(configDir, "credentials.json"), buildAuthorizedUserCredential(refreshToken));
-  // A tier-3 encrypted `gws auth login` (credentials.enc) outranks the tier-4
-  // plaintext credential just written (gws credential precedence; see ADR
-  // google-multi-account.md), so a stale interactive login left in the reused
-  // dir would shadow every refreshed grant. The relay only issues a refresh
-  // token after a completed consent, so the plain credential is authoritative —
-  // drop the encrypted one.
-  rmSync(join(configDir, "credentials.enc"), { force: true });
-  try {
-    await register({ tag, configDir, trusted: true, principal });
-  } catch {
-    // The tag is held by a DIFFERENT account (a second provisioned account on
-    // this machine, minting a fresh dir under PROVISIONED_TAG that already
-    // exists); retry once with a unique tag. A registry write error (disk) would
-    // throw here too and the retry re-throws it — that propagates to the caller's
-    // best-effort catch, which logs tunnel.workspace_grant.failed.
-    await register({ tag: `${PROVISIONED_TAG}-${newAccountId()}`, configDir, trusted: true, principal });
-  }
-}
-
 // How long a relay frpc child gets to register its proxy before start() is
 // declared failed. frp's config sets loginFailExit:false, so without this the
 // process logs in, retries a never-registering proxy forever, and start() never
@@ -792,7 +680,6 @@ export function makeDefaultDeps(): TunnelDeps {
     resolveLocalPort: defaultResolveLocalPort,
     probeLocalPort: (config: RuntimeConfig, port: number) => isSupervisedWebChild(config.instance, port),
     logout: (config: RuntimeConfig) => defaultLogout(config.instance),
-    persistWorkspaceGrant: defaultPersistWorkspaceGrant,
     drivers: makeDefaultDrivers()
   };
 }
@@ -1627,22 +1514,6 @@ async function runManualConnect(
 //                  guard a fresh connect uses), so it still verifies the port —
 //                  it just loses the no-web-wait fast path. Tests omit it (or
 //                  point the port off config.port) to drive that probe path.
-// Workspace services a provisioned relay login requests extra Google scopes for.
-// The relay validates each name against its own allowlist (and its Google app
-// must be verified for the scope), so this list is a request, not a guarantee.
-const RELAY_PROVISIONED_SERVICES = ["calendar", "gmail", "drive", "sheets"] as const;
-
-// When GINI_RELAY_PROVISIONED is truthy, a FRESH relay login also requests the
-// Workspace scopes above so the captured grant can drive gws — no separate
-// browser consent. Unset/blank (the default) yields an identity-only login,
-// byte-for-byte today's behavior, so existing tunnels are unaffected. Read at
-// call time so a test (or an operator toggling the env) sees the current value.
-function relayProvisionedServices(): string[] {
-  const raw = (process.env.GINI_RELAY_PROVISIONED ?? "").trim().toLowerCase();
-  const enabled = raw === "1" || raw === "true" || raw === "yes" || raw === "on";
-  return enabled ? [...RELAY_PROVISIONED_SERVICES] : [];
-}
-
 async function runConnect(
   config: RuntimeConfig,
   provider: TunnelProviderId,
@@ -1759,14 +1630,10 @@ async function runConnect(
         appendLog(config.instance, "tunnel.resume.no_session", { provider });
         return;
       }
-      const services = relayProvisionedServices();
       const handle = await deps.loginUrl({
         store,
         relayUrl: relay.relayUrl,
-        loopbackPorts: relay.loopbackPorts,
-        // Only set when provisioning is on, so an unprovisioned login's request
-        // is unchanged (the relay treats absent and empty identically).
-        ...(services.length > 0 ? { services } : {})
+        loopbackPorts: relay.loopbackPorts
       });
       // teardown may have landed during loginUrl's await — cancel the freshly
       // minted login (tears down its loopback) instead of opening the browser.
@@ -1822,29 +1689,6 @@ async function runConnect(
       );
     });
     appendLog(config.instance, "tunnel.connected", { provider, url, port });
-    // A provisioned login carries a Workspace refresh token; persist it as a
-    // gws-usable account so the Workspace services work with no per-user OAuth setup.
-    // Runs on every connect (fresh OR resume), but persistWorkspaceGrant is
-    // idempotent: it reuses an already-provisioned account's config dir instead
-    // of minting a new one, so a reconnect never duplicates the account, and a
-    // connect that follows a fresh login whose tunnel start failed (session on
-    // disk, grant not yet persisted) still heals the missing grant. Strictly
-    // best-effort and AFTER the tunnel is published — a failure here (disk,
-    // registry) must never downgrade a connected tunnel.
-    if (session.refreshToken) {
-      try {
-        // session.account is the relay/Google principal (OAuth subject id) the
-        // grant belongs to; it keys re-find so distinct identities keep separate
-        // managed dirs instead of one clobbering another.
-        await deps.persistWorkspaceGrant(session.refreshToken, session.account);
-        appendLog(config.instance, "tunnel.workspace_grant.persisted", { provider });
-      } catch (error) {
-        appendLog(config.instance, "tunnel.workspace_grant.failed", {
-          provider,
-          message: error instanceof Error ? error.message : String(error)
-        });
-      }
-    }
     // Watch the live child for an unexpected exit (crash, relay drop) so a dead
     // tunnel flips to "error" instead of reading "connected" forever.
     if (child) watchChildExit(config, provider, sup, child);

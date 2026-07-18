@@ -11,7 +11,6 @@
 // the side effect runs and resumeChatTask() is called with the captured
 // tool result; the loop then continues from where it stopped.
 
-import { buildAuthPreflightBlock } from "./auth-preflight";
 import {
   appendEvent,
   appendLog,
@@ -1013,20 +1012,6 @@ export async function runChatTask(config: RuntimeConfig, taskId: string): Promis
   let ephemeralContext = subagent
     ? ""
     : renderEphemeralContext(identityBlock, recalledContext, buildClientSurfaceBlock(task.clientSurface));
-  // Deterministic auth preflight: runs the yc/gws auth checks BEFORE the
-  // first model call and prepends any failures (as factual, action-ordering
-  // context) to the turn's user-role ephemeral block — never the system prompt.
-  // Best-effort: a checker fault degrades to no block and never blocks the turn.
-  if (!subagent) {
-    try {
-      const authBlock = await buildAuthPreflightBlock(process.env, undefined, undefined, config.instance);
-      if (authBlock.length > 0) {
-        ephemeralContext = ephemeralContext.length > 0 ? `${authBlock}\n\n${ephemeralContext}` : authBlock;
-      }
-    } catch {
-      // never let the preflight crash a turn
-    }
-  }
   const currentUserMessage = await buildUserMessage(config, task, modality);
   const nonPriorMessages: ToolCallingMessage[] = [
     { role: "system", content: systemContext },

@@ -146,51 +146,30 @@ export function accountsPrimaryFirst(accounts: GoogleAccountStatus[]): GoogleAcc
   ];
 }
 
-// Where the connect-Google buttons send the tab. Both auth modes are a
-// same-tab OAuth round trip that returns to `returnTo` (with googleAddError=1
-// appended on failure, toasted at the /onboarding page level):
-// - edge (hosted): the edge's web-application flow — it exchanges the code
-//   and provisions the account into the guest server-side.
-// - loopback (local): the gateway's Desktop-client PKCE flow via the BFF. The
-//   gateway must build the redirect_uri on the BROWSER-facing origin but only
-//   ever sees the BFF's loopback hop, so the page passes its own origin along
-//   (the gateway validates it is loopback — Google Desktop clients can only
-//   redirect to localhost/127.0.0.1).
+// Where the connect-Google buttons send the tab. The gateway's Desktop-client
+// PKCE flow runs through the BFF and returns to `returnTo` (with
+// googleAddError=1 appended on failure). The gateway must build redirect_uri
+// from the browser-facing origin but only sees the BFF's loopback hop, so the
+// page passes its own origin along. The gateway validates that it is loopback.
 // `intent` names what the completed OAuth does with the account: "signin"
 // (the sign-in step's buttons) makes it the persisted primary — so the step-0
 // card flips to the account the user just authorized — while "add" (the
 // accounts step, the server-side default) never touches the primary. The
 // param is only appended for "signin" to keep add-flow URLs unchanged.
 export function connectGoogleUrl(
-  mode: "edge" | "loopback",
   returnTo: string,
   origin: string,
   intent: "signin" | "add" = "add"
 ): string {
   const intentParam = intent === "signin" ? "&intent=signin" : "";
-  return mode === "edge"
-    ? `/auth/google/add?returnTo=${encodeURIComponent(returnTo)}${intentParam}`
-    : `/api/runtime/google/login/start?returnTo=${encodeURIComponent(returnTo)}&origin=${encodeURIComponent(origin)}${intentParam}`;
+  return `/api/runtime/google/login/start?returnTo=${encodeURIComponent(returnTo)}&origin=${encodeURIComponent(origin)}${intentParam}`;
 }
 
 // Where the "Reconnect" call-to-action sends the tab when the PRIMARY account's
-// sign-in has been revoked. Both modes carry signin intent, so the healed
-// account is re-persisted as the primary.
-// - edge (hosted): the ADD flow `/auth/google/add?…&intent=signin` — NOT the
-//   owner sign-in flow `/auth/google`. Sign-in re-auths the session owner and
-//   heals only the BAKED credential dir, so it could never heal a primary that
-//   was flipped to another account (and picking that account in its chooser
-//   switches tenants instead of healing). The add flow identity-matches
-//   whichever account the user re-authorizes, and when that account is the
-//   owner's own, the edge upgrades the provision to a baked-dir heal
-//   server-side — so either primary shape heals through this one URL.
-// - loopback (local): the same gateway Desktop-client PKCE start URL a fresh
-//   login uses (see connectGoogleUrl's loopback branch), which re-authorizes
-//   the primary in place. `origin` is required here for the same reason it is
-//   there (Google Desktop clients redirect only to loopback, so the gateway
-//   needs the browser-facing origin); edge mode ignores it.
-export function reloginPrimaryUrl(mode: "edge" | "loopback", returnTo: string, origin?: string): string {
-  return connectGoogleUrl(mode, returnTo, origin ?? "", "signin");
+// sign-in has been revoked. The same Desktop-client PKCE flow re-authorizes the
+// account in place and carries signin intent so it is re-persisted as primary.
+export function reloginPrimaryUrl(returnTo: string, origin: string): string {
+  return connectGoogleUrl(returnTo, origin, "signin");
 }
 
 // Which sign-in call-to-action the entry step shows, driven by the PRIMARY
@@ -232,7 +211,7 @@ export function onboardingSteps(withProviderStep: boolean): OnboardingStep[] {
 }
 
 // Wizard step named by the ?step= query param. Adding a Google account is a
-// same-tab OAuth round trip in both auth modes, so it returns the browser to
+// same-tab OAuth round trip, so it returns the browser to
 // /onboarding?step=accounts — the wizard re-enters on the accounts step
 // instead of restarting at sign-in. Unknown or absent names start at sign-in.
 const STEP_PARAMS: Record<string, OnboardingStep> = { accounts: "accounts" };

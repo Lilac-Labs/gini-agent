@@ -100,8 +100,8 @@ The digest persists machine-globally per account at
 swept with the account's managed dir on removal; a stale `running` record
 older than five minutes is treated as orphaned and re-runnable).
 `ensureLabelProfile` guards re-entry (in-flight set; ready and fresh-running
-skip) and fires from the connect paths — `POST /api/google/accounts`,
-`POST /api/google/accounts/provision`, and the loopback web login callback —
+skip) and fires from the connect paths — `POST /api/google/accounts` and the
+loopback web login callback —
 plus a backfill on the gallery GET that only targets accounts with no
 profile at all, so a persistent failure never loops on the poll-driven
 read. An account's seed is the discovered labels first (tagged

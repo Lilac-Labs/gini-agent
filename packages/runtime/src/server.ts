@@ -24,7 +24,6 @@ import { reconcileAutostartPlistOnStartup } from "./runtime/autostart-reconcile"
 import { installCrashHandlers } from "./runtime/crash-handlers";
 import { maybeAskAboutCrashes } from "./runtime/crash-recovery";
 import { closeAll as closeBrowserSessions, setBrowserInstance, setBrowserRecording } from "./tools/browser";
-import { ensureHostedPrimaryAccount } from "./integrations/connectors/google-accounts";
 import { createTelegramPollerSupervisor } from "./integrations/telegram-poller";
 import { createDiscordPollerSupervisor } from "./integrations/discord-poller";
 import { createSlackBridgeSupervisor } from "./integrations/slack-bridge";
@@ -235,30 +234,6 @@ runConnectorDetection(config)
   })
   .catch((error) => {
     appendLog(config.instance, "connector.detection.error", {
-      error: error instanceof Error ? error.message : String(error)
-    });
-  });
-
-// A hosted guest boots with an edge-provisioned Workspace credential baked at
-// the GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE path (ADR google-multi-account.md).
-// Register its directory as the trusted "primary" account once so the account
-// registry — and the web onboarding's sign-in/accounts steps — see the
-// signed-in account. Idempotent: an already-registered dir registers nothing,
-// though it may still backfill an unset primaryAccountId (the connector logs
-// that write against the instance passed here). A no-op without the hosted
-// markers, and best-effort: errors are absorbed so a registry problem can
-// never block startup.
-ensureHostedPrimaryAccount(config.instance)
-  .then((account) => {
-    if (account) {
-      appendLog(config.instance, "google.hosted_primary.registered", {
-        id: account.id,
-        configDir: account.configDir
-      });
-    }
-  })
-  .catch((error) => {
-    appendLog(config.instance, "google.hosted_primary.error", {
       error: error instanceof Error ? error.message : String(error)
     });
   });

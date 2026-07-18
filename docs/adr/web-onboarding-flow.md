@@ -14,9 +14,8 @@ renderer over the `/api/onboarding` contract — it never composes prompts or
 cron expressions.
 
 The funnel opens with **prerequisite steps** ahead of the five dotted wizard
-steps (which are the same for every deployment): always a **sign-in step**,
-and — on a self-hosted deployment with no model provider configured — a
-**capability-derived provider step** (see "Capability-derived steps and the
+steps: always a **sign-in step**, and — when no model provider is configured —
+a **capability-derived provider step** (see "Capability-derived steps and the
 skip paths" below). Prerequisite steps carry no progress dots. Google access
 is the app's top-level prerequisite, so an incomplete funnel always shows
 sign-in first. The step adapts to the account registry
@@ -42,44 +41,24 @@ instance whose provider is missing (the proxy's setup gate still bounces that
 state there; an incomplete funnel instead passes through the proxy and gets
 the wizard's own provider step — see below).
 
-## Auth-mode switch and step re-entry
+## Google connection and step re-entry
 
-How "connect a Google account" works depends on the deployment, so the
-sign-in step's connect buttons and the accounts step's "Add account" switch
-on `GET /api/google/auth-mode` (ADR google-multi-account.md). Both modes are
-the same **same-tab OAuth round trip** — the tab leaves for Google's consent
-screen and returns to `returnTo`, with `?googleAddError=1` appended on
-failure (toasted once at the /onboarding page level):
+Google connection is a **same-tab loopback OAuth round trip**. The browser
+navigates to `/api/runtime/google/login/start?returnTo=…&origin=…`; the BFF
+injects the gateway bearer and the runtime runs a Desktop-client PKCE flow.
+Its redirect URI is the web app's loopback origin
+(`<origin>/api/runtime/google/login/callback`), so Google sends the tab back
+into the app. The callback exchanges the code, writes the gws credential, and
+registers the account idempotently by Google subject before redirecting to
+`returnTo`.
 
-- **`loopback`** (local/desktop): the browser navigates to
-  `/api/runtime/google/login/start?returnTo=…&origin=…` — the BFF injects the
-  gateway bearer and the gateway runs a Desktop-client PKCE
-  authorization-code flow whose redirect URI is the web app's own loopback
-  origin (`<origin>/api/runtime/google/login/callback`), so Google sends the
-  tab straight back into the app; the gateway's callback exchanges the code,
-  writes the gws credential, and registers the account (idempotent by Google
-  sub) before 302ing to `returnTo`. The gateway only ever sees the BFF's
-  loopback hop, so the page passes its own origin along; a non-loopback
-  origin gets a clear 400 (Google Desktop clients can only redirect to
-  localhost/127.0.0.1, so LAN access can't complete this flow). See ADR
-  google-multi-account.md ("Web login" under the login path).
-- **`edge`** (hosted): the guest is headless, so the browser navigates
-  same-tab to the edge's `/auth/google/add?returnTo=…` — a web-application
-  OAuth round trip whose code exchange and provisioning
-  (`POST /api/google/accounts/provision`) happen server-side on the edge.
-  The reconnect-revoked-primary relogin uses this SAME add flow with
-  `intent=signin` — not the owner sign-in flow `/auth/google`, which heals
-  only the baked credential dir and could never heal a primary that was
-  flipped to another account. The add flow identity-matches whichever account
-  the user re-authorizes, and when that account is the session owner's own
-  (matched by Google sub), the edge upgrades the provision to a baked-dir
-  heal server-side — see ADR google-multi-account.md.
+The runtime only sees the BFF's loopback hop, so the page passes its own origin
+along. A non-loopback origin gets a clear 400 because Google Desktop clients
+redirect to localhost/127.0.0.1. See ADR google-multi-account.md.
 
 `returnTo` is `/onboarding?step=accounts` from the accounts step and plain
 `/onboarding` from the sign-in step (the fresh account should surface as
-"Continue as …", not skip the funnel). While the auth mode is still loading,
-the buttons stay disabled so a click can never fall through to the wrong
-flow.
+"Continue as …", not skip the funnel).
 
 The same-tab round trip means the wizard fully remounts on return, so
 `/onboarding?step=…` names the step to resume: a pure param→step mapping
@@ -102,17 +81,16 @@ is also how the page renders them dotless — the five product dots are stable
 for every deployment.
 
 - **Provider step** (`StepProvider`): shown only when `GET /api/setup/status`
-  answers a definite "self-hosted and no provider configured"
-  (`needsProviderStep`: `managed: false` AND `providerConfigured: false`; an
-  unresolved or failed probe never blocks the funnel on a guess). It renders
+  answers a definite "no provider configured" (`needsProviderStep` checks
+  `providerConfigured: false`; an unresolved or failed probe never blocks the
+  funnel on a guess). It renders
   the shared `ProviderPicker` — the exact surface `/setup` renders — inside
   the wizard frame, so the catalog, per-provider config forms, and
   `POST /api/setup/provider` are all inherited. It sits between sign-in and
   the wizard proper because the Gmail profile scan needs the model. A save
   advances, invalidates the cached probe, and kicks the scan; "Skip for now"
   (rendered by the step itself, so it survives a loading or failed catalog)
-  advances without one. Managed deployments never see the step — the platform
-  provisions the provider (ADR managed-deployment-mode.md).
+  advances without one.
 - **Scan gating:** the same `needsProviderStep` predicate gates the scan
   kickoff — the scan's synthesis calls need the model, so without a provider
   it could only fail. When the provider step is shown, sign-in's continue
@@ -124,14 +102,12 @@ for every deployment.
   completes onboarding minimally — `PATCH /api/onboarding` with
   `completed: true` plus the browser-resolved timezone (theme keeps the app
   default) — so a user without a Google account still reaches the app and can
-  connect one later via settings or skills. The page withholds the skip when
-  managed (the edge's Google sign-in IS the session, so the managed funnel is
-  unchanged). Skipping sign-in skips the whole funnel, provider step
-  included; a provider-less instance then falls under the `/setup` bounce
-  below, the standing surface for that state.
+  connect one later via Integrations. Skipping sign-in skips the whole funnel,
+  provider step included; a provider-less instance then falls under the
+  `/setup` bounce below, the standing surface for that state.
 - **Proxy interplay** (`packages/web/src/proxy.ts`): the setup gate's
-  "unconfigured self-hosted → 307 `/setup`" bounce yields to an incomplete
-  funnel. When the status probe reports unconfigured+unmanaged, the proxy
+  "unconfigured → 307 `/setup`" bounce yields to an incomplete funnel. When
+  the status probe reports unconfigured, the proxy
   probes `GET /api/onboarding`; only an explicit `completed: false` passes
   the request through (OnboardingGate then routes it to `/onboarding`, whose
   provider step replaces the `/setup` detour). Completed, an unexpected
@@ -165,14 +141,12 @@ for every deployment.
 - `gini onboarding skip --instance <name>` is the explicit local-development
   bypass for coding agents testing unrelated gated surfaces. It sends the same
   authenticated `PATCH { completed: true }` to the selected running instance;
-  it does not introduce a second persistence path or a hosted auth bypass.
+  it does not introduce a second persistence path.
 - `POST /api/onboarding/scan` → `OnboardingRecord`. Starts the deterministic
   Gmail profile scan in the background and returns the `running` record
   immediately; idempotent while a scan is `running` or `ready`. With no
-  detectable Google access — empty account registry (ADR
-  google-multi-account.md), no `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` (the
-  hosted-provisioning credential), no default
-  `~/.config/gws` dir — the scan lands in `no_account` without running the
+  Google account attached to the instance (ADR google-multi-account.md), the
+  scan lands in `no_account` without running the
   pipeline. `idle`/`failed`/`no_account` (re)submit, so a retry after
   connecting an account just works.
 - `POST /api/onboarding/routines` body

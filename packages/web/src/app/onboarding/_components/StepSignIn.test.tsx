@@ -4,8 +4,8 @@
 // the path that lets a user without a Google account reach the app — renders
 // exactly when the page provides `onSkip`, fires on click, and
 // locks while the completion PATCH is pending. fetch is stubbed to hang: the
-// account registry and auth mode stay unresolved, which is exactly the
-// fresh-instance state the skip must remain usable in.
+// account registry stays unresolved, which is exactly the fresh-instance
+// state the skip must remain usable in.
 //
 // LEAK SAFETY: mock.module is process-wide in `bun test`, so the next/image
 // mock is captured and restored in afterAll.

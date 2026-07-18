@@ -5,11 +5,10 @@
 // redirect URI is the web app's own loopback origin: the browser leaves
 // /onboarding for Google's consent screen IN THE SAME TAB and Google sends it
 // straight back into the app (<origin>/api/runtime/google/login/callback →
-// BFF, which injects the gateway bearer → this callback), mirroring the
-// hosted edge's /auth/google/add UX. `gws` never runs on this path; the
+// BFF, which injects the gateway bearer → this callback). `gws` never runs on this path; the
 // refresh token is written as a gws authorized_user credentials.json through
-// the same provisionAccount internals the hosted edge uses (0600 credential,
-// trusted registration, idempotent by Google sub / verified email).
+// saveGoogleAccountCredential (0600 credential, trusted registration,
+// idempotent by Google sub / verified email).
 //
 // Why this works without pre-registration: Google Desktop clients accept ANY
 // http://localhost / http://127.0.0.1 port+path as a redirect URI, and in
@@ -18,10 +17,8 @@
 // dev server) can never complete the flow — Google would refuse the redirect
 // — so /start rejects it with a clear 400 instead of a dead consent screen.
 //
-// There is no agent/chat add path: the guest is headless and ships with its
-// Google credential host-provisioned, so account adds land through the edge's
-// server-side OAuth exchange → provisionAccount, not through an in-chat
-// `gws auth login` (ADR google-multi-account.md).
+// There is no agent/chat add path. Account connection is an explicit product
+// flow rather than an in-chat `gws auth login` (ADR google-multi-account.md).
 //
 // SECRETS: the authorization code, refresh token, and client secret transit
 // this module. None of them is ever logged, audited, or surfaced in an error
@@ -33,7 +30,7 @@ import type { RuntimeConfig } from "../../types";
 import { ensureLabelProfile } from "../../runtime/label-discovery";
 import { readState } from "../../state";
 import { bindingsForCredentials, resolveConnectorSecret } from "./index";
-import { googleAuthMode, primaryGoogleAccountForInstance, provisionAccount } from "./google-accounts";
+import { primaryGoogleAccountForInstance, saveGoogleAccountCredential } from "./google-accounts";
 import { RELAY_WORKSPACE_CLIENT, type RelayWorkspaceClient } from "./relay-workspace-client";
 
 const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -75,10 +72,8 @@ export const LOGIN_SCOPES = [
   "https://www.googleapis.com/auth/userinfo.profile"
 ];
 
-// Where the browser lands after the flow. Mirrors the hosted edge's
-// sanitizer semantics byte-for-byte (kept in sync by hand; the edge is a
-// separate codebase and cross-package imports are
-// off-limits): only a same-origin absolute path is accepted — it must start
+// Where the browser lands after the flow. Only a same-origin absolute path is
+// accepted — it must start
 // with "/" and not "//" or "/\" (both of which browsers treat as
 // scheme-relative URLs), and control characters are rejected (the value ends
 // up in a Location header, where a CR/LF makes Response construction throw).
@@ -92,16 +87,15 @@ export function sanitizeReturnTo(raw: string | null | undefined): string {
   return raw;
 }
 
-// Failure redirects append googleAddError=1 — the same error param the edge
-// flow uses, so the web's existing page-level toast covers both; returnTo may
-// already carry a query string.
+// Failure redirects append googleAddError=1 so the web's page-level toast can
+// explain the failed round trip; returnTo may already carry a query string.
 export function appendGoogleAddError(returnTo: string): string {
   return `${returnTo}${returnTo.includes("?") ? "&" : "?"}googleAddError=1`;
 }
 
 // What a completed login should DO with the account beyond registering it:
 // "signin" (the sign-in step's Continue with Google / Use a different account
-// / reconnect-primary) makes the provisioned account the persisted primary;
+// / reconnect-primary) makes the connected account the persisted primary;
 // "add" (the accounts step) never touches the primary. Absent defaults to
 // "add" — the non-destructive intent — and anything else is rejected up
 // front, the same way a bad origin is.
@@ -162,12 +156,6 @@ export async function startGoogleLoginWeb(
   config: RuntimeConfig,
   input: { returnTo: string | null; origin: string | null; intent?: string | null }
 ): Promise<StartGoogleLoginWebResult> {
-  if (googleAuthMode() === "edge") {
-    return {
-      ok: false,
-      error: "Direct Google login is unavailable on hosted deployments — use the edge sign-in flow."
-    };
-  }
   const origin = parseLoopbackOrigin(input.origin);
   if (!origin) {
     return {
@@ -201,7 +189,7 @@ export async function startGoogleLoginWeb(
     scope: LOGIN_SCOPES.join(" "),
     // offline + consent guarantee a refresh token; select_account forces the
     // chooser so adding a second identity never silently re-authorizes the
-    // browser's current one (same directives the edge and gws use).
+    // browser's current one.
     access_type: "offline",
     prompt: "consent select_account",
     state,
@@ -247,7 +235,7 @@ export async function handleGoogleLoginWebCallback(
     // The Google sub keys principal idempotency; a blank identity must fail
     // rather than mint an unkeyed row.
     if (!info.sub) return { location: appendGoogleAddError(live.returnTo) };
-    const account = await provisionAccount({
+    const account = await saveGoogleAccountCredential({
       clientId: live.clientId,
       clientSecret: live.clientSecret,
       refreshToken: tokens.refreshToken,
@@ -292,7 +280,7 @@ async function resolveOAuthClient(config: RuntimeConfig): Promise<RelayWorkspace
   return RELAY_WORKSPACE_CLIENT;
 }
 
-// Token exchange, mirroring the edge's exchangeCode plus the PKCE verifier.
+// Token exchange for the runtime-owned PKCE flow.
 // The redirect_uri must match the consent request byte-for-byte — hence the
 // stored value, never a re-derived one.
 async function exchangeCode(
@@ -317,8 +305,7 @@ async function exchangeCode(
   return { accessToken: json.access_token ?? "", refreshToken: json.refresh_token ?? "" };
 }
 
-// OIDC userinfo, mirroring the edge's fetchUserInfo (the LOGIN_SCOPES openid/
-// userinfo.email grants cover it).
+// OIDC userinfo (the LOGIN_SCOPES openid/userinfo.email grants cover it).
 async function fetchUserInfo(accessToken: string): Promise<{ sub: string; email: string }> {
   const res = await (testFetch ?? globalThis.fetch)(USERINFO_ENDPOINT, {
     headers: { authorization: `Bearer ${accessToken}` }

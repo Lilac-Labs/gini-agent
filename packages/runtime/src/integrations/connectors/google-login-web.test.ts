@@ -2,7 +2,7 @@
 //
 // The Google HTTP boundary is stubbed via setGoogleLoginWebFetchForTests so
 // no test ever touches the network; HOME points at a scratch dir so the
-// provisioned registry/credentials land in a throwaway ~/.gini.
+// saved registry/credentials land in a throwaway ~/.gini.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -33,7 +33,6 @@ const ORIGIN = "http://127.0.0.1:3059";
 let scratchHome: string;
 let prevHome: string | undefined;
 let prevStateRoot: string | undefined;
-let prevHosted: string | undefined;
 
 beforeEach(() => {
   scratchHome = mkdtempSync(join(tmpdir(), "gini-glw-"));
@@ -41,8 +40,6 @@ beforeEach(() => {
   process.env.HOME = scratchHome;
   prevStateRoot = process.env.GINI_STATE_ROOT;
   process.env.GINI_STATE_ROOT = join(scratchHome, ".gini");
-  prevHosted = process.env.GINI_HOSTED;
-  delete process.env.GINI_HOSTED;
   resetGoogleLoginWebState();
 });
 
@@ -51,8 +48,6 @@ afterEach(() => {
   else process.env.HOME = prevHome;
   if (prevStateRoot === undefined) delete process.env.GINI_STATE_ROOT;
   else process.env.GINI_STATE_ROOT = prevStateRoot;
-  if (prevHosted === undefined) delete process.env.GINI_HOSTED;
-  else process.env.GINI_HOSTED = prevHosted;
   setGoogleLoginWebFetchForTests(undefined);
   resetGoogleLoginWebState();
   rmSync(scratchHome, { recursive: true, force: true });
@@ -139,13 +134,6 @@ describe("parseLoopbackOrigin", () => {
 });
 
 describe("startGoogleLoginWeb", () => {
-  test("rejects edge auth mode", async () => {
-    process.env.GINI_HOSTED = "1";
-    const result = await startGoogleLoginWeb(config, { returnTo: "/onboarding", origin: ORIGIN });
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("edge sign-in flow");
-  });
-
   test("rejects a missing or non-loopback origin with a clear error", async () => {
     for (const origin of [null, "https://evil.example", "http://10.0.0.4:3000"]) {
       const result = await startGoogleLoginWeb(config, { returnTo: "/onboarding", origin });
@@ -264,8 +252,8 @@ describe("handleGoogleLoginWebCallback", () => {
     const digest = createHash("sha256").update(body.get("code_verifier") ?? "").digest("base64url");
     expect(digest).toBe(consent.searchParams.get("code_challenge") ?? "");
 
-    // Registered like the edge-provisioned path: trusted, principal-keyed,
-    // tag from the email local-part, 0600 authorized_user credential.
+    // Registered as trusted and principal-keyed, with a tag from the email
+    // local-part and a 0600 authorized_user credential.
     const accounts = readGoogleAccounts();
     expect(accounts).toHaveLength(1);
     expect(accounts[0]!.provisioned).toBe(true);

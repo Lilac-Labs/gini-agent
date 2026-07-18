@@ -26,8 +26,7 @@ const SERVICE_CHIPS: Array<{ service: string; icon: typeof MailIcon; color: stri
 
 // Step 4 — connected Google accounts. The list polls every 5s while this step
 // is mounted so a freshly added account shows up on its own. "Add account" is
-// a same-tab OAuth round trip in both auth modes (edge's /auth/google/add or
-// the gateway's loopback PKCE flow — see useConnectGoogleAccount) that
+// a same-tab loopback OAuth round trip (see useConnectGoogleAccount) that
 // returns to this step via /onboarding?step=accounts.
 export function StepAccounts({ onDone }: { onDone: () => void }) {
   const accounts = useGoogleAccounts({ refetchInterval: 5_000 });

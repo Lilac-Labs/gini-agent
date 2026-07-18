@@ -338,52 +338,26 @@ describe("initialOnboardingStep", () => {
 });
 
 describe("connectGoogleUrl", () => {
-  test("edge mode targets the edge add flow with the returnTo encoded", () => {
-    expect(connectGoogleUrl("edge", "/onboarding?step=accounts", "http://127.0.0.1:3059")).toBe(
-      "/auth/google/add?returnTo=%2Fonboarding%3Fstep%3Daccounts"
-    );
-  });
-
-  test("loopback mode targets the gateway start route with returnTo AND the browser origin encoded", () => {
-    expect(connectGoogleUrl("loopback", "/onboarding", "http://127.0.0.1:3059")).toBe(
+  test("targets the gateway start route with returnTo and browser origin encoded", () => {
+    expect(connectGoogleUrl("/onboarding", "http://127.0.0.1:3059")).toBe(
       "/api/runtime/google/login/start?returnTo=%2Fonboarding&origin=http%3A%2F%2F127.0.0.1%3A3059"
     );
   });
 
-  test("signin intent is appended in both modes; an explicit add intent keeps the bare URL", () => {
-    expect(connectGoogleUrl("edge", "/onboarding", "http://127.0.0.1:3059", "signin")).toBe(
-      "/auth/google/add?returnTo=%2Fonboarding&intent=signin"
-    );
-    expect(connectGoogleUrl("loopback", "/onboarding", "http://127.0.0.1:3059", "signin")).toBe(
+  test("signin intent is appended; an explicit add intent keeps the bare URL", () => {
+    expect(connectGoogleUrl("/onboarding", "http://127.0.0.1:3059", "signin")).toBe(
       "/api/runtime/google/login/start?returnTo=%2Fonboarding&origin=http%3A%2F%2F127.0.0.1%3A3059&intent=signin"
     );
-    expect(connectGoogleUrl("edge", "/onboarding", "http://127.0.0.1:3059", "add")).toBe(
-      "/auth/google/add?returnTo=%2Fonboarding"
+    expect(connectGoogleUrl("/onboarding", "http://127.0.0.1:3059", "add")).toBe(
+      "/api/runtime/google/login/start?returnTo=%2Fonboarding&origin=http%3A%2F%2F127.0.0.1%3A3059"
     );
   });
 });
 
 describe("reloginPrimaryUrl", () => {
-  test("edge mode routes to the add flow with signin intent — the edge upgrades an owner self-re-auth to a baked-dir heal", () => {
-    // NOT /auth/google: the owner sign-in flow heals only the baked dir, so a
-    // primary flipped to another account would loop on the reconnect CTA.
-    expect(reloginPrimaryUrl("edge", "/skills", "http://127.0.0.1:3059")).toBe(
-      "/auth/google/add?returnTo=%2Fskills&intent=signin"
-    );
-    expect(reloginPrimaryUrl("edge", "/onboarding")).toBe(
-      "/auth/google/add?returnTo=%2Fonboarding&intent=signin"
-    );
-  });
-
-  test("loopback mode builds the gateway PKCE start URL with returnTo, origin, and signin intent (the heal re-persists the primary)", () => {
-    expect(reloginPrimaryUrl("loopback", "/skills", "http://127.0.0.1:3059")).toBe(
+  test("builds the gateway PKCE start URL with returnTo, origin, and signin intent", () => {
+    expect(reloginPrimaryUrl("/skills", "http://127.0.0.1:3059")).toBe(
       "/api/runtime/google/login/start?returnTo=%2Fskills&origin=http%3A%2F%2F127.0.0.1%3A3059&intent=signin"
-    );
-  });
-
-  test("loopback mode with no origin encodes an empty origin", () => {
-    expect(reloginPrimaryUrl("loopback", "/onboarding")).toBe(
-      "/api/runtime/google/login/start?returnTo=%2Fonboarding&origin=&intent=signin"
     );
   });
 });

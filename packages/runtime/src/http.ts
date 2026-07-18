@@ -61,7 +61,7 @@ import { buildNotificationPreview, type PreviewEvent } from "./integrations/apns
 import { dailyUsage, homeView, mobileBootstrap, publicState } from "./runtime/views";
 import { checkConnector, connectorIsUsable, createConnector, credentialTemplateForProvider, deleteConnector, firstUngrantedCredential, isSkillActive, updateConnector } from "./integrations/connectors";
 import { gwsSessionStatus } from "./integrations/connectors/gws-session";
-import { detachInstanceGoogleAccount, disconnectInstanceGoogleAccount, googleAuthMode, listAccountsWithStatus, provisionAccount, registerAccountForInstance, removeAccount, retagAccount, signOutInstanceGoogleAccounts, useAccountForInstance } from "./integrations/connectors/google-accounts";
+import { detachInstanceGoogleAccount, disconnectInstanceGoogleAccount, listAccountsWithStatus, registerAccountForInstance, removeAccount, retagAccount, signOutInstanceGoogleAccounts, useAccountForInstance } from "./integrations/connectors/google-accounts";
 import { handleGoogleLoginWebCallback, startGoogleLoginWeb } from "./integrations/connectors/google-login-web";
 import { getGoogleAccount, googleAccountsRoot } from "./state/google-accounts";
 import { getProvider, listProviders } from "./integrations/connectors/registry";
@@ -2211,54 +2211,11 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
         return json({ error: message }, status);
       }
     }],
-    // Hosted-edge account provisioning (ADR google-multi-account.md): the edge
-    // exchanges the OAuth code server-side (web-application client) and POSTs
-    // the refresh token here with the guest bearer token. Registers trusted
-    // like the relay grant path — Google only issues the refresh token after a
-    // completed consent — and is idempotent per identity: principal, else
-    // verified email (a re-add rewrites the matching account's credential
-    // instead of minting a duplicate).
-    ["POST", /^\/api\/google\/accounts\/provision$/, async (request) => {
-      const payload = await body(request);
-      const required = (value: unknown) => (typeof value === "string" ? value.trim() : "");
-      const optional = (value: unknown) =>
-        typeof value === "string" && value.trim() ? value.trim() : undefined;
-      const clientId = required(payload.clientId);
-      const clientSecret = required(payload.clientSecret);
-      const refreshToken = required(payload.refreshToken);
-      if (!clientId || !clientSecret || !refreshToken) {
-        return json({ error: "Invalid input: clientId, clientSecret, and refreshToken are required" }, 400);
-      }
-      const provisioned = await provisionAccount({
-        clientId,
-        clientSecret,
-        refreshToken,
-        email: optional(payload.email),
-        principal: optional(payload.principal),
-        tag: optional(payload.tag),
-        // A returning-primary sign-in re-auth (vs an add-account): heals the
-        // guest's baked credential rather than minting a duplicate.
-        primary: payload.primary === true,
-        // A sign-in-intent OAuth: the provisioned account becomes the
-        // persisted primary (distinct from `primary`, which only routes
-        // where the credential lands).
-        makePrimary: payload.makePrimary === true,
-        instance: config.instance
-      });
-      // Same completed-only kick as manual registration: the initial hosted
-      // provision happens before onboarding's mailbox snapshot, while later
-      // account additions should join an already-running People pipeline.
-      autostartCrmForCompletedOnboarding(config);
-      // The credential just landed — digest the mailbox's existing labels
-      // into per-account Auto-inbox defaults (fire-and-forget).
-      ensureLabelProfile(config, provisioned);
-      return json(provisioned, 201);
-    }],
     ["POST", /^\/api\/google\/session\/signout$/, () => {
       signOutInstanceGoogleAccounts(config.instance);
       return json({ ok: true });
     }],
-    // Runtime-owned same-tab Google login (loopback deployments; ADR
+    // Runtime-owned same-tab Google login (ADR
     // google-multi-account.md). Both routes are browser top-level navigations
     // proxied through the web BFF: /start 302s to Google's consent screen
     // (Desktop-client PKCE flow whose redirect URI is the WEB app's own
@@ -2266,8 +2223,8 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // the BFF's loopback hop) and /callback exchanges the code, registers the
     // account, and 302s back into the app. Callback failures redirect with
     // ?googleAddError=1 rather than erroring — the browser is mid-navigation.
-    // /start's 400s (edge mode, non-loopback origin) stay JSON: those are
-    // deployment errors a redirect would hide.
+    // /start's non-loopback-origin 400 stays JSON because a redirect would
+    // hide the configuration error.
     ["GET", /^\/api\/google\/login\/start$/, async (request) => {
       const params = new URL(request.url).searchParams;
       const result = await startGoogleLoginWeb(config, {
@@ -2288,10 +2245,6 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       });
       return new Response(null, { status: 302, headers: { location } });
     }],
-    // Which add-account flow the web should offer: hosted guests are headless
-    // ("edge" — same-tab edge OAuth), everywhere else the gws Desktop-client
-    // loopback flow works ("loopback"). Fixed per deployment.
-    ["GET", /^\/api\/google\/auth-mode$/, () => json({ mode: googleAuthMode() })],
     ["PATCH", /^\/api\/google\/accounts\/([^/]+)$/, async (request, params) => {
       const payload = await body(request);
       const tag = typeof payload.tag === "string" ? payload.tag.trim() : "";

@@ -27,8 +27,8 @@ beforeEach(() => {
         })
       );
     }
-    // useGoogleAuthMode owns an incidental query. Leave it pending so these
-    // tests stay focused on local account-card behavior.
+    // Leave unrelated requests pending so these tests stay focused on account
+    // card behavior.
     return new Promise<Response>(() => {});
   }) as unknown as typeof fetch;
 });

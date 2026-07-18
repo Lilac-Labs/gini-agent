@@ -24,7 +24,7 @@ import type { GoogleAccountStatus } from "@runtime/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
-import { useGoogleAuthMode, useInvalidate } from "@/lib/queries";
+import { useInvalidate } from "@/lib/queries";
 import { connectGoogleUrl, primaryAccountId, reloginPrimaryUrl } from "@/app/onboarding/_components/lib";
 
 // The multi-color Google "G" mark, shared by the account rows here and the
@@ -55,7 +55,7 @@ const SERVICE_META: Record<string, { label: string; description: string; icon: L
 };
 
 // The tagged Google accounts attached to this instance (including the
-// boot-registered hosted primary account), rendered as one card per account —
+// selected primary account), rendered as one card per account —
 // email + tag badge, connected date, sign-in status, granted-service rows —
 // with retag / disconnect / add-another flows. "Add account" navigates
 // straight into the same-tab browser OAuth round trip onboarding uses
@@ -63,14 +63,10 @@ const SERVICE_META: Record<string, { label: string; description: string; icon: L
 // through chat (the agent's request_google_account CTA points back HERE).
 export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus[] }) {
   const invalidate = useInvalidate();
-  // Which auth mode shapes the connect/reconnect URLs (edge → full sign-in
-  // flow, loopback → gateway PKCE start), and which row is the primary. The
-  // PRIMARY row's revoked state heals through reloginPrimaryUrl (signin intent
-  // re-persists the primary); a non-primary revoked row heals through the add
-  // flow, which identity-matches the existing registry row by email and
-  // rewrites its credential in place.
-  const authMode = useGoogleAuthMode();
-  const mode = authMode.data?.mode;
+  // The PRIMARY row's revoked state heals through reloginPrimaryUrl (signin
+  // intent re-persists the primary); a non-primary revoked row heals through
+  // the add flow, which identity-matches the existing registry row by email
+  // and rewrites its credential in place.
   const primaryId = primaryAccountId(accounts);
   // Account whose tag is being edited inline. Null when no row is in edit mode.
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -141,16 +137,15 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
             .filter(([, ok]) => ok)
             .map(([name]) => name);
           // The primary row, once revoked, heals only through the full sign-in
-          // flow — show a dedicated Reconnect button. Gated on the resolved
-          // auth mode so the click can never target the wrong URL.
+          // flow — show a dedicated Reconnect button.
           const canReloginPrimary =
-            account.id === primaryId && !account.signedIn && account.tokenRevoked === true && Boolean(mode);
+            account.id === primaryId && !account.signedIn && account.tokenRevoked === true;
           // A non-primary revoked row heals through the ADD flow: the user
           // re-authorizes the same account, and provisionTarget matches the
           // existing registry row by email and rewrites its credential in
-          // place — no duplicate row, no primary flip. Same auth-mode gate.
+          // place — no duplicate row, no primary flip.
           const canReconnectNonPrimary =
-            account.id !== primaryId && !account.signedIn && account.tokenRevoked === true && Boolean(mode);
+            account.id !== primaryId && !account.signedIn && account.tokenRevoked === true;
           const expanded = expandedAccountIds.has(account.id);
           const detailsId = `google-account-details-${account.id}`;
           return (
@@ -228,14 +223,14 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
                         {account.tokenRevoked === true ? "Reconnect needed" : "Sign-in expired"}
                       </span>
                     )}
-                    {canReloginPrimary && mode ? (
+                    {canReloginPrimary ? (
                       <Button
                         size="sm"
                         variant="outline"
                         aria-label={`Reconnect ${account.tag}`}
                         onClick={() =>
                           window.location.assign(
-                            reloginPrimaryUrl(mode, "/integrations?view=google", window.location.origin)
+                            reloginPrimaryUrl("/integrations?view=google", window.location.origin)
                           )
                         }
                       >
@@ -243,14 +238,14 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
                         Reconnect
                       </Button>
                     ) : null}
-                    {canReconnectNonPrimary && mode ? (
+                    {canReconnectNonPrimary ? (
                       <Button
                         size="sm"
                         variant="outline"
                         aria-label={`Reconnect ${account.tag}`}
                         onClick={() =>
                           window.location.assign(
-                            connectGoogleUrl(mode, "/integrations?view=google", window.location.origin)
+                            connectGoogleUrl("/integrations?view=google", window.location.origin)
                           )
                         }
                       >
@@ -336,9 +331,8 @@ export function GoogleAccountsCard({ accounts }: { accounts: GoogleAccountStatus
         variant="outline"
         size="sm"
         className="self-start"
-        disabled={!mode}
         onClick={() =>
-          mode && window.location.assign(connectGoogleUrl(mode, "/integrations?view=google", window.location.origin))
+          window.location.assign(connectGoogleUrl("/integrations?view=google", window.location.origin))
         }
       >
         <PlusIcon className="size-3.5" />

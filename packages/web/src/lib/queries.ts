@@ -315,11 +315,10 @@ export interface ProviderDescriptor {
   secrets?: { purposes: string[]; envBindings: Record<string, string> };
   hasProbe: boolean;
   hasDetect: boolean;
-  // Live result of the provider's credentialExternallySatisfied hook. For the
-  // hosted Google Workspace credential this is the boot-registered account
-  // (readGoogleAccounts non-empty) — the guest ships with its credential baked
-  // in, so no connector record is ever created and this bit is what keeps the
-  // Workspace skills active. deriveActivation mirrors the runtime gate with it:
+  // Live result of the provider's credentialExternallySatisfied hook. For
+  // Google Workspace this is an instance-bound account, so no connector record
+  // is required and this bit keeps the Workspace skills active.
+  // deriveActivation mirrors the runtime gate with it:
   // the fallthrough applies only when NO connector record with the credential
   // name exists — an existing record of any status (including disabled) keeps
   // the record-based gate.
@@ -370,19 +369,6 @@ export function useGoogleAccounts(options?: Partial<UseQueryOptions<GoogleAccoun
     queryFn: () => api<GoogleAccountStatus[]>("/google/accounts"),
     refetchInterval: 60_000,
     ...options
-  });
-}
-
-// Which add-a-Google-account flow this deployment supports (GET
-// /api/google/auth-mode): hosted guests are headless, so account adds go
-// through the edge's same-tab web OAuth ("edge"); everywhere else the
-// chat-driven gws loopback flow works ("loopback"). Fixed per deployment, so
-// the answer never goes stale.
-export function useGoogleAuthMode() {
-  return useQuery<{ mode: "edge" | "loopback" }>({
-    queryKey: ["google-auth-mode"],
-    queryFn: () => api<{ mode: "edge" | "loopback" }>("/google/auth-mode"),
-    staleTime: Infinity
   });
 }
 

@@ -9,7 +9,7 @@
 // unit-tested without a real `gws` binary on PATH.
 
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 
 import type { GoogleAccount, GoogleAccountStatus, Instance } from "../../types";
 import {
@@ -34,7 +34,6 @@ import {
 } from "../../state/google-account-bindings";
 import { now } from "../../state/ids";
 import { readOnboarding } from "../../state/onboarding";
-import { appendLog } from "../../state/trace";
 import { gwsSessionStatusForDir, invalidateGwsSessionDir, type GwsSessionStatus } from "./gws-session";
 import { buildAuthorizedUserCredential } from "./relay-workspace-client";
 
@@ -71,13 +70,6 @@ export async function listAccountsWithStatus(
   const instance = typeof instanceOrDeps === "string" ? instanceOrDeps : undefined;
   const deps = typeof instanceOrDeps === "string" ? maybeDeps : (instanceOrDeps ?? {});
   const statusForDir = deps.statusForDir ?? gwsSessionStatusForDir;
-  // Self-heal the hosted primary on read. A hosted guest resumes a shared base
-  // memory snapshot rather than cold-booting (hosted/infra/host/restore-guest.sh),
-  // so server.ts startup — where ensureHostedPrimaryAccount runs — never executes
-  // on resume, and the baked primary would otherwise never enter the registry.
-  // Registering here on the first accounts read (onboarding polls this) closes
-  // that gap. Idempotent, hosted-only, and a cheap no-op once the row exists.
-  await ensureHostedPrimaryAccount(instance);
   const accounts = readGoogleAccounts();
   const bindings = instance ? effectiveInstanceBindings(instance, accounts) : undefined;
   const attachedIds = new Set(bindings?.attachedAccountIds ?? []);
@@ -197,7 +189,7 @@ export function primaryGoogleAccountForInstance(instance: Instance): GoogleAccou
 // email to keep (fresh mint, or a reused row registered before its email was
 // known — listAccountsWithStatus back-fills live emails on reads but never
 // persists them) stores the caller's Google-verified email so later
-// email-based matching (provisionAccount) sees it. A non-empty stored email
+// email-based matching (saveGoogleAccountCredential) sees it. A non-empty stored email
 // always wins, and the probed path ignores the field (it captures the live
 // email itself).
 export async function registerAccount(
@@ -281,62 +273,27 @@ export function retagAccount(accountId: string, tag: string): void {
   retagGoogleAccount(accountId, tag);
 }
 
-// Which add-a-Google-account flow this deployment supports. A hosted guest is
-// headless — the gws Desktop-client loopback OAuth can't complete there
-// (nothing opens the consent URL, and the localhost redirect resolves to the
-// visitor's machine) — so account adds must go through the edge's same-tab
-// web-client OAuth ("edge"). Keyed on GINI_HOSTED=1, which the hosted
-// provisioner bakes into every guest's env unconditionally (unlike
-// GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE, which is only present when the login
-// granted Workspace scopes — a guest without it still can't do loopback).
-export type GoogleAuthMode = "edge" | "loopback";
-
-export function googleAuthMode(): GoogleAuthMode {
-  return process.env.GINI_HOSTED === "1" ? "edge" : "loopback";
-}
-
-export interface ProvisionAccountInput {
+export interface SaveGoogleAccountCredentialInput {
   clientId: string;
   clientSecret: string;
   refreshToken: string;
   email?: string;
   principal?: string;
   tag?: string;
-  // The hosted edge sign-in re-auth of the guest's OWN primary (vs an
-  // add-account of some other mailbox). A hosted guest's gws reads only the
-  // baked credential file (GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE pins it
-  // regardless of config dir), so a re-auth must overwrite THAT file to heal —
-  // which means landing in the boot-registered primary's config dir. A revoked
-  // primary can't be matched by principal/email/probe (dead token, no stored
-  // identity), so this flag routes the write to the baked-file dir directly.
-  primary?: boolean;
-  // A sign-in-intent OAuth (vs an add-account): the provisioned/matched
+  // A sign-in-intent OAuth (vs an add-account): the saved/matched
   // account becomes the persisted primary once the provision succeeds.
-  // Distinct from `primary` above, which only routes WHERE the credential
-  // lands and never touches the persisted primaryAccountId.
   makePrimary?: boolean;
   // Runtime instance whose local sign-in binding should be updated. The
   // machine-global registry remains only the reusable credential catalog.
   instance?: Instance;
 }
 
-// The config dir a hosted guest's baked gws credential lives in — the dir the
-// boot-registered primary account owns. undefined off a hosted guest (or when
-// the credentials env isn't set), so the primary-heal path is inert anywhere
-// the baked-file pinning doesn't apply.
-function hostedPrimaryConfigDir(): string | undefined {
-  const file = process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
-  return process.env.GINI_HOSTED === "1" && file ? dirname(file) : undefined;
-}
-
-// Persist an edge-provisioned Google account: write the standard
-// authorized_user credentials.json gws reads into a managed config dir, then
-// register it as a tagged account. The hosted edge exchanges the OAuth code
-// server-side (web-application client) and POSTs the refresh token here, so
-// the credential is trustworthy by construction — registration is trusted:true
-// (no gws probe; listAccountsWithStatus back-fills the live email/liveness).
-// Mirrors the relay grant path (defaultPersistWorkspaceGrant in
-// ../tunnel.ts), with the caller's OAuth client instead of the baked relay one.
+// Persist a Google account completed through the runtime's loopback OAuth
+// callback: write the standard authorized_user credentials.json gws reads into
+// a managed config dir, then register it as a tagged account. The callback has
+// already exchanged Google's authorization code and verified the account, so
+// registration is trusted:true (no second gws probe; listAccountsWithStatus
+// back-fills live email/liveness).
 //
 // IDEMPOTENT per identity: re-adding an account rewrites the credential of
 // the row it belongs to instead of minting a duplicate. Match order:
@@ -345,22 +302,20 @@ function hostedPrimaryConfigDir(): string | undefined {
 //   2. a row whose STORED email equals input.email case-insensitively;
 //   3. among rows with NO stored email, a best-effort live `gws auth status`
 //      probe per row matched on the live email (re-finds rows registered
-//      before their email was known — e.g. the hosted boot-registered
-//      primary; bounded to this rare provision path).
-// input.email is trustworthy for matching: both callers (the hosted edge's
-// add callback and the loopback web callback) take it from Google userinfo
-// fetched with the same exchange's access token, so the user just proved
-// ownership of that mailbox. On a match the credential lands in THAT row's
+//      before their email was known; bounded to this rare callback path).
+// input.email is trustworthy for matching because the loopback callback takes
+// it from Google userinfo fetched with the same exchange's access token. On a
+// match the credential lands in THAT row's
 // configDir, the principal is stamped, `provisioned` stays sticky, the
 // stored email is backfilled, and the row's tag and id are kept. A fresh
 // identity mints a new dir and defaults its tag to the email local-part,
 // uniquified case-insensitively against the existing tags so registration
 // can never throw on a collision.
-export async function provisionAccount(
-  input: ProvisionAccountInput,
+export async function saveGoogleAccountCredential(
+  input: SaveGoogleAccountCredentialInput,
   deps: AccountDeps = {}
 ): Promise<GoogleAccount> {
-  const existing = await provisionTarget(input, deps.statusForDir ?? gwsSessionStatusForDir);
+  const existing = await credentialTarget(input, deps.statusForDir ?? gwsSessionStatusForDir);
   const configDir = existing?.configDir ?? configDirForAccount(newAccountId());
   const tag =
     existing?.tag ??
@@ -380,11 +335,9 @@ export async function provisionAccount(
     { mode: 0o600 }
   );
   renameSync(tmp, path);
-  // A tier-3 encrypted `gws auth login` (credentials.enc) outranks the tier-4
-  // plaintext file just written (see normalizeHostedGwsEnv's precedence note),
-  // so a stale interactive login left in a reused dir would shadow every
-  // credential this flow delivers. The user just completed a fresh consent, so
-  // the plain credential is authoritative — drop the encrypted one.
+  // An encrypted `gws auth login` credential can outrank credentials.json, so
+  // a stale interactive login left in a reused dir would shadow the credential
+  // this flow just saved. The fresh consent is authoritative.
   rmSync(join(configDir, "credentials.enc"), { force: true });
   const account = await registerAccount({
     tag,
@@ -398,8 +351,8 @@ export async function provisionAccount(
   if (input.makePrimary && input.instance) {
     attachGoogleAccountToInstance(input.instance, account, { primary: true });
   } else if (input.makePrimary) {
-    // Legacy/test callers without an instance keep the old registry field. UI
-    // and hosted/runtime routes always pass an instance.
+    // Legacy/test callers without an instance keep the old registry field. The
+    // runtime callback always passes an instance.
     setPrimaryGoogleAccountId(account.id);
   } else if (input.instance) {
     attachGoogleAccountToInstance(input.instance, account, { primary: false });
@@ -407,23 +360,14 @@ export async function provisionAccount(
   return account;
 }
 
-// The registry row a provision should land in (see provisionAccount's match
+// The registry row a saved credential should land in (see
+// saveGoogleAccountCredential's match
 // order), or undefined when the identity is genuinely new.
-async function provisionTarget(
-  input: ProvisionAccountInput,
+async function credentialTarget(
+  input: SaveGoogleAccountCredentialInput,
   statusForDir: StatusFetcher
 ): Promise<GoogleAccount | undefined> {
   const accounts = readGoogleAccounts();
-  // A primary re-auth heals the baked credential file, so it always lands in the
-  // boot-registered primary's config dir (matched by that dir, not by identity —
-  // a revoked primary has no live email and the boot registration stored none).
-  // Scoped to input.primary so an add-account of a different mailbox never
-  // overwrites the primary.
-  if (input.primary) {
-    const bakedDir = hostedPrimaryConfigDir();
-    const primary = bakedDir ? accounts.find((a) => a.configDir === bakedDir) : undefined;
-    if (primary) return primary;
-  }
   if (input.principal) {
     const byPrincipal = accounts.find((a) => a.provisioned === true && a.principal === input.principal);
     if (byPrincipal) return byPrincipal;
@@ -442,64 +386,6 @@ async function provisionTarget(
     }
   }
   return undefined;
-}
-
-// Reconcile a hosted guest's baked gws env so per-account selection actually
-// takes effect. gws credential precedence (its README): GOOGLE_WORKSPACE_CLI_TOKEN
-// (tier 1) > GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE (tier 2) > encrypted login
-// (tier 3) > <GOOGLE_WORKSPACE_CLI_CONFIG_DIR>/credentials.json (tier 4). The
-// original hosted provisioning baked the tier-2 credentials file, which OUTRANKS
-// the per-account config dir the runtime selects — so every gws call read the
-// baked primary regardless of the chosen account, collapsing multi-account to one
-// identity. Normalize so CONFIG_DIR is the single selection mechanism process-wide:
-// point the default CONFIG_DIR at the baked primary's dir (a bare `gws` still
-// resolves the primary — "authenticated from boot"), then drop the tier-2 pin so a
-// per-account CONFIG_DIR override wins (tier 4). Idempotent and hosted-only. MUST
-// run at boot BEFORE ensureHostedPrimaryAccount and before any gws spawn: every
-// inherited-env child (the connector status probes, terminal_exec, gmail
-// draft/send, the auth preflight) then selects by CONFIG_DIR. New guests bake
-// CONFIG_DIR directly and never set the tier-2 pin, so this is a no-op there.
-export function normalizeHostedGwsEnv(env: NodeJS.ProcessEnv = process.env): void {
-  if (env.GINI_HOSTED !== "1") return;
-  const credentialsFile = env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
-  if (credentialsFile && !env.GOOGLE_WORKSPACE_CLI_CONFIG_DIR) {
-    env.GOOGLE_WORKSPACE_CLI_CONFIG_DIR = dirname(credentialsFile);
-  }
-  delete env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
-}
-
-// Register the credential a hosted guest boots with as the "primary" account.
-// provision-guest.sh bakes the sign-in's Workspace grant as an authorized_user
-// credentials file under the guest's primary config dir and points the default
-// GOOGLE_WORKSPACE_CLI_CONFIG_DIR at it (normalizeHostedGwsEnv converts a legacy
-// tier-2 credentials-file pin into CONFIG_DIR at boot, so hostedPrimaryConfigDir
-// resolves either way), but that dir never appears in the account registry on its
-// own — so the web's sign-in/accounts surfaces would show no account on a fresh
-// guest. Called once at gateway boot (AFTER normalizeHostedGwsEnv): registers the
-// baked dir as the trusted, tagged "primary" account when no registry row points at
-// it yet. When an instance is supplied, it also binds the account as that instance's
-// primary only if the instance has not already chosen one. Requires GINI_HOSTED
-// plus a resolvable baked config dir (hostedPrimaryConfigDir)
-// so a local machine that merely exports the gws env for its own use never grows a
-// surprise registry row. Returns the account when one was registered, undefined on
-// the (normal) no-op paths.
-export async function ensureHostedPrimaryAccount(instance?: Instance): Promise<GoogleAccount | undefined> {
-  const credentialsFile = process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
-  if (process.env.GINI_HOSTED !== "1" || !credentialsFile) return undefined;
-  const configDir = dirname(credentialsFile);
-  const existing = readGoogleAccounts().find((a) => a.configDir === configDir);
-  const account =
-    existing ?? (await registerAccount({ tag: uniqueAccountTag("primary"), configDir, trusted: true }));
-  if (instance) {
-    const before = readGoogleAccountBindings(instance);
-    attachGoogleAccountToInstance(instance, account, { primary: before?.primaryAccountId ? false : true });
-    if (existing && !before?.primaryAccountId) {
-      appendLog(instance, "google.hosted_primary.primary_bound", { id: account.id });
-    }
-  } else if (!readPrimaryGoogleAccountId()) {
-    setPrimaryGoogleAccountId(account.id);
-  }
-  return existing ? undefined : account;
 }
 
 function effectiveInstanceBindings(instance: Instance, accounts: GoogleAccount[]) {

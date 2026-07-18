@@ -600,7 +600,7 @@ function effectivePrimaryId(accounts: GoogleAccount[], instance?: Instance): str
   }
   const persisted = readPrimaryGoogleAccountId();
   if (persisted && accounts.some((account) => account.id === persisted)) return persisted;
-  return (accounts.find((account) => account.provisioned) ?? accounts[0])?.id;
+  return accounts[0]?.id;
 }
 
 // POST /api/routines/templates/<id>/install body: { timezone?, settings?,

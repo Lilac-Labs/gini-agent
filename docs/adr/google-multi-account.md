@@ -77,7 +77,7 @@ The pending verifier lives in process memory for ten minutes and is consumed
 once. Authorization codes, access tokens, refresh tokens, and client secrets
 are never logged or returned in errors. A configured
 `google-workspace-oauth` connector supplies the Desktop OAuth client when
-present; otherwise the distributable relay Desktop client is used.
+present; otherwise the bundled distributable Desktop client is used.
 
 The loopback restriction is intentional. Desktop OAuth redirects to the
 browser's own localhost, so a browser opened on another machine cannot safely

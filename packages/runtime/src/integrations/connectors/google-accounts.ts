@@ -35,7 +35,7 @@ import {
 import { now } from "../../state/ids";
 import { readOnboarding } from "../../state/onboarding";
 import { gwsSessionStatusForDir, invalidateGwsSessionDir, type GwsSessionStatus } from "./gws-session";
-import { buildAuthorizedUserCredential } from "./relay-workspace-client";
+import { buildAuthorizedUserCredential } from "./google-oauth-client";
 
 type StatusFetcher = (configDir: string) => Promise<GwsSessionStatus>;
 
@@ -45,15 +45,14 @@ interface AccountDeps {
 
 // The effective primary account id: the persisted primaryAccountId when it
 // still names a registered row (a stale id — e.g. left by an older build or a
-// hand-edited registry — is ignored, not healed), else the pre-primary
-// heuristic every client used to apply: first provisioned row ?? first row.
+// hand-edited registry — is ignored, not healed), else the first registry row.
 // Resolved server-side so every surface agrees on which account is primary.
 export function effectivePrimaryAccountId(
   accounts: GoogleAccount[] = readGoogleAccounts()
 ): string | undefined {
   const persisted = readPrimaryGoogleAccountId();
   if (persisted && accounts.some((a) => a.id === persisted)) return persisted;
-  return (accounts.find((a) => a.provisioned) ?? accounts[0])?.id;
+  return accounts[0]?.id;
 }
 
 // List registered accounts joined with live `gws auth status` (one spawn per
@@ -197,12 +196,9 @@ export async function registerAccount(
   deps: AccountDeps = {}
 ): Promise<GoogleAccount> {
   const statusForDir = deps.statusForDir ?? gwsSessionStatusForDir;
-  // A relay-provisioned credential is trustworthy by construction (the relay
-  // only issues a refresh token after a completed consent), and gws may not be
-  // installed yet at tunnel-connect time. trusted:true registers it without the
-  // live `gws auth status` probe; listAccountsWithStatus back-fills the live
-  // email/liveness on the next read. The probe stays mandatory for the
-  // adopt-an-arbitrary-dir callers, where liveness genuinely must be verified.
+  // The local OAuth callback has already verified the account with Google.
+  // trusted:true lets that path register without a second `gws auth status`
+  // probe. The probe stays mandatory for adopt-an-arbitrary-dir callers.
   let email = "";
   if (!input.trusted) {
     const status = await statusForDir(input.configDir);
@@ -215,19 +211,15 @@ export async function registerAccount(
   const tag =
     input.tag ?? existing?.tag ?? uniqueAccountTag(email.split("@")[0]?.trim() || "google");
   const managed = input.configDir.startsWith(googleAccountsRoot());
-  const provisioned = input.trusted || existing?.provisioned === true;
   const account: GoogleAccount = {
     id: managed ? basename(input.configDir) : existing?.id ?? newAccountId(),
     tag,
     email: input.trusted ? existing?.email || input.email || "" : email,
     configDir: input.configDir,
     addedAt: existing?.addedAt ?? now(),
-    // Relay-provisioned provenance is sticky: once set it stays set, so a later
-    // manual re-register of the same dir can't strip it. The grant path re-finds
-    // its account by these, not by the mutable tag. `principal` (the relay/Google
-    // subject id) keeps distinct identities in separate dirs.
-    ...(provisioned ? { provisioned: true } : {}),
-    ...(provisioned && (input.principal ?? existing?.principal)
+    // Google's immutable subject id keeps local OAuth refreshes idempotent even
+    // when the user retags an account or changes its email address.
+    ...(input.principal ?? existing?.principal
       ? { principal: input.principal ?? existing?.principal }
       : {})
   };
@@ -297,8 +289,8 @@ export interface SaveGoogleAccountCredentialInput {
 //
 // IDEMPOTENT per identity: re-adding an account rewrites the credential of
 // the row it belongs to instead of minting a duplicate. Match order:
-//   1. a provisioned row with the same immutable `principal` (Google sub) —
-//      never the mutable tag;
+//   1. a row with the same immutable `principal` (Google sub), never the
+//      mutable tag;
 //   2. a row whose STORED email equals input.email case-insensitively;
 //   3. among rows with NO stored email, a best-effort live `gws auth status`
 //      probe per row matched on the live email (re-finds rows registered
@@ -306,8 +298,8 @@ export interface SaveGoogleAccountCredentialInput {
 // input.email is trustworthy for matching because the loopback callback takes
 // it from Google userinfo fetched with the same exchange's access token. On a
 // match the credential lands in THAT row's
-// configDir, the principal is stamped, `provisioned` stays sticky, the
-// stored email is backfilled, and the row's tag and id are kept. A fresh
+// configDir, the principal and stored email are backfilled, and the row's tag
+// and id are kept. A fresh
 // identity mints a new dir and defaults its tag to the email local-part,
 // uniquified case-insensitively against the existing tags so registration
 // can never throw on a collision.
@@ -369,7 +361,7 @@ async function credentialTarget(
 ): Promise<GoogleAccount | undefined> {
   const accounts = readGoogleAccounts();
   if (input.principal) {
-    const byPrincipal = accounts.find((a) => a.provisioned === true && a.principal === input.principal);
+    const byPrincipal = accounts.find((a) => a.principal === input.principal);
     if (byPrincipal) return byPrincipal;
   }
   const email = input.email?.trim().toLowerCase();

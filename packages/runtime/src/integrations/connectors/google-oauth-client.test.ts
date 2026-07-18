@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
-  RELAY_WORKSPACE_CLIENT,
+  GOOGLE_DESKTOP_OAUTH_CLIENT,
   buildAuthorizedUserCredential
-} from "./relay-workspace-client";
+} from "./google-oauth-client";
 
-describe("RELAY_WORKSPACE_CLIENT", () => {
+describe("GOOGLE_DESKTOP_OAUTH_CLIENT", () => {
   test("carries the Desktop client id and secret", () => {
-    expect(RELAY_WORKSPACE_CLIENT.clientId).toMatch(/\.apps\.googleusercontent\.com$/);
-    expect(RELAY_WORKSPACE_CLIENT.clientSecret).toMatch(/^GOCSPX-/);
+    expect(GOOGLE_DESKTOP_OAUTH_CLIENT.clientId).toMatch(/\.apps\.googleusercontent\.com$/);
+    expect(GOOGLE_DESKTOP_OAUTH_CLIENT.clientSecret).toMatch(/^GOCSPX-/);
   });
 });
 
@@ -16,8 +16,8 @@ describe("buildAuthorizedUserCredential", () => {
     const parsed = JSON.parse(buildAuthorizedUserCredential("rt-123")) as Record<string, string>;
     expect(parsed).toEqual({
       type: "authorized_user",
-      client_id: RELAY_WORKSPACE_CLIENT.clientId,
-      client_secret: RELAY_WORKSPACE_CLIENT.clientSecret,
+      client_id: GOOGLE_DESKTOP_OAUTH_CLIENT.clientId,
+      client_secret: GOOGLE_DESKTOP_OAUTH_CLIENT.clientSecret,
       refresh_token: "rt-123"
     });
   });

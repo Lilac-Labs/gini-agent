@@ -213,7 +213,7 @@ describe("registerAccount", () => {
     expect(account.id).toBe("gacct_trust01");
     expect(account.tag).toBe("workspace");
     expect(account.email).toBe(""); // back-filled later by listAccountsWithStatus
-    expect(account.provisioned).toBe(true); // immutable relay provenance
+    expect(account).not.toHaveProperty("provisioned");
     expect(readGoogleAccounts()).toHaveLength(1);
   });
 
@@ -223,8 +223,8 @@ describe("registerAccount", () => {
       { tag: "workspace", configDir },
       { statusForDir: async () => signedIn("known@example.com") }
     );
-    // A later trusted re-register (e.g. re-provision) must not blank the email
-    // that the earlier live probe captured.
+    // A later verified re-register must not blank the email that the earlier
+    // live probe captured.
     const again = await registerAccount(
       { tag: "workspace", configDir, trusted: true },
       {
@@ -237,25 +237,15 @@ describe("registerAccount", () => {
     expect(readGoogleAccounts()).toHaveLength(1);
   });
 
-  test("a non-trusted register does NOT mark an account provisioned", async () => {
-    const account = await registerAccount(
-      { tag: "personal", configDir: "/tmp/gws-user" },
-      { statusForDir: async () => signedIn("me@example.com") }
-    );
-    expect(account.provisioned).toBeUndefined();
-  });
-
-  test("the provisioned flag is sticky: a later non-trusted re-register keeps it", async () => {
+  test("the Google principal is sticky across a later probed re-register", async () => {
     const configDir = configDirForAccount("gacct_trust03");
-    const first = await registerAccount({ tag: "workspace", configDir, trusted: true });
-    expect(first.provisioned).toBe(true);
-    // Re-register the SAME dir on the probed path (e.g. a manual retag flow):
-    // provenance must not be strippable.
+    const first = await registerAccount({ tag: "workspace", configDir, trusted: true, principal: "sub-1" });
+    expect(first.principal).toBe("sub-1");
     const again = await registerAccount(
       { tag: "renamed", configDir },
       { statusForDir: async () => signedIn("me@example.com") }
     );
-    expect(again.provisioned).toBe(true);
+    expect(again.principal).toBe("sub-1");
     expect(again.tag).toBe("renamed");
   });
 });
@@ -365,14 +355,14 @@ describe("listAccountsWithStatus", () => {
     expect(list.find((a) => a.id === first.id)?.primary).toBeUndefined();
     expect(effectivePrimaryAccountId()).toBe(first.id);
 
-    const provisioned = await registerAccount({
+    const second = await registerAccount({
       tag: "workspace",
       configDir: configDirForAccount("gacct_prov0001"),
       trusted: true
     });
     list = await listAccountsWithStatus({ statusForDir: async () => signedOut() });
-    expect(effectivePrimaryAccountId()).toBe(provisioned.id);
-    expect(list.find((a) => a.id === provisioned.id)?.primary).toBeUndefined();
+    expect(effectivePrimaryAccountId()).toBe(first.id);
+    expect(list.find((a) => a.id === second.id)?.primary).toBeUndefined();
     expect(list.find((a) => a.id === first.id)?.primary).toBeUndefined();
   });
 
@@ -505,7 +495,6 @@ describe("saveGoogleAccountCredential", () => {
     const account = await saveGoogleAccountCredential(input);
 
     expect(account.tag).toBe("Ada.Lovelace");
-    expect(account.provisioned).toBe(true);
     expect(account.principal).toBe("sub-ada");
     // The Google-verified email is stored, so later re-adds can match on it.
     expect(account.email).toBe(input.email);
@@ -537,7 +526,7 @@ describe("saveGoogleAccountCredential", () => {
 
   // A tier-3 encrypted `gws auth login` (credentials.enc) outranks the tier-4
   // credentials.json this flow writes; left in a reused dir it would shadow
-  // every reconnect, so provisioning must remove it.
+    // every reconnect, so the local OAuth save must remove it.
   test("re-saving removes a stale encrypted login left in the reused dir", async () => {
     const first = await saveGoogleAccountCredential(input);
     writeFileSync(join(first.configDir, "credentials.enc"), "stale-encrypted-login");
@@ -579,20 +568,16 @@ describe("saveGoogleAccountCredential", () => {
   });
 
   test("a stored-email match (case-insensitive) refreshes that row in place", async () => {
-    // A chat-flow row: registered via the probed path, so it has a stored
-    // email but no principal and no provisioned flag.
+    // A manually adopted row has a stored email but no principal.
     const row = await registerAccount(
       { tag: "work", configDir: configDirForAccount("gacct_chat0001") },
       { statusForDir: async () => signedIn("Ada.Lovelace@example.com") }
     );
-    expect(row.provisioned).toBeUndefined();
-
     const account = await saveGoogleAccountCredential({ ...input, email: "ada.lovelace@EXAMPLE.com" });
 
     expect(account.id).toBe(row.id);
     expect(account.configDir).toBe(row.configDir);
     expect(account.tag).toBe("work");
-    expect(account.provisioned).toBe(true);
     expect(account.principal).toBe("sub-ada");
     // Backfill only fills empties: the already-captured stored email wins.
     expect(account.email).toBe("Ada.Lovelace@example.com");
@@ -606,7 +591,7 @@ describe("saveGoogleAccountCredential", () => {
       { tag: "other", configDir: configDirForAccount("gacct_other001") },
       { statusForDir: async () => signedIn("other@example.com") }
     );
-    // A trusted row created before its email was recorded.
+    // A verified row created before its email was recorded.
     const pendingAccount = await registerAccount({
       tag: "primary",
       configDir: configDirForAccount("gacct_boot0001"),
@@ -625,7 +610,6 @@ describe("saveGoogleAccountCredential", () => {
     expect(probed).toEqual([pendingAccount.configDir]);
     expect(account.id).toBe(pendingAccount.id);
     expect(account.tag).toBe("primary");
-    expect(account.provisioned).toBe(true);
     expect(account.principal).toBe("sub-ada");
     expect(account.email).toBe(input.email); // backfilled from the verified email
     const cred = JSON.parse(readFileSync(join(pendingAccount.configDir, "credentials.json"), "utf8"));

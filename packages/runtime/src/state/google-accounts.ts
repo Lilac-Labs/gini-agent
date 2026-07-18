@@ -57,7 +57,10 @@ export function readGoogleAccounts(): GoogleAccount[] {
     if (!parsed || typeof parsed !== "object") return [];
     const accounts = (parsed as { accounts?: unknown }).accounts;
     if (!Array.isArray(accounts)) return [];
-    return accounts.filter(isGoogleAccount);
+    return accounts.flatMap((value) => {
+      const account = normalizeGoogleAccount(value);
+      return account ? [account] : [];
+    });
   } catch {
     return [];
   }
@@ -88,16 +91,24 @@ export function setPrimaryGoogleAccountId(accountId: string | undefined): void {
   writeRegistry(readGoogleAccounts(), accountId);
 }
 
-function isGoogleAccount(value: unknown): value is GoogleAccount {
-  if (!value || typeof value !== "object") return false;
+function normalizeGoogleAccount(value: unknown): GoogleAccount | undefined {
+  if (!value || typeof value !== "object") return undefined;
   const o = value as Record<string, unknown>;
-  return (
-    typeof o.id === "string" &&
-    typeof o.tag === "string" &&
-    typeof o.email === "string" &&
-    typeof o.configDir === "string" &&
-    typeof o.addedAt === "string"
-  );
+  if (
+    typeof o.id !== "string" ||
+    typeof o.tag !== "string" ||
+    typeof o.email !== "string" ||
+    typeof o.configDir !== "string" ||
+    typeof o.addedAt !== "string"
+  ) return undefined;
+  return {
+    id: o.id,
+    tag: o.tag,
+    email: o.email,
+    configDir: o.configDir,
+    addedAt: o.addedAt,
+    ...(typeof o.principal === "string" ? { principal: o.principal } : {})
+  };
 }
 
 // Atomic registry write: mkdir -p root, write a temp file in the same dir, then

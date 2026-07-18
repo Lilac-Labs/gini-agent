@@ -36,8 +36,7 @@ const account = (id: string, email: string): GoogleAccount => ({
   email,
   configDir: `/tmp/${id}`,
   addedAt: "2026-07-10T00:00:00.000Z",
-  principal: `sub-${id}`,
-  provisioned: true
+  principal: `sub-${id}`
 });
 
 describe("google account bindings", () => {

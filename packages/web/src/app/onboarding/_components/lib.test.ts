@@ -278,24 +278,16 @@ describe("primaryAccountId", () => {
     expect(primaryAccountId([])).toBeUndefined();
   });
 
-  test("first account is primary when none is provisioned", () => {
+  test("first account is the fallback primary", () => {
     const accounts = [buildAccount({ id: "gacct_a" }), buildAccount({ id: "gacct_b" })];
     expect(primaryAccountId(accounts)).toBe("gacct_a");
   });
 
-  test("a provisioned account beats registry order", () => {
+  test("the server-resolved primary flag beats the first-account fallback", () => {
+    // The persisted primary (flipped by a sign-in-intent OAuth) is the
+    // server's resolution.
     const accounts = [
       buildAccount({ id: "gacct_a" }),
-      buildAccount({ id: "gacct_b", provisioned: true })
-    ];
-    expect(primaryAccountId(accounts)).toBe("gacct_b");
-  });
-
-  test("the server-resolved primary flag beats the provisioned/first heuristic", () => {
-    // The persisted primary (flipped by a sign-in-intent OAuth) wins even
-    // over a provisioned row — the flag IS the server's resolution.
-    const accounts = [
-      buildAccount({ id: "gacct_a", provisioned: true }),
       buildAccount({ id: "gacct_b", primary: true })
     ];
     expect(primaryAccountId(accounts)).toBe("gacct_b");
@@ -307,11 +299,11 @@ describe("accountsPrimaryFirst", () => {
     expect(accountsPrimaryFirst([])).toEqual([]);
   });
 
-  test("a provisioned primary moves to the front; the rest keep registry order", () => {
+  test("the resolved primary moves to the front; the rest keep registry order", () => {
     const accounts = [
       buildAccount({ id: "gacct_a" }),
       buildAccount({ id: "gacct_b" }),
-      buildAccount({ id: "gacct_c", provisioned: true })
+      buildAccount({ id: "gacct_c", primary: true })
     ];
     expect(accountsPrimaryFirst(accounts).map((a) => a.id)).toEqual(["gacct_c", "gacct_a", "gacct_b"]);
     // The input array is untouched (no in-place sort).
@@ -386,12 +378,12 @@ describe("signInCta", () => {
     ).toBe("connect");
   });
 
-  test("reconnect keys off the PRIMARY row: a revoked provisioned primary wins over a signed-in secondary", () => {
-    // The provisioned account is primary (see primaryAccountId); its revoked
-    // state drives the CTA even though another account is signed in.
+  test("reconnect keys off the resolved primary row, not a signed-in secondary", () => {
+    // The primary account's revoked state drives the CTA even though another
+    // account is signed in.
     const accounts = [
       buildAccount({ id: "gacct_secondary", signedIn: true }),
-      buildAccount({ id: "gacct_primary", provisioned: true, signedIn: false, tokenRevoked: true })
+      buildAccount({ id: "gacct_primary", primary: true, signedIn: false, tokenRevoked: true })
     ];
     expect(signInCta(accounts)).toBe("reconnect");
   });

@@ -133,7 +133,7 @@ export function splitEmailSegments(text: string): Array<{ text: string; email: b
 // Credentials belonging only to other instances are omitted by the server.
 export function primaryAccountId(accounts: GoogleAccountStatus[]): string | undefined {
   const flagged = accounts.find((account) => account.primary);
-  return (flagged ?? accounts.find((account) => account.provisioned) ?? accounts[0])?.id;
+  return (flagged ?? accounts[0])?.id;
 }
 
 // Step-4 row order: the primary account renders first, the remaining rows
@@ -173,7 +173,7 @@ export function reloginPrimaryUrl(returnTo: string, origin: string): string {
 }
 
 // Which sign-in call-to-action the entry step shows, driven by the PRIMARY
-// account's state (the relay-provisioned account, else the oldest — see
+// account's state (the server-resolved primary, else the oldest — see
 // primaryAccountId):
 // - "reconnect": the primary exists but its sign-in was REVOKED (signed out and
 //   tokenRevoked). The user must re-authorize the SAME account via the relogin

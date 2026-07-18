@@ -2403,17 +2403,8 @@ export interface GoogleAccount {
   email: string;       // signed-in email from `gws auth status` .user ("" until known)
   configDir: string;   // absolute path to this account's gws config dir
   addedAt: string;     // ISO
-  // Immutable provenance: true only for an account minted by the relay-provisioned
-  // grant path (registerAccount with trusted:true). Lets that path re-find ITS
-  // account idempotently without keying off the mutable display tag — so a user
-  // retagging it, or independently tagging another account "workspace", never
-  // redirects or clobbers the provisioned credential. Absent ⇒ user/manual account.
-  provisioned?: boolean;
-  // The relay/Google principal (the OAuth subject id, relay Session.account) the
-  // provisioned credential belongs to. Set only alongside `provisioned`. Re-find
-  // matches on this, so two different identities provisioned on one machine
-  // (e.g. distinct instances) each keep their OWN dir instead of one clobbering
-  // the other's credential. Absent ⇒ user/manual account.
+  // Google's immutable OAuth subject id. Local OAuth refreshes match on this so
+  // retagging an account or changing its email never mints a duplicate row.
   principal?: string;
 }
 
@@ -2449,7 +2440,7 @@ export interface GoogleAccountStatus extends GoogleAccount {
   message: string;
   // True on exactly one row: the effective primary account (the persisted
   // primaryAccountId when it still names a registered account, else the
-  // first provisioned row, else the first row). Server-resolved so every
+  // first row). Server-resolved so every
   // client agrees on which account is "the" account.
   primary?: boolean;
   // True when this account is attached to the current runtime instance. Every

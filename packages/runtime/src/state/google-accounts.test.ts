@@ -123,6 +123,17 @@ describe("google account registry", () => {
     expect(readGoogleAccounts()).toEqual([]);
   });
 
+  test("read drops legacy hosted provenance fields", () => {
+    const a = account({ principal: "sub-local" });
+    mkdirSync(googleAccountsRoot(), { recursive: true });
+    writeFileSync(
+      googleAccountsRegistryPath(),
+      JSON.stringify({ version: 1, accounts: [{ ...a, provisioned: true, edgeOwner: "old" }] }),
+      "utf8"
+    );
+    expect(readGoogleAccounts()).toEqual([a]);
+  });
+
   test("writeGoogleAccounts round-trips the registry shape", () => {
     const accts = [account({ tag: "a", configDir: "/tmp/a" }), account({ tag: "b", configDir: "/tmp/b" })];
     writeGoogleAccounts(accts);

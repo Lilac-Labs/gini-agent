@@ -31,7 +31,7 @@ import { ensureLabelProfile } from "../../runtime/label-discovery";
 import { readState } from "../../state";
 import { bindingsForCredentials, resolveConnectorSecret } from "./index";
 import { primaryGoogleAccountForInstance, saveGoogleAccountCredential } from "./google-accounts";
-import { RELAY_WORKSPACE_CLIENT, type RelayWorkspaceClient } from "./relay-workspace-client";
+import { GOOGLE_DESKTOP_OAUTH_CLIENT, type GoogleOAuthClient } from "./google-oauth-client";
 
 const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -131,7 +131,7 @@ export function parseLoopbackOrigin(raw: string | null | undefined): string | nu
 // must repeat it byte-for-byte) — a new start supersedes the old record, and
 // the TTL bounds how long an abandoned consent tab stays redeemable. Lost on
 // restart by design: the registry is the durable record.
-interface PendingLogin extends RelayWorkspaceClient {
+interface PendingLogin extends GoogleOAuthClient {
   state: string;
   verifier: string;
   returnTo: string;
@@ -264,11 +264,11 @@ export async function handleGoogleLoginWebCallback(
 // the connector secret is decrypted (and its connector.secret.use audit row
 // written) a single time per login rather than once per leg. The
 // google-workspace-oauth connector's client wins when BOTH vars resolve;
-// otherwise the baked relay Desktop client, whose secret is by-design
-// distributable (see ./relay-workspace-client.ts). The pair is atomic —
-// mixing a half-resolved connector client with the relay's could never
+// otherwise the bundled Desktop client, whose secret is distributable by
+// design (see ./google-oauth-client.ts). The pair is atomic — mixing a
+// half-resolved connector client with the bundled client's could never
 // complete an exchange.
-async function resolveOAuthClient(config: RuntimeConfig): Promise<RelayWorkspaceClient> {
+async function resolveOAuthClient(config: RuntimeConfig): Promise<GoogleOAuthClient> {
   const bindings = bindingsForCredentials(readState(config.instance), [GOOGLE_WORKSPACE_CREDENTIAL]);
   const id = bindings.GOOGLE_WORKSPACE_CLI_CLIENT_ID;
   const secret = bindings.GOOGLE_WORKSPACE_CLI_CLIENT_SECRET;
@@ -277,7 +277,7 @@ async function resolveOAuthClient(config: RuntimeConfig): Promise<RelayWorkspace
     const clientSecret = await resolveConnectorSecret(config, secret.credentialId, secret.purpose);
     if (clientId && clientSecret) return { clientId, clientSecret };
   }
-  return RELAY_WORKSPACE_CLIENT;
+  return GOOGLE_DESKTOP_OAUTH_CLIENT;
 }
 
 // Token exchange for the runtime-owned PKCE flow.

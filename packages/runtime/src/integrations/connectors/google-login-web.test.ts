@@ -13,7 +13,7 @@ import { join } from "node:path";
 import type { RuntimeConfig } from "../../types";
 import { getGoogleAccountBindings } from "../../state/google-account-bindings";
 import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../../state/google-accounts";
-import { RELAY_WORKSPACE_CLIENT } from "./relay-workspace-client";
+import { GOOGLE_DESKTOP_OAUTH_CLIENT } from "./google-oauth-client";
 import {
   DEFAULT_LOGIN_RETURN_TO,
   LOGIN_SCOPES,
@@ -158,8 +158,8 @@ describe("startGoogleLoginWeb", () => {
     expect(location.origin).toBe("https://accounts.google.com");
     expect(location.pathname).toBe("/o/oauth2/v2/auth");
     const params = location.searchParams;
-    // No connector in the scratch state — the baked relay Desktop client.
-    expect(params.get("client_id")).toBe(RELAY_WORKSPACE_CLIENT.clientId);
+    // No connector in the scratch state — the bundled Desktop client.
+    expect(params.get("client_id")).toBe(GOOGLE_DESKTOP_OAUTH_CLIENT.clientId);
     expect(params.get("redirect_uri")).toBe(`${ORIGIN}/api/runtime/google/login/callback`);
     expect(params.get("response_type")).toBe("code");
     expect(params.get("access_type")).toBe("offline");
@@ -246,17 +246,16 @@ describe("handleGoogleLoginWebCallback", () => {
     const body = google.exchangeBodies[0]!;
     expect(body.get("grant_type")).toBe("authorization_code");
     expect(body.get("code")).toBe("auth-code-1");
-    expect(body.get("client_id")).toBe(RELAY_WORKSPACE_CLIENT.clientId);
-    expect(body.get("client_secret")).toBe(RELAY_WORKSPACE_CLIENT.clientSecret);
+    expect(body.get("client_id")).toBe(GOOGLE_DESKTOP_OAUTH_CLIENT.clientId);
+    expect(body.get("client_secret")).toBe(GOOGLE_DESKTOP_OAUTH_CLIENT.clientSecret);
     expect(body.get("redirect_uri")).toBe(consent.searchParams.get("redirect_uri") ?? "");
     const digest = createHash("sha256").update(body.get("code_verifier") ?? "").digest("base64url");
     expect(digest).toBe(consent.searchParams.get("code_challenge") ?? "");
 
-    // Registered as trusted and principal-keyed, with a tag from the email
+    // Registered as verified and principal-keyed, with a tag from the email
     // local-part and a 0600 authorized_user credential.
     const accounts = readGoogleAccounts();
     expect(accounts).toHaveLength(1);
-    expect(accounts[0]!.provisioned).toBe(true);
     expect(accounts[0]!.principal).toBe("sub-1");
     expect(accounts[0]!.tag).toBe("ada");
     const credPath = join(accounts[0]!.configDir, "credentials.json");
@@ -264,8 +263,8 @@ describe("handleGoogleLoginWebCallback", () => {
     const cred = JSON.parse(readFileSync(credPath, "utf8"));
     expect(cred).toEqual({
       type: "authorized_user",
-      client_id: RELAY_WORKSPACE_CLIENT.clientId,
-      client_secret: RELAY_WORKSPACE_CLIENT.clientSecret,
+      client_id: GOOGLE_DESKTOP_OAUTH_CLIENT.clientId,
+      client_secret: GOOGLE_DESKTOP_OAUTH_CLIENT.clientSecret,
       refresh_token: "rt-1"
     });
 
@@ -297,7 +296,7 @@ describe("handleGoogleLoginWebCallback", () => {
     expect(cred.refresh_token).toBe("rt-2");
   });
 
-  test("signin intent makes the provisioned account the instance primary; add/default never does", async () => {
+  test("signin intent makes the connected account the instance primary; add/default never does", async () => {
     // Default (add) intent: no primary persisted.
     const addConsent = await startedLocation("/onboarding");
     stubGoogle({});

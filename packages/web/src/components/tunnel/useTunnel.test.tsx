@@ -9,14 +9,7 @@
 import { afterEach, beforeEach, describe, expect, jest, mock, test } from "bun:test";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { TunnelState } from "./types";
-
-// A sibling test file calls `mock.module("./useTunnel", ...)`, which Bun keys on
-// the resolved specifier and applies process-wide. Loading the real source under
-// a cache-busting query resolves to a distinct registry key, so this file always
-// exercises the real hook regardless of which test file ran first. The path is in
-// a variable so TypeScript doesn't try to resolve the (runtime-only) query suffix.
-const realModulePath = "./useTunnel?real";
-const { useTunnel } = (await import(realModulePath)) as typeof import("./useTunnel");
+import { useTunnel } from "./useTunnel";
 
 const BASE = "/api/runtime/tunnel";
 const POLL_TICK = 1500;

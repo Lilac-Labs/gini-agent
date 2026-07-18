@@ -779,8 +779,8 @@ export async function pauseCrmExtraction(config: RuntimeConfig): Promise<CrmExtr
   return crmExtractionStatus(config);
 }
 
-// Master switch off: stops the loop like pause, and additionally blocks
-// start, the onboarding autostart, and the boot reconcile until enabled.
+// Master switch off: stops the loop like pause and blocks explicit starts
+// until the user enables extraction again.
 export async function disableCrmExtraction(config: RuntimeConfig): Promise<CrmExtractionStatus> {
   const instance = config.instance;
   setCrmRunState(instance, "disabled");
@@ -815,8 +815,8 @@ function parseCachedMessages(raw: string | null): CrmMail[] | undefined {
   }
 }
 
-// Master switch back on: returns a disabled pipeline to idle (it does NOT
-// start it — POST start, or the next onboarding autostart, does that).
+// Master switch back on: returns a disabled pipeline to idle. Starting mail
+// work remains an explicit POST start action.
 export async function enableCrmExtraction(config: RuntimeConfig): Promise<CrmExtractionStatus> {
   const instance = config.instance;
   if (getCrmRunState(instance) === "disabled") {
@@ -834,19 +834,6 @@ export function reconcileCrmExtraction(config: RuntimeConfig): void {
   if (getCrmRunState(instance) !== "running") return;
   setCrmRunState(instance, "paused");
   appendLog(instance, "crm.extraction.paused", { reason: "local_boot" });
-}
-
-// Onboarding hook: fire-and-forget autostart once the user finishes
-// onboarding with a Google account connected. Never throws into the
-// onboarding path.
-export function autostartCrmExtractionAfterOnboarding(config: RuntimeConfig): void {
-  if (getCrmRunState(config.instance) !== "idle") return;
-  if (resolveMailAccounts(config.instance).length === 0) return;
-  void startCrmExtraction(config).catch((error) => {
-    appendLog(config.instance, "crm.extraction.autostart_failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  });
 }
 
 // Test seam: await the current loop's exit after a pause (keeps tests

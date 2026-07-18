@@ -118,7 +118,7 @@ import { RateLimiter } from "./lib/rate-limit";
 import { signUploadParams, verifyUploadSignature } from "./lib/upload-signing";
 import { getSetupStatus, removeSetupProvider, setSetupProvider } from "./runtime/setup-api";
 import { ensureLabelProfile } from "./runtime/label-discovery";
-import { applyOnboardingRoutines, autostartCrmForCompletedOnboarding, getOnboarding, patchOnboarding, startOnboardingScan } from "./runtime/onboarding";
+import { applyOnboardingRoutines, getOnboarding, patchOnboarding, startOnboardingScan } from "./runtime/onboarding";
 import { installRoutineTemplate, listRoutineTemplates, uninstallRoutineTemplate } from "./runtime/routine-templates";
 import { createSkillFromInput, getSkill, grantConnectorToSkill, installSkillFromBody, listSkills, reloadSkills, rollbackSkill, searchSkills, setSkillStatus, testSkill, updateSkill, validateSkills } from "./capabilities/skills";
 import { createChat, deleteChat, getChatSession, getOrCreateAgentChat, listChatSessions, removePendingChatMessageById, renameChat, retryFailedContainerRun, startTaskContainer, submitChatMessage, submitThreadReply, syncChatTaskResult } from "./execution/chat";
@@ -2182,10 +2182,6 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       const adopt = payload.adopt === true;
       try {
         const account = await registerAccountForInstance(config.instance, { tag, configDir, adopt });
-        // A later account addition on a completed instance should join People
-        // immediately. First-login registration stays quiet until the wizard's
-        // final step, after onboarding has primed its recent-thread snapshot.
-        autostartCrmForCompletedOnboarding(config);
         // A fresh sign-in is also the moment to digest the account's existing
         // Gmail labels into per-account Auto-inbox defaults (fire-and-forget;
         // see src/runtime/label-discovery.ts).
@@ -2198,9 +2194,6 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     ["POST", /^\/api\/google\/accounts\/([^/]+)\/use$/, async (_request, params) => {
       try {
         const account = await useAccountForInstance(config.instance, params[0]);
-        // Same completed-only gate as registration: switching the primary
-        // during first-run onboarding must not race its mailbox scan.
-        autostartCrmForCompletedOnboarding(config);
         return json(account);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to use account";

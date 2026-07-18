@@ -9,7 +9,6 @@ import {
   __setCrmMailSourceForTests,
   __setCrmMailSourcesForTests,
   CRM_CURATOR_SUBAGENT_NAME,
-  autostartCrmExtractionAfterOnboarding,
   crmExtractionStatus,
   disableCrmExtraction,
   enableCrmExtraction,
@@ -984,48 +983,6 @@ describe("crm-extractor", () => {
     expect(attempts).toBeGreaterThanOrEqual(1);
   }, 120_000);
 
-  test("onboarding autostart: fires when idle with a source, never otherwise, and survives failure", async () => {
-    // (a) idle + source → starts.
-    const a = makeConfig("crmx-auto-a");
-    await install(a);
-    setEchoToolCallingResponse({ provider: normalizeProvider(a.provider), text: "ok", toolCalls: [], finishReason: "stop" });
-    setCrmMeta(a.instance, "self_email", SELF);
-    __setCrmMailSourceForTests(a.instance, mutableSource([]));
-    autostartCrmExtractionAfterOnboarding(a);
-    await until("autostart flips to running", () => getCrmRunState(a.instance) === "running");
-    await pauseCrmExtraction(a);
-    await __awaitCrmLoopExitForTests(a.instance);
-
-    // (b) not idle (paused) → untouched.
-    autostartCrmExtractionAfterOnboarding(a);
-    await Bun.sleep(100);
-    expect(getCrmRunState(a.instance)).toBe("paused");
-
-    // (c) idle + no source anywhere → stays idle.
-    const c = makeConfig("crmx-auto-c");
-    await install(c);
-    const prevHome = process.env.HOME;
-    process.env.HOME = `${ROOT}/empty-home-c`;
-    try {
-      autostartCrmExtractionAfterOnboarding(c);
-      await Bun.sleep(100);
-      expect(getCrmRunState(c.instance)).toBe("idle");
-    } finally {
-      process.env.HOME = prevHome;
-    }
-
-    // (d) start throws inside the autostart → caught, state stays idle.
-    const d = makeConfig("crmx-auto-d");
-    await install(d);
-    setCrmMeta(d.instance, "self_email", SELF);
-    __setCrmMailSourceForTests(d.instance, mutableSource([]));
-    dbExecute(d.instance, "agent_default", "DROP TABLE contacts");
-    dbExecute(d.instance, "agent_default", "CREATE TABLE contacts (x TEXT)");
-    autostartCrmExtractionAfterOnboarding(d);
-    await Bun.sleep(300);
-    expect(getCrmRunState(d.instance)).toBe("idle"); // failed start left no state behind
-    __setCrmMailSourceForTests(d.instance, undefined);
-  }, 30_000);
 
   test("start is idempotent: a second start joins the running loop instead of duplicating it", async () => {
     const instance = "crmx-double-start";
@@ -1096,10 +1053,9 @@ describe("crm-extractor", () => {
     messages.push(mail({ id: "d2", threadId: "T-d2", date: Date.now(), from: { address: SELF }, to: [{ address: "x@z.com" }] }));
     await Bun.sleep(300);
     expect(crmQueueCounts(instance).done).toBe(1);
-    // Start refuses, pause is a no-op, autostart and reconcile stay away.
+    // Start refuses, pause is a no-op, and boot reconcile stays away.
     expect(startCrmExtraction(config)).rejects.toThrow(/disabled/);
     expect((await pauseCrmExtraction(config)).runState).toBe("disabled");
-    autostartCrmExtractionAfterOnboarding(config);
     reconcileCrmExtraction(config);
     await Bun.sleep(200);
     expect(getCrmRunState(instance)).toBe("disabled");

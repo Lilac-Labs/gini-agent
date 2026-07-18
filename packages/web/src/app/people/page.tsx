@@ -121,9 +121,8 @@ export default function PeoplePage() {
     },
   });
 
-  // Manual sync. Posts /crm/extraction/start, which starts an idle pipeline
-  // (users onboarded before autostart, or who connected mail later), resumes a
-  // paused one, or wakes a running one to poll for new mail now instead of
+  // Manual sync. Posts /crm/extraction/start, which starts an idle pipeline,
+  // resumes a paused one, or wakes a running one to poll for new mail instead of
   // waiting out the watcher interval. The returned status seeds the cache so
   // the indicator reflects the new state without waiting for the poll.
   const syncExtraction = useMutation({

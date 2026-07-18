@@ -96,9 +96,8 @@ and the persisted run state + mail cursor.
   fetch routing ('' = legacy → primary), and the self set spans all account
   emails — the user speaking from any of their addresses is engagement.
   Sources are re-resolved every loop pass, so an account connected while
-  the pipeline runs gets its own backfill on the next iteration; account
-  registration/provisioning also kick the onboarding autostart for
-  never-run pipelines.
+  the pipeline runs gets its own backfill on the next iteration. Connecting
+  an account never starts mailbox work on its own.
 - **Loop phases.** (0) one-time backfill seed per account: full mailbox
   list → thread queue + cursor; (1) ingest: fetch+analyze pending threads, 8-way;
   (2) decide + turns: engaged-only keep/skip with the behavioral broadcast
@@ -124,13 +123,14 @@ and the persisted run state + mail cursor.
   cursor, in-flight turns, self addresses, source, last error);
   `POST /api/crm/extraction/start|pause|enable|disable`. `paused` is a
   temporary halt (start resumes); `disabled` is the sticky master switch —
-  start returns 400, autostart and reconcile stay away, `enable` returns it
-  to `idle`. Failed error rows are requeued on every start.
-- **Lifecycle.** Onboarding autostarts extraction when idle with a resolvable
-  mail source (`autostartCrmExtractionAfterOnboarding`); boot reconcile
-  resumes a pipeline that was `running` when the process died. Both are
-  fire-and-forget and never throw into their callers; a failed start leaves
-  the persisted state untouched (setup first, state flip last).
+  start returns 400 and `enable` returns it to `idle`. Failed error rows are
+  requeued on every start.
+- **Lifecycle.** The onboarding profile scan may prime normalized recent
+  threads for a later run, but extraction remains idle until the user chooses
+  **Sync** in People (`POST /api/crm/extraction/start`). Boot reconciliation
+  changes a stale `running` state to `paused`; it never resumes Gmail or model
+  work after a local restart. A failed explicit start leaves the persisted
+  state untouched (setup first, state flip last).
 - **Self row.** Start seeds one reserved contact (`description` starting
   `You —`) carrying the connected address. The only self-address the runtime
   knows is the connected account; the skill (v1.5) instructs the curator to
@@ -186,7 +186,7 @@ split cleanly into fresh-input reducers (quote-strip), re-read reducers
   packages/runtime/src/integrations/crm-mail.test.ts` — queue semantics +
   reopen-on-new-mail, engagement/broadcast/batching rules, the full
   controller lifecycle (backfill → turns → watcher → pause/resume →
-  enable/disable → reconcile → autostart, incremental listing pinned), the
+  enable/disable → local-boot pause, incremental listing pinned), the
   gateway surface, and both mail sources offline.
 - `bun test packages/runtime/src/capabilities/agents.test.ts
   packages/runtime/src/execution/effective-context.test.ts

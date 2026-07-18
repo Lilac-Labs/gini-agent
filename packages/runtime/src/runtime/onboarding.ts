@@ -24,7 +24,7 @@
 
 import { resolveEffectiveContext } from "../execution/effective-context";
 import { assertSkillNamesResolve, removeJob } from "../jobs";
-import { autostartCrmExtractionAfterOnboarding, primeCrmExtractionThreads } from "../jobs/crm-extractor";
+import { primeCrmExtractionThreads } from "../jobs/crm-extractor";
 import { appendEvent, mutateState, readState } from "../state";
 import { getGoogleAccountBindings } from "../state/google-account-bindings";
 import { readGoogleAccounts } from "../state/google-accounts";
@@ -112,7 +112,6 @@ function failStaleScan(config: RuntimeConfig, record: OnboardingRecord): void {
 // before any write; completed:true stamps completedAt once.
 export function patchOnboarding(config: RuntimeConfig, payload: Record<string, unknown>): OnboardingRecord {
   const record = getOnboarding(config);
-  const wasCompleted = record.completed;
   if (payload.timezone !== undefined) {
     record.timezone = validateTimezone(payload.timezone);
   }
@@ -131,12 +130,6 @@ export function patchOnboarding(config: RuntimeConfig, payload: Record<string, u
     else delete record.completedAt;
   }
   writeOnboarding(config.instance, record);
-  if (!wasCompleted && record.completed) {
-    // The recent Gmail snapshot is already available by the final wizard step,
-    // so this is the first safe point to launch the heavy People backfill. It
-    // remains detached and can never fail the completion response.
-    autostartCrmExtractionAfterOnboarding(config);
-  }
   return record;
 }
 
@@ -236,15 +229,6 @@ function resolveScanAccount(config: RuntimeConfig): GoogleAccount | undefined {
   return primary;
 }
 
-// Account registration/provisioning happens before the first onboarding scan
-// on a new instance, but after onboarding for later account additions. Keep the
-// call sites simple and centralize that distinction here; getOnboarding also
-// grandfathers existing instances before deciding.
-export function autostartCrmForCompletedOnboarding(config: RuntimeConfig): void {
-  if (!getOnboarding(config).completed) return;
-  autostartCrmExtractionAfterOnboarding(config);
-}
-
 // POST /api/onboarding/routines body:
 //   { timezone?, autoInbox?: { enabled, labelNewMail, archiveUnimportant,
 //     assistScheduling, draftReplies }, morningBriefing?: { enabled,
@@ -318,10 +302,6 @@ export async function applyOnboardingRoutines(
     record.routineJobIds.push(job.id);
     writeOnboarding(config.instance, record);
   }
-  // Existing/completed users may re-apply this endpoint directly. A new user
-  // is still mid-wizard here, so wait for PATCH completed:true where the recent
-  // Gmail snapshot is guaranteed to be ready before People starts.
-  if (record.completed) autostartCrmExtractionAfterOnboarding(config);
   return { record, jobs };
 }
 

@@ -57,6 +57,29 @@ function scratch(tag: string): string {
   return dir;
 }
 
+// Subprocess tests inherit the developer shell by default. Clear every signal
+// the non-interactive provider picker recognizes so a real Anthropic,
+// OpenRouter, DeepSeek, AWS, or Codex login cannot make a "no credentials"
+// scenario pass accidentally.
+function clearAutoConfigCredentials(env: NodeJS.ProcessEnv): void {
+  for (const key of [
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENROUTER_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "GINI_LOCAL_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "AWS_SHARED_CREDENTIALS_FILE"
+  ]) {
+    delete env[key];
+  }
+  env.CODEX_AUTH_JSON = join(env.HOME ?? "/tmp", "missing-codex-auth.json");
+}
+
 describe("gini setup", () => {
   test("--non-interactive without provider configured and no credentials exits 1", async () => {
     const stateRoot = scratch("no-key");
@@ -68,8 +91,7 @@ describe("gini setup", () => {
       GINI_INSTANCE: instance,
       HOME: home
     };
-    delete env.OPENAI_API_KEY;
-    delete env.CODEX_AUTH_JSON;
+    clearAutoConfigCredentials(env);
     delete env.GINI_PROVIDER;
     delete env.GINI_MODEL;
     const result = await runCli({
@@ -164,8 +186,7 @@ describe("gini setup", () => {
       GINI_INSTANCE: instance,
       HOME: home
     };
-    delete env.OPENAI_API_KEY;
-    delete env.CODEX_AUTH_JSON;
+    clearAutoConfigCredentials(env);
     delete env.GINI_PROVIDER;
     delete env.GINI_MODEL;
     const result = await runCli({
@@ -220,8 +241,7 @@ describe("gini setup", () => {
       GINI_STATE_ROOT: stateRoot,
       HOME: home
     };
-    delete env.OPENAI_API_KEY;
-    delete env.CODEX_AUTH_JSON;
+    clearAutoConfigCredentials(env);
     delete env.GINI_PROVIDER;
     delete env.GINI_MODEL;
     const result = await runCli({
@@ -553,8 +573,7 @@ describe("gini setup --yes codex precedence", () => {
       GINI_INSTANCE: instance,
       HOME: home
     };
-    delete env.OPENAI_API_KEY;
-    delete env.CODEX_AUTH_JSON;
+    clearAutoConfigCredentials(env);
     delete env.GINI_PROVIDER;
     delete env.GINI_MODEL;
     const result = await runCli({

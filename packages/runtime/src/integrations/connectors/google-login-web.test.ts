@@ -182,6 +182,20 @@ describe("startGoogleLoginWeb", () => {
     expect(params.get("state")).toMatch(/^[A-Za-z0-9_-]+$/);
     expect((params.get("scope") ?? "").split(" ").sort()).toEqual([...LOGIN_SCOPES].sort());
   });
+
+  test("a signin start re-authing a known primary hints the chooser; fresh connect and add stay hint-less", async () => {
+    const fresh = await startedLocation("/onboarding", ORIGIN, "signin");
+    expect(fresh.searchParams.has("login_hint")).toBe(false);
+
+    stubGoogle({});
+    await handleGoogleLoginWebCallback(config, { code: "c1", state: fresh.searchParams.get("state") });
+
+    const relogin = await startedLocation("/onboarding", ORIGIN, "signin");
+    expect(relogin.searchParams.get("login_hint")).toBe("ada@example.com");
+
+    const add = await startedLocation("/onboarding", ORIGIN, "add");
+    expect(add.searchParams.has("login_hint")).toBe(false);
+  });
 });
 
 describe("handleGoogleLoginWebCallback", () => {

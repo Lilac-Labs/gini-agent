@@ -33,7 +33,7 @@ import type { RuntimeConfig } from "../../types";
 import { ensureLabelProfile } from "../../runtime/label-discovery";
 import { readState } from "../../state";
 import { bindingsForCredentials, resolveConnectorSecret } from "./index";
-import { googleAuthMode, provisionAccount } from "./google-accounts";
+import { googleAuthMode, primaryGoogleAccountForInstance, provisionAccount } from "./google-accounts";
 import { RELAY_WORKSPACE_CLIENT, type RelayWorkspaceClient } from "./relay-workspace-client";
 
 const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -208,6 +208,12 @@ export async function startGoogleLoginWeb(
     code_challenge: createHash("sha256").update(verifier).digest("base64url"),
     code_challenge_method: "S256"
   });
+  // A signin-intent start with a registered primary is re-authing a known
+  // account. Hint it in Google's chooser; fresh sign-ins and add-intent starts
+  // remain open to any account.
+  const primaryEmail =
+    intent === "signin" ? primaryGoogleAccountForInstance(config.instance)?.email.trim() : undefined;
+  if (primaryEmail) params.set("login_hint", primaryEmail);
   return { ok: true, location: `${AUTH_ENDPOINT}?${params.toString()}` };
 }
 

@@ -431,6 +431,36 @@ function dropDeadMemoryImprovements(state: RuntimeState): void {
   }
 }
 
+// Filesystem reloads upsert discovered skills but deliberately do not prune
+// missing rows, because a temporarily-unmounted user skill must not disappear.
+// Retired bundled skills are different: the repository is authoritative for
+// that source, and leaving their persisted bodies behind would keep removed
+// product-specific behavior visible and callable after an upgrade.
+const RETIRED_BUNDLED_SKILLS = new Set(["yc-cli"]);
+
+function dropRetiredBundledSkills(state: RuntimeState): void {
+  const removed = state.skills.filter(
+    (skill) => skill.source === "bundled" && RETIRED_BUNDLED_SKILLS.has(skill.name)
+  );
+  if (removed.length === 0) return;
+  state.skills = state.skills.filter(
+    (skill) => skill.source !== "bundled" || !RETIRED_BUNDLED_SKILLS.has(skill.name)
+  );
+  for (const skill of removed) {
+    addAudit(
+      state,
+      {
+        actor: "runtime",
+        action: "skill.bundled.retired",
+        target: skill.id,
+        risk: "low",
+        evidence: { name: skill.name, reason: "not part of the local distribution" }
+      },
+      { system: true }
+    );
+  }
+}
+
 // Defensive drop of the legacy `state.memories` field. The migration in
 // `migratePinnedMemoriesToUserProfile` clears the array and sets a marker
 // so this normally runs against an empty array, but old state files from
@@ -1467,6 +1497,7 @@ export function normalizeState(instance: Instance, state: RuntimeState): Runtime
   state.audit ??= [];
   state.skills ??= [];
   state.jobs ??= [];
+  dropRetiredBundledSkills(state);
   // The device-pairing subsystem is gone (auth is owner-token-only; see ADR
   // owner-token-auth.md). Old state files still carry its collections — drop
   // them on read so the next write sheds the legacy keys.

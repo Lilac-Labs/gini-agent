@@ -506,6 +506,48 @@ describe("dropDeadMemoryImprovements", () => {
   });
 });
 
+describe("dropRetiredBundledSkills", () => {
+  const skill = (id: string, source: "bundled" | "user", name = "yc-cli"): SkillRecord => ({
+    id,
+    instance: "retired-skill",
+    name,
+    description: name,
+    trigger: "",
+    steps: [],
+    requiredTools: [],
+    requiredPermissions: [],
+    status: "enabled",
+    version: 1,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    tests: [],
+    successCount: 0,
+    failureCount: 0,
+    previousVersions: [],
+    body: "body",
+    source
+  });
+
+  test("removes only the retired bundled row and audits once", () => {
+    const state = createEmptyState("retired-skill");
+    state.skills = [
+      skill("skill_bundled", "bundled"),
+      skill("skill_user", "user"),
+      skill("skill_keep", "bundled", "people-crm")
+    ];
+
+    const once = normalizeState(state.instance, state);
+    expect(once.skills.map((entry) => entry.id)).toEqual(["skill_user", "skill_keep"]);
+    expect(
+      once.audit.filter((event) => event.action === "skill.bundled.retired" && event.target === "skill_bundled")
+    ).toHaveLength(1);
+
+    const twice = normalizeState(state.instance, once);
+    expect(twice.skills.map((entry) => entry.id)).toEqual(["skill_user", "skill_keep"]);
+    expect(twice.audit.filter((event) => event.action === "skill.bundled.retired")).toHaveLength(1);
+  });
+});
+
 describe("archiveOrphanJobChannels (issue #369)", () => {
   // Append a chat session record onto a state with the fields normalizeState
   // and the sweep read. `id` doubles as a discriminator across cases.

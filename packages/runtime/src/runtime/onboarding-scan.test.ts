@@ -2,7 +2,7 @@
 // (src/runtime/onboarding-scan.ts). A fake `gwsSpawn` serves the one
 // `auth export --unmasked` call and a fake `fetchImpl` routes the token mint +
 // every Gmail read, so fetchMailbox is exercised without a binary or network;
-// the echo provider stubs the two parallel synthesis calls so runProfileScan
+// the echo provider stubs the three parallel synthesis calls so runProfileScan
 // never reaches a model. Hermetic: GINI_STATE_ROOT points at a scratch dir so
 // providerOverrideForRuntime's state read never touches the developer machine.
 
@@ -12,7 +12,7 @@ import { join } from "node:path";
 
 import { clearEchoStructuredResponses, setEchoStructuredResponse } from "../provider";
 import type { FetchImpl, GwsSpawn } from "./onboarding-scan";
-import { buildProfilePrompt, buildTasksPrompt, fetchMailbox, runProfileScan } from "./onboarding-scan";
+import { buildProfilePrompt, buildRoutinesPrompt, buildTasksPrompt, fetchMailbox, runProfileScan } from "./onboarding-scan";
 import type { RuntimeConfig } from "../types";
 
 // Base64url-encode a plain-text body the way Gmail returns part data.
@@ -46,10 +46,12 @@ function fakeFetch(opts: {
   selfEmail?: string;
   inboxIds?: string[];
   sentIds?: string[];
+  threadIds?: Record<string, string>;
   metadata?: Record<string, { from?: string; to?: string; subject?: string; date?: string; snippet?: string }>;
   bodies?: Record<string, string>;
   failMetadataIds?: string[];
   failBodyIds?: string[];
+  failThreadIds?: string[];
   failList?: "inbox" | "sent";
   delayMs?: number;
 }): {
@@ -83,17 +85,58 @@ function fakeFetch(opts: {
         const isSent = q.includes("in:sent");
         if (opts.failList === (isSent ? "sent" : "inbox")) return new Response("boom", { status: 500 });
         const ids = (isSent ? opts.sentIds : opts.inboxIds) ?? [];
-        return Response.json({ messages: ids.map((id) => ({ id })) });
+        return Response.json({ messages: ids.map((id) => ({ id, threadId: opts.threadIds?.[id] ?? id })) });
+      }
+      const threadMatch = url.match(/\/users\/me\/threads\/([^?]+)\?/);
+      if (threadMatch) {
+        const threadId = decodeURIComponent(threadMatch[1]!);
+        if (opts.failThreadIds?.includes(threadId)) return new Response("boom", { status: 500 });
+        const ids = [...(opts.inboxIds ?? []), ...(opts.sentIds ?? [])].filter(
+          (id) => (opts.threadIds?.[id] ?? id) === threadId && !opts.failMetadataIds?.includes(id)
+        );
+        return Response.json({
+          id: threadId,
+          messages: ids.map((id) => {
+            const meta = opts.metadata?.[id] ?? {};
+            const headers = [
+              meta.from ? { name: "From", value: meta.from } : undefined,
+              meta.to ? { name: "To", value: meta.to } : undefined,
+              meta.subject ? { name: "Subject", value: meta.subject } : undefined,
+              meta.date ? { name: "Date", value: meta.date } : undefined
+            ].filter(Boolean);
+            const body = opts.failBodyIds?.includes(id) ? undefined : opts.bodies?.[id];
+            return {
+              id,
+              threadId,
+              internalDate: String(Date.parse(meta.date ?? "") || 0),
+              snippet: meta.snippet,
+              payload: {
+                headers,
+                ...(body ? { mimeType: "text/plain", body: { data: b64(body) } } : {})
+              }
+            };
+          })
+        });
       }
       const match = url.match(/\/users\/me\/messages\/([^?]+)\?(.*)$/);
       if (match) {
         const id = match[1]!;
         if (match[2]!.includes("format=full")) {
           if (opts.failBodyIds?.includes(id)) return new Response("boom", { status: 500 });
+          const meta = opts.metadata?.[id] ?? {};
+          const headers = [
+            meta.from ? { name: "From", value: meta.from } : undefined,
+            meta.to ? { name: "To", value: meta.to } : undefined,
+            meta.subject ? { name: "Subject", value: meta.subject } : undefined,
+            meta.date ? { name: "Date", value: meta.date } : undefined
+          ].filter(Boolean);
           const body = opts.bodies?.[id];
           return Response.json({
             snippet: opts.metadata?.[id]?.snippet,
-            payload: body ? { mimeType: "text/plain", body: { data: b64(body) } } : {}
+            payload: {
+              headers,
+              ...(body ? { mimeType: "text/plain", body: { data: b64(body) } } : {})
+            }
           });
         }
         if (opts.failMetadataIds?.includes(id)) return new Response("boom", { status: 500 });
@@ -173,6 +216,10 @@ describe("onboarding scan pipeline", () => {
     expect(result.bundle.sent[0]?.subject).toBe("Re: Q3 plan");
     // Sent messages are metadata-only (voice evidence, not content).
     expect(result.bundle.sent[0]?.body).toBeUndefined();
+    // Inbox + sent messages sharing a Gmail thread are downloaded once, and
+    // the complete normalized thread is handed to the later People backfill.
+    expect(gmailRequests.filter((r) => r.url.includes("/threads/")).length).toBe(3);
+    expect(result.snapshot.threads.map((thread) => thread.threadId)).toEqual(["i1", "i2", "s1"]);
   });
 
   test("fetchMailbox treats a garbled or credential-less export as signed out without touching the network", async () => {
@@ -206,7 +253,8 @@ describe("onboarding scan pipeline", () => {
     const inboxIds = Array.from({ length: 80 }, (_, i) => `i${i}`);
     const metadata = Object.fromEntries(inboxIds.map((id) => [id, { from: `${id}@x.com`, subject: id }]));
     const { spawn } = fakeExportSpawn();
-    const { fetchImpl, gmailRequests } = fakeFetch({ selfEmail: "me@example.com", inboxIds, sentIds: [], metadata });
+    const bodies = Object.fromEntries(inboxIds.map((id) => [id, `body ${id}`]));
+    const { fetchImpl, gmailRequests } = fakeFetch({ selfEmail: "me@example.com", inboxIds, sentIds: [], metadata, bodies });
 
     const result = await fetchMailbox(spawn, { fetchImpl });
 
@@ -217,9 +265,12 @@ describe("onboarding scan pipeline", () => {
     expect(listUrls[0]?.url).toContain("maxResults=50");
     // The inbox is capped at 50 messages regardless of how many were listed.
     expect(result.bundle.inbox).toHaveLength(50);
-    // Full-body fetches (format=full) are capped at 15, not one per message.
-    const fullGets = gmailRequests.filter((r) => r.url.includes("format=full"));
-    expect(fullGets).toHaveLength(15);
+    // Each unique recent thread is fetched once. Only the first 15 inbox
+    // messages expose bodies to the synthesis prompt even though the reusable
+    // thread snapshot contains normalized content for People.
+    const fullGets = gmailRequests.filter((r) => r.url.includes("/threads/") && r.url.includes("format=full"));
+    expect(fullGets).toHaveLength(50);
+    expect(result.bundle.inbox.filter((message) => message.body !== undefined)).toHaveLength(15);
   });
 
   test("fetchMailbox runs message gets in parallel with at most 8 in flight", async () => {
@@ -236,6 +287,31 @@ describe("onboarding scan pipeline", () => {
     // The worker pool overlaps requests but never exceeds the concurrency cap.
     expect(maxInFlight()).toBeGreaterThan(1);
     expect(maxInFlight()).toBeLessThanOrEqual(8);
+  });
+
+  test("fetchMailbox downloads a shared inbox/sent thread once and snapshots every message in it", async () => {
+    const { spawn } = fakeExportSpawn();
+    const { fetchImpl, gmailRequests } = fakeFetch({
+      selfEmail: "me@example.com",
+      inboxIds: ["i1"],
+      sentIds: ["s1"],
+      threadIds: { i1: "t-shared", s1: "t-shared" },
+      metadata: {
+        i1: { from: "boss@corp.com", to: "me@example.com", subject: "Plan", date: "2026-07-13T10:00:00Z" },
+        s1: { from: "me@example.com", to: "boss@corp.com", subject: "Re: Plan", date: "2026-07-13T11:00:00Z" }
+      },
+      bodies: { i1: "Can we review this?", s1: "Yes, this afternoon." }
+    });
+
+    const result = await fetchMailbox(spawn, { fetchImpl });
+
+    expect(result.tokenValid).toBe(true);
+    if (!result.tokenValid) throw new Error("unreachable");
+    expect(gmailRequests.filter((request) => request.url.includes("/threads/t-shared?format=full"))).toHaveLength(1);
+    expect(result.bundle.inbox[0]?.body).toBe("Can we review this?");
+    expect(result.bundle.sent[0]?.body).toBeUndefined();
+    expect(result.snapshot.threads).toHaveLength(1);
+    expect(result.snapshot.threads[0]?.messages.map((message) => message.id)).toEqual(["i1", "s1"]);
   });
 
   test("fetchMailbox drops a message whose get fails and keeps a metadata-only message on a body failure", async () => {
@@ -265,6 +341,28 @@ describe("onboarding scan pipeline", () => {
     expect(result.bundle.inbox[1]?.body).toBe("body three");
   });
 
+  test("fetchMailbox falls back to the prior per-message path when a full thread read fails", async () => {
+    const { spawn } = fakeExportSpawn();
+    const { fetchImpl, gmailRequests } = fakeFetch({
+      selfEmail: "me@example.com",
+      inboxIds: ["i1"],
+      sentIds: [],
+      metadata: {
+        i1: { from: "boss@corp.com", to: "me@example.com", subject: "Fallback", date: "2026-07-13T10:00:00Z" }
+      },
+      bodies: { i1: "Still available through messages.get." },
+      failThreadIds: ["i1"]
+    });
+
+    const result = await fetchMailbox(spawn, { fetchImpl });
+
+    expect(result.tokenValid).toBe(true);
+    if (!result.tokenValid) throw new Error("unreachable");
+    expect(result.bundle.inbox[0]).toMatchObject({ subject: "Fallback", body: "Still available through messages.get." });
+    expect(result.snapshot.threads).toEqual([]);
+    expect(gmailRequests.some((request) => request.url.includes("/messages/i1?format=full"))).toBe(true);
+  });
+
   test("a list-level failure fails the scan", async () => {
     const { spawn } = fakeExportSpawn();
     const { fetchImpl } = fakeFetch({ selfEmail: "me@example.com", inboxIds: ["i1"], failList: "inbox" });
@@ -277,7 +375,7 @@ describe("onboarding scan pipeline", () => {
     expect(outcome.error).toContain("Gmail request failed");
   });
 
-  test("runProfileScan maps stubbed profile and tasks calls to ready with both deliverables", async () => {
+  test("runProfileScan maps all three synthesis calls to one ready scan", async () => {
     const { spawn } = fakeExportSpawn();
     const { fetchImpl } = fakeFetch({
       selfEmail: "me@example.com",
@@ -289,31 +387,74 @@ describe("onboarding scan pipeline", () => {
       profile: { displayName: "Ada Lovelace", sections: [{ title: "Professional Identity", bullets: ["Engineer"] }] }
     });
     setEchoStructuredResponse("onboarding-scan-tasks", { suggestedTasks: ["Reply to boss about the plan"] });
+    setEchoStructuredResponse("onboarding-scan-routines", {
+      suggestedRoutines: [
+        {
+          name: "Draft a weekly founder update",
+          description: "Turn recent work and email context into a founder-update draft for review.",
+          usesEmail: true
+        }
+      ]
+    });
 
-    const outcome = await runProfileScan(echoConfig(), { gwsSpawn: spawn, fetchImpl });
+    const snapshots: string[][] = [];
+    const outcome = await runProfileScan(echoConfig(), {
+      gwsSpawn: spawn,
+      fetchImpl,
+      onMailboxFetched: (snapshot) => snapshots.push(snapshot.threads.map((thread) => thread.threadId))
+    });
 
     expect(outcome.status).toBe("ready");
     if (outcome.status !== "ready") throw new Error("unreachable");
     expect(outcome.profile.displayName).toBe("Ada Lovelace");
     expect(outcome.suggestedTasks).toEqual(["Reply to boss about the plan"]);
+    expect(snapshots).toEqual([["i1"]]);
+    expect(outcome.suggestedRoutines).toEqual([
+      {
+        name: "Draft a weekly founder update",
+        description: "Turn recent work and email context into a founder-update draft for review.",
+        usesEmail: true
+      }
+    ]);
   });
 
-  test("runProfileScan lands ready without suggestions when the tasks call fails", async () => {
+  test("runProfileScan fails instead of dropping rejected task suggestions", async () => {
     const { spawn } = fakeExportSpawn();
     const { fetchImpl } = fakeFetch({ selfEmail: "me@example.com", inboxIds: [], sentIds: [] });
     setEchoStructuredResponse("onboarding-scan-profile", {
       profile: { displayName: "Ada Lovelace", sections: [] }
     });
-    // A tasks stub that misses the contract makes that call throw; the scan
-    // still lands ready — the web falls back to its static suggestions.
+    // The invalid stub rejects both the parallel attempt and its one retry.
+    // The scan must stay retryable instead of silently seeding generic tasks.
     setEchoStructuredResponse("onboarding-scan-tasks", { suggestedTasks: "not a list" });
+    setEchoStructuredResponse("onboarding-scan-routines", {
+      suggestedRoutines: [
+        { name: "Track customer themes", description: "Review customer threads each week and draft a theme brief.", usesEmail: true }
+      ]
+    });
+
+    const outcome = await runProfileScan(echoConfig(), { gwsSpawn: spawn, fetchImpl });
+
+    expect(outcome.status).toBe("failed");
+    if (outcome.status !== "failed") throw new Error("unreachable");
+    expect(outcome.error).toContain("suggestedTasks contract");
+  });
+
+  test("runProfileScan keeps task suggestions when the routines call fails", async () => {
+    const { spawn } = fakeExportSpawn();
+    const { fetchImpl } = fakeFetch({ selfEmail: "me@example.com", inboxIds: [], sentIds: [] });
+    setEchoStructuredResponse("onboarding-scan-profile", {
+      profile: { displayName: "Ada Lovelace", sections: [] }
+    });
+    setEchoStructuredResponse("onboarding-scan-tasks", { suggestedTasks: ["Reply to boss"] });
+    setEchoStructuredResponse("onboarding-scan-routines", { suggestedRoutines: "not a list" });
 
     const outcome = await runProfileScan(echoConfig(), { gwsSpawn: spawn, fetchImpl });
 
     expect(outcome.status).toBe("ready");
     if (outcome.status !== "ready") throw new Error("unreachable");
-    expect(outcome.profile.displayName).toBe("Ada Lovelace");
-    expect(outcome.suggestedTasks).toBeUndefined();
+    expect(outcome.suggestedTasks).toEqual(["Reply to boss"]);
+    expect(outcome.suggestedRoutines).toBeUndefined();
   });
 
   test("runProfileScan fails when the profile call misses the profile contract", async () => {
@@ -322,6 +463,7 @@ describe("onboarding scan pipeline", () => {
     // The tasks call succeeding cannot rescue a failed profile call.
     setEchoStructuredResponse("onboarding-scan-profile", { profile: { sections: [] } });
     setEchoStructuredResponse("onboarding-scan-tasks", { suggestedTasks: ["Reply to boss"] });
+    setEchoStructuredResponse("onboarding-scan-routines", { suggestedRoutines: [] });
 
     const outcome = await runProfileScan(echoConfig(), { gwsSpawn: spawn, fetchImpl });
 
@@ -384,7 +526,7 @@ describe("onboarding scan pipeline", () => {
       expect(system).toContain(marker);
     }
     // The tasks deliverable's rules live in the OTHER call.
-    expect(system).not.toContain("5–7 concrete tasks");
+    expect(system).not.toContain("up to 10 high-value concrete tasks");
     expect(system).not.toContain("Check who sent the LAST message");
   });
 
@@ -399,9 +541,13 @@ describe("onboarding scan pipeline", () => {
     // and ranking rules must all survive the split.
     for (const marker of [
       "work Gini can complete on its own",
+      "up to 10 high-value concrete tasks",
       "Check who sent the LAST message",
       "draft a follow-up for an email the USER sent that got no response",
       "6–12 words",
+      "their organization when the mailbox supports it",
+      'Reply titles must begin "Draft a reply to"',
+      "Never output a generic selector",
       "summaries are not starter tasks",
       "At most ONE task per email thread",
       "never restate or re-send what the user already said",
@@ -415,7 +561,37 @@ describe("onboarding scan pipeline", () => {
     expect(system).not.toContain("displayName");
   });
 
-  test("both prompts render the same mailbox as untrusted evidence", () => {
+  test("buildRoutinesPrompt requires evidence that work repeats", () => {
+    const { system } = buildRoutinesPrompt({
+      selfEmail: "me@example.com",
+      inbox: [{ from: "a@b.com", subject: "hi" }],
+      sent: []
+    });
+
+    for (const marker of [
+      "up to 5 high-value recurring automations",
+      "at least two separate messages or threads",
+      "an explicit recurring cadence or trigger",
+      "Do not infer a routine from a single email",
+      "return fewer than 3",
+      "repeated trigger and a repeatable outcome",
+      "category-triggered triage and draft replies",
+      "stakeholder or project update drafts",
+      "spend, invoice, usage, or operations recaps",
+      "credits, benefits, renewals, or expirations",
+      "abstract archetypes, not templates",
+      "generic inbox triage",
+      "Auto-inbox, Morning Briefing, or Meeting Briefing",
+      "usesEmail true",
+      "no speculation, sensitive-trait inference"
+    ]) {
+      expect(system).toContain(marker);
+    }
+    expect(system).not.toContain("Check who sent the LAST message");
+    expect(system).not.toContain("displayName");
+  });
+
+  test("all prompts render the same mailbox as untrusted evidence", () => {
     const bundle = {
       selfEmail: "me@example.com",
       inbox: [{ from: "boss@corp.com", subject: "Q3", snippet: "sync please", body: "the full body" }],
@@ -423,12 +599,15 @@ describe("onboarding scan pipeline", () => {
     };
     const profile = buildProfilePrompt(bundle);
     const tasks = buildTasksPrompt(bundle);
+    const routines = buildRoutinesPrompt(bundle);
 
     // The tasks call needs who-wrote-last evidence and the profile call needs
     // sent mail for voice — both read the SAME rendered mailbox.
     expect(profile.user).toBe(tasks.user);
+    expect(profile.user).toBe(routines.user);
     expect(profile.system).toContain("UNTRUSTED");
     expect(tasks.system).toContain("UNTRUSTED");
+    expect(routines.system).toContain("UNTRUSTED");
     expect(profile.user).toContain("me@example.com");
     expect(profile.user).toContain("boss@corp.com");
     expect(profile.user).toContain("the full body");

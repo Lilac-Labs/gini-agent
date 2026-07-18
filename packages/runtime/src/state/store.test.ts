@@ -506,6 +506,48 @@ describe("dropDeadMemoryImprovements", () => {
   });
 });
 
+describe("dropRetiredBundledSkills", () => {
+  const skill = (id: string, source: "bundled" | "user", name = "yc-cli"): SkillRecord => ({
+    id,
+    instance: "retired-skill",
+    name,
+    description: name,
+    trigger: "",
+    steps: [],
+    requiredTools: [],
+    requiredPermissions: [],
+    status: "enabled",
+    version: 1,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    tests: [],
+    successCount: 0,
+    failureCount: 0,
+    previousVersions: [],
+    body: "body",
+    source
+  });
+
+  test("removes only the retired bundled row and audits once", () => {
+    const state = createEmptyState("retired-skill");
+    state.skills = [
+      skill("skill_bundled", "bundled"),
+      skill("skill_user", "user"),
+      skill("skill_keep", "bundled", "people-crm")
+    ];
+
+    const once = normalizeState(state.instance, state);
+    expect(once.skills.map((entry) => entry.id)).toEqual(["skill_user", "skill_keep"]);
+    expect(
+      once.audit.filter((event) => event.action === "skill.bundled.retired" && event.target === "skill_bundled")
+    ).toHaveLength(1);
+
+    const twice = normalizeState(state.instance, once);
+    expect(twice.skills.map((entry) => entry.id)).toEqual(["skill_user", "skill_keep"]);
+    expect(twice.audit.filter((event) => event.action === "skill.bundled.retired")).toHaveLength(1);
+  });
+});
+
 describe("archiveOrphanJobChannels (issue #369)", () => {
   // Append a chat session record onto a state with the fields normalizeState
   // and the sweep read. `id` doubles as a discriminator across cases.
@@ -1083,6 +1125,96 @@ describe("normalizeState provider-keyed → typed-named-credential migration", (
   });
 });
 
+describe("normalizeState connector canonical-name rename migration", () => {
+  const at = new Date().toISOString();
+
+  // A pre-existing auto-detected record, named by the provider label before
+  // the provider declared a `credentialName` (the shape the rename heals).
+  function mkConnector(instance: string, id: string, name: string, provider: string): ConnectorRecord {
+    return {
+      id,
+      instance,
+      name,
+      provider,
+      status: "configured",
+      scopes: [],
+      secretRefs: [],
+      createdAt: at,
+      updatedAt: at,
+      health: "healthy",
+      source: "auto"
+    };
+  }
+
+  test("renames stale-named auto records to their provider's canonical credential name", () => {
+    const instance = "test-canon-rename";
+    const state = createEmptyState(instance);
+    state.connectors = [
+      mkConnector(instance, "id_codex", "Codex", "codex"),
+      mkConnector(instance, "id_cc", "Claude Code", "claude-code")
+    ];
+    const normalized = normalizeState(instance, state);
+    // Renamed to the names skill activation (isSkillActive) matches against.
+    expect(normalized.connectors.find((c) => c.id === "id_codex")!.name).toBe("codex");
+    expect(normalized.connectors.find((c) => c.id === "id_cc")!.name).toBe("claude-code");
+    // Exactly one summary audit row documenting both renames.
+    const summary = normalized.audit.filter((a) => a.action === "connector.migration.canonical_names");
+    expect(summary.length).toBe(1);
+    expect((summary[0]!.evidence as { renamed?: number }).renamed).toBe(2);
+    // Marker set.
+    const marker = (normalized as unknown as { migrations?: { connectorsCanonicalNames?: string } }).migrations
+      ?.connectorsCanonicalNames;
+    expect(typeof marker).toBe("string");
+  });
+
+  test("suffixes to the first free _N when the canonical name is already claimed", () => {
+    const instance = "test-canon-collision";
+    const state = createEmptyState(instance);
+    state.connectors = [
+      mkConnector(instance, "id_new", "codex", "codex"),
+      mkConnector(instance, "id_old", "Codex", "codex")
+    ];
+    const normalized = normalizeState(instance, state);
+    // The claimer keeps the canonical name; the stale record takes _2.
+    expect(normalized.connectors.find((c) => c.id === "id_new")!.name).toBe("codex");
+    expect(normalized.connectors.find((c) => c.id === "id_old")!.name).toBe("codex_2");
+    const collisions = normalized.audit.filter((a) => a.action === "connector.migration_collision");
+    expect(collisions.length).toBe(1);
+    expect(collisions[0]!.evidence).toEqual({ from: "Codex", to: "codex_2" });
+  });
+
+  test("marker prevents a re-run from renaming records again", () => {
+    const instance = "test-canon-marker";
+    const state = createEmptyState(instance);
+    state.connectors = [mkConnector(instance, "id_codex", "Codex", "codex")];
+    const normalized = normalizeState(instance, state);
+    expect(normalized.connectors.find((c) => c.id === "id_codex")!.name).toBe("codex");
+    // Rename back to the stale label; the marker gates the second pass so the
+    // record stays as the operator left it and no new audit row appears.
+    normalized.connectors.find((c) => c.id === "id_codex")!.name = "Codex";
+    const second = normalizeState(instance, normalized);
+    expect(second.connectors.find((c) => c.id === "id_codex")!.name).toBe("Codex");
+    expect(second.audit.filter((a) => a.action === "connector.migration.canonical_names").length).toBe(1);
+  });
+
+  test("leaves records whose provider has no canonical credential name untouched", () => {
+    const instance = "test-canon-skip";
+    const state = createEmptyState(instance);
+    // createEmptyState seeds a demo connector (presence-only, no canonical
+    // name); add a generic record too — neither may be renamed, and with no
+    // renames the summary audit is skipped (marker still set silently).
+    state.connectors.push(mkConnector(instance, "id_generic", "My Service", "generic"));
+    const demoName = state.connectors.find((c) => c.provider === "demo")!.name;
+    const normalized = normalizeState(instance, state);
+    expect(normalized.connectors.find((c) => c.provider === "demo")!.name).toBe(demoName);
+    expect(normalized.connectors.find((c) => c.id === "id_generic")!.name).toBe("My Service");
+    expect(normalized.audit.filter((a) => a.action === "connector.migration.canonical_names").length).toBe(0);
+    const marker = (normalized as unknown as { migrations?: { connectorsCanonicalNames?: string } }).migrations
+      ?.connectorsCanonicalNames;
+    expect(typeof marker).toBe("string");
+  });
+});
+
 const MARKER_TASK = {
   id: "task_marker",
   title: "marker",
@@ -1433,5 +1565,58 @@ describe("normalizeState job deliveryPolicy migration", () => {
     const fresh = createJob(state, { name: "later job", prompt: "p", nextRunAt: new Date().toISOString() });
     normalizeState("mig-jobs-delivery-policy-gated", state);
     expect(fresh.deliveryPolicy).toBeUndefined();
+  });
+
+  test("auto-inbox legacy jobs are repaired to silent delivery with a hidden channel", () => {
+    const state = createEmptyState("mig-auto-inbox-silent");
+    const at = new Date().toISOString();
+    const job = createJob(state, {
+      name: "Auto-inbox",
+      prompt: "p",
+      nextRunAt: at,
+      templateId: "auto-inbox",
+      deliveryPolicy: "always"
+    });
+
+    normalizeState(state.instance, state);
+
+    expect(job.deliveryPolicy).toBe("silent");
+    expect(job.chatSessionId).toBeString();
+    const session = state.chatSessions.find((candidate) => candidate.id === job.chatSessionId);
+    expect(session).toMatchObject({
+      title: "Auto-inbox",
+      kind: "channel",
+      origin: "job",
+      headless: true,
+      agentId: "agent_default"
+    });
+    expect(session?.archivedAt).toBeUndefined();
+    expect(
+      state.audit.some((event) => event.action === "auto-inbox.silent-delivery.migrated" && event.evidence?.mintedChannels === 1)
+    ).toBe(true);
+
+    const sessionCount = state.chatSessions.length;
+    normalizeState(state.instance, state);
+    expect(state.chatSessions.length).toBe(sessionCount);
+  });
+
+  test("auto-inbox jobs with an existing visible channel keep the channel but hide it", () => {
+    const state = createEmptyState("mig-auto-inbox-existing-channel");
+    const at = new Date().toISOString();
+    const session = createChatSession(state, "Auto-inbox", undefined, "agent_default", "job", "channel");
+    const job = createJob(state, {
+      name: "Auto-inbox",
+      prompt: "p",
+      nextRunAt: at,
+      templateId: "auto-inbox",
+      chatSessionId: session.id
+    });
+
+    normalizeState(state.instance, state);
+
+    expect(job.deliveryPolicy).toBe("silent");
+    expect(job.chatSessionId).toBe(session.id);
+    expect(state.chatSessions.find((candidate) => candidate.id === session.id)?.headless).toBe(true);
+    expect(state.chatSessions.filter((candidate) => candidate.title === "Auto-inbox")).toHaveLength(1);
   });
 });

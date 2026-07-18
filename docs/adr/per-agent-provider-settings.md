@@ -94,10 +94,7 @@ provider and the web surfaces a banner — see
 
 `packages/web/src/app/settings/_components/AgentModelControl.tsx` renders the
 "Agent model" card on the Settings page, adjacent to the "Default model"
-control and above the provider rows. It sits inside the self-serve provider
-section that managed deployments hide (see ADR managed-deployment-mode.md),
-so on a managed instance it disappears along with the rest of the provider
-surfaces.
+control and above the provider rows.
 
 The card reads the active agent's current effective provider from
 `/api/status.activeAgent` (`resolvedProvider` + `providerSource`). Selection is
@@ -141,8 +138,8 @@ and the write always refer to the same agent.
   `providerSource === "instance"`.
 - A lone field or unknown provider → `400`; an unknown agent → `404`.
 - The Agent model card appears on the Settings page next to the Default model
-  control (self-hosted only — hidden when managed), and selecting a configured
-  provider + model persists and drives the next chat turn.
+  control, and selecting a configured provider + model persists and drives the
+  next chat turn.
 - `bun run typecheck`, `bun run test`, and `bun run gini smoke` are green.
 
 ## Critical Files
@@ -179,7 +176,4 @@ the tab's only host — so the tab became unreachable. The control moved to
 the Settings page as the "Agent model" card described in the UI section
 above; the chat tab, its `ChatTabBar` entry, and the `hideSettingsTab`
 plumbing were removed. The contract, the active-agent scope, and the
-snapshot-not-live-link semantics are unchanged; placement inside the
-managed-gated provider section additionally hides the card on managed
-deployments (ADR managed-deployment-mode.md), where the provider is
-platform-provisioned.
+snapshot-not-live-link semantics are unchanged.

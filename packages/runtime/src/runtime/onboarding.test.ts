@@ -11,8 +11,8 @@
 //     idempotent replace on re-apply, missing ids ignored, skill resolution
 //     pre-validated before the replace pass, created ids tracked through a
 //     mid-apply failure
-//   - validateScanProfile / validateScanTasks shape-check + clamping unit
-//     coverage
+//   - validateScanProfile / validateScanTasks / validateScanRoutines
+//     shape-check + clamping unit coverage
 //
 // Hermetic: HOME + GINI_STATE_ROOT point at a per-test scratch dir so the
 // google-accounts registry, ~/.config/gws probe, and instance state never
@@ -29,15 +29,40 @@ import { join } from "node:path";
 // (and thus ../runtime/onboarding, which statically imports runProfileScan) is
 // evaluated. Tests set `scanOutcome` / `scanDelayMs` to steer a run's result
 // without spawning gws or hitting the model. Defaults to a ready profile.
-let scanOutcome: { status: "ready"; profile: OnboardingProfile; suggestedTasks?: string[] } | { status: "failed"; error: string } = {
+let scanOutcome:
+  | {
+      status: "ready";
+      profile: OnboardingProfile;
+      suggestedTasks?: string[];
+      suggestedRoutines?: OnboardingRoutineSuggestion[];
+    }
+  | { status: "failed"; error: string } = {
   status: "ready",
   profile: { displayName: "Stub User", sections: [{ title: "Professional Identity", bullets: ["Founder"] }] },
-  suggestedTasks: ["Reply to the investor thread"]
+  suggestedTasks: ["Reply to the investor thread"],
+  suggestedRoutines: [
+    { name: "Draft a weekly founder update", description: "Draft a weekly progress update for review.", usesEmail: true }
+  ]
 };
 let scanCalls = 0;
 mock.module("./onboarding-scan", () => ({
-  runProfileScan: async () => {
+  runProfileScan: async (_config: RuntimeConfig, opts?: { onMailboxFetched?: (snapshot: unknown) => void }) => {
     scanCalls += 1;
+    opts?.onMailboxFetched?.({
+      threads: [{
+        threadId: "thread_from_onboarding",
+        messages: [{
+          id: "message_from_onboarding",
+          threadId: "thread_from_onboarding",
+          date: 1_000,
+          from: { address: "user@example.com" },
+          to: [{ address: "friend@example.com" }],
+          cc: [],
+          subject: "Hello",
+          body: "Recent onboarding mail",
+        }],
+      }],
+    });
     return scanOutcome;
   }
 }));
@@ -45,10 +70,13 @@ mock.module("./onboarding-scan", () => ({
 import { createHandler } from "../http";
 import * as jobsModule from "../jobs";
 import { createJob, mutateState, readState, upsertTask, createChatSession } from "../state";
+import { attachGoogleAccountToInstance } from "../state/google-account-bindings";
 import { writeGoogleAccounts } from "../state/google-accounts";
 import { onboardingPath, readOnboarding, writeOnboarding } from "../state/onboarding";
-import { validateScanProfile, validateScanTasks } from "./onboarding";
-import type { OnboardingProfile, OnboardingRecord, RuntimeConfig, Task, TaskStatus } from "../types";
+import { validateScanProfile, validateScanRoutines, validateScanTasks } from "./onboarding";
+import { __crmOnboardingThreadCountForTests } from "../jobs/crm-extractor";
+import { getCrmRunState } from "../state/crm-extraction-db";
+import type { OnboardingProfile, OnboardingRecord, OnboardingRoutineSuggestion, RuntimeConfig, Task, TaskStatus } from "../types";
 
 // Snapshot of the real jobs module, captured before any mock.module call:
 // once a mock is installed the namespace's live bindings point at the mock,
@@ -57,6 +85,18 @@ const jobsOriginals = { ...jobsModule };
 
 function tag(): string {
   return `${process.pid}-${Math.floor(Math.random() * 1_000_000)}`;
+}
+
+function bindTestGoogleAccount(instance: string): void {
+  const account = {
+    id: "gacct_test",
+    tag: "personal",
+    email: "user@example.com",
+    configDir: "/tmp/none",
+    addedAt: new Date().toISOString()
+  };
+  writeGoogleAccounts([account]);
+  attachGoogleAccountToInstance(instance, account, { primary: true });
 }
 
 describe("web onboarding api", () => {
@@ -88,7 +128,10 @@ describe("web onboarding api", () => {
     scanOutcome = {
       status: "ready",
       profile: { displayName: "Stub User", sections: [{ title: "Professional Identity", bullets: ["Founder"] }] },
-      suggestedTasks: ["Reply to the investor thread"]
+      suggestedTasks: ["Reply to the investor thread"],
+      suggestedRoutines: [
+        { name: "Draft a weekly founder update", description: "Draft a weekly progress update for review.", usesEmail: true }
+      ]
     };
   });
 
@@ -232,8 +275,9 @@ describe("web onboarding api", () => {
     expect(denied.scan.status).toBe("no_account");
     expect(scanCalls).toBe(0);
 
-    // A registered account flips the retry to a real background run.
-    writeGoogleAccounts([{ id: "gacct_test", tag: "personal", email: "user@example.com", configDir: "/tmp/none", addedAt: new Date().toISOString() }]);
+    // A registered account explicitly bound to this instance flips the retry
+    // to a real background run.
+    bindTestGoogleAccount(config.instance);
     const started = await call(handler, config, "/api/onboarding/scan", { method: "POST" });
     // Returns immediately as running (no taskId — no agent task) while the
     // pipeline runs in the background.
@@ -246,15 +290,31 @@ describe("web onboarding api", () => {
     const ready = await waitForScan(config, "ready");
     expect(ready.scan.profile.displayName).toBe("Stub User");
     expect(ready.scan.suggestedTasks).toEqual(["Reply to the investor thread"]);
+    expect(ready.scan.suggestedRoutines?.[0]?.name).toBe("Draft a weekly founder update");
     expect(ready.scan.finishedAt).toBeString();
     expect(scanCalls).toBe(1);
+    expect(__crmOnboardingThreadCountForTests(config.instance)).toBe(1);
+    expect(getCrmRunState(config.instance)).toBe("idle");
     expect(readState(config.instance).events.some((e) => e.kind === "onboarding" && e.action === "onboarding.scan")).toBe(true);
+  });
+
+  test("completing onboarding leaves People extraction idle until explicit sync", async () => {
+    const config = testConfig(root, "completion-keeps-people-idle");
+    const handler = createHandler(config);
+
+    expect(getCrmRunState(config.instance)).toBe("idle");
+    const completed = await call(handler, config, "/api/onboarding", {
+      method: "PATCH",
+      body: JSON.stringify({ completed: true }),
+    });
+    expect(completed.completed).toBe(true);
+    expect(getCrmRunState(config.instance)).toBe("idle");
   });
 
   test("a failed pipeline finalizes the scan as failed", async () => {
     const config = testConfig(root, "scan-pipeline-failed");
     const handler = createHandler(config);
-    writeGoogleAccounts([{ id: "gacct_test", tag: "personal", email: "user@example.com", configDir: "/tmp/none", addedAt: new Date().toISOString() }]);
+    bindTestGoogleAccount(config.instance);
     scanOutcome = { status: "failed", error: "No signed-in Google session — connect an account and try again." };
 
     const started = await call(handler, config, "/api/onboarding/scan", { method: "POST" });
@@ -287,7 +347,7 @@ describe("web onboarding api", () => {
   test("a failed scan resubmits as a fresh run on the next POST", async () => {
     const config = testConfig(root, "scan-retry");
     const handler = createHandler(config);
-    writeGoogleAccounts([{ id: "gacct_test", tag: "personal", email: "user@example.com", configDir: "/tmp/none", addedAt: new Date().toISOString() }]);
+    bindTestGoogleAccount(config.instance);
     // The web's step-3 "Try again" hits POST /onboarding/scan on exactly this
     // shape: a failed scan must flip back to running with a cleared error and
     // kick a fresh pipeline, while running/ready stay idempotent (pinned above).
@@ -314,7 +374,7 @@ describe("web onboarding api", () => {
     // this would submit a real task. The hazard: a completed user mounts
     // /onboarding briefly before the gate redirects home, and the page fires
     // POST /onboarding/scan on mount.
-    writeGoogleAccounts([{ id: "gacct_test", tag: "personal", email: "user@example.com", configDir: "/tmp/none", addedAt: new Date().toISOString() }]);
+    bindTestGoogleAccount(config.instance);
     writeOnboarding(config.instance, {
       version: 1,
       completed: true,
@@ -379,15 +439,19 @@ describe("web onboarding api", () => {
     expect(byName["Auto-inbox"].skillNames).toEqual(["google-gmail", "google-calendar"]);
     expect(byName["Auto-inbox"].status).toBe("active");
     expect(byName["Auto-inbox"].prompt).toContain("Label new mail");
-    expect(byName["Auto-inbox"].prompt).not.toContain("Archive clearly-unimportant");
+    // archiveUnimportant:false ⇒ no label line carries the (auto-archive)
+    // marker (the marker always follows the label name's closing quote).
+    expect(byName["Auto-inbox"].prompt).not.toContain('" (auto-archive)');
     expect(byName["Auto-inbox"].prompt).toContain("never sends email");
     expect(byName["Morning Briefing"].cronExpression).toBe("0 8 * * *");
     expect(byName["Morning Briefing"].skillNames).toEqual(["google-gmail", "google-calendar"]);
-    expect(byName["Morning Briefing"].forwardToChat).toBe(true);
+    // Delivery is the routine's own conversation, never a forward into the
+    // (hidden) main agent Chat.
+    expect(byName["Morning Briefing"].forwardToChat).toBeUndefined();
     expect(byName["Morning Briefing"].prompt).toContain("news");
     expect(byName["Meeting Briefing"].cronExpression).toBe("*/15 * * * *");
     expect(byName["Meeting Briefing"].skillNames).toEqual(["google-calendar", "google-gmail"]);
-    expect(byName["Meeting Briefing"].forwardToChat).toBe(true);
+    expect(byName["Meeting Briefing"].forwardToChat).toBeUndefined();
 
     // Re-apply with a smaller selection: the previous jobs are replaced, not
     // duplicated, and the omitted timezone falls back to the PATCHed record.
@@ -561,11 +625,42 @@ describe("web onboarding api", () => {
     expect(validateScanTasks({ suggestedTasks: "reply to boss" })).toBeUndefined();
 
     // The oversized suggestion is dropped (never a pre-checked one-click
-    // seed), then the list caps at 10.
+    // seed), then the starter-task list caps at ten rows.
     const long = "x".repeat(400);
     const clamped = validateScanTasks({ suggestedTasks: [long, ...Array.from({ length: 14 }, (_, i) => `task ${i}`)] });
     expect(clamped).toHaveLength(10);
     expect(clamped?.[0]).toBe("task 0");
+  });
+
+  test("validateScanRoutines canonicalizes, dedupes, caps, and rejects bad shapes", () => {
+    expect(
+      validateScanRoutines({
+        suggestedRoutines: [
+          { name: "  Weekly   customer brief ", description: " Review\ncustomer themes each week. ", usesEmail: true },
+          { name: "weekly customer brief", description: "duplicate", usesEmail: false },
+          { name: "Missing email marker", description: "invalid" },
+          null
+        ]
+      })
+    ).toEqual([
+      { name: "Weekly customer brief", description: "Review customer themes each week.", usesEmail: true }
+    ]);
+
+    expect(validateScanRoutines("nope")).toBeUndefined();
+    expect(validateScanRoutines({})).toBeUndefined();
+    expect(validateScanRoutines({ suggestedRoutines: "nope" })).toBeUndefined();
+
+    const long = "x".repeat(400);
+    const clamped = validateScanRoutines({
+      suggestedRoutines: Array.from({ length: 8 }, (_, index) => ({
+        name: `Routine ${index} ${long}`,
+        description: long,
+        usesEmail: index % 2 === 0
+      }))
+    });
+    expect(clamped).toHaveLength(5);
+    expect(clamped?.[0]?.name).toHaveLength(80);
+    expect(clamped?.[0]?.description).toHaveLength(300);
   });
 });
 

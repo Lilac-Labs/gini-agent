@@ -221,7 +221,7 @@ export function VoiceBubble({ audio }: { audio: AudioAttachment }) {
         hitSlop={8}
         style={styles.voicePlay}
         accessibilityRole="button"
-        accessibilityLabel={status.playing ? "Pause voice message" : "Play voice message"}
+        accessibilityLabel={status.playing ? "Pause voice chat" : "Play voice chat"}
       >
         <Feather
           name={status.playing ? "pause" : "play"}
@@ -239,7 +239,7 @@ export function VoiceBubble({ audio }: { audio: AudioAttachment }) {
           accessible
           style={styles.voiceTrackHit}
           accessibilityRole="adjustable"
-          accessibilityLabel="Seek voice message"
+          accessibilityLabel="Seek voice chat"
           accessibilityValue={{ now: Math.round(progress * 100), min: 0, max: 100 }}
           accessibilityActions={[{ name: "increment" }, { name: "decrement" }]}
           onAccessibilityAction={onAccessibilityAction}

@@ -7,6 +7,22 @@ export type ProcessStep =
   | { kind: "tool_call"; block: ToolCallBlock }
   | { kind: "narration"; block: AssistantTextBlock };
 
+// A create_job/update_job call that actually created or patched a job (the
+// runtime stamps the job's id on the block — see ADR chat-block-protocol.md).
+// It renders as the standalone RoutineCreatedCard instead of a generic tool
+// row, so grouping excludes it from the collapsed tool_group and passes it
+// through as its own block item. Shared with BlockRenderer's tool_call branch
+// so the two can't disagree about which calls leave the group. Running/failed
+// calls (and legacy blocks without a jobId) keep the generic treatment;
+// delete_job never carries a jobId, so it never cards.
+export function rendersAsRoutineCard(block: ToolCallBlock): block is ToolCallBlock & { jobId: string } {
+  return (
+    (block.toolName === "create_job" || block.toolName === "update_job") &&
+    block.status === "ok" &&
+    typeof block.jobId === "string"
+  );
+}
+
 // Render-time view of the chat block stream. Whenever a turn makes tool
 // calls, those calls AND the per-iteration narration the model emitted
 // between them collapse into a single "tool_group" item — the narration
@@ -95,7 +111,8 @@ export function groupExchanges(
 function appendExchange(items: ChatRenderItem[], exchange: ChatBlock[], terminalTaskIds: ReadonlySet<string>) {
   const calls: ToolCallBlock[] = [];
   for (const b of exchange) {
-    if (b.kind === "tool_call") calls.push(b);
+    // Routine-card calls stand alone — they never join the collapsed group.
+    if (b.kind === "tool_call" && !rendersAsRoutineCard(b)) calls.push(b);
   }
   // No tool calls: a plain Q&A turn (or one just starting before its first tool
   // call). Pass every block through as its own bubble — nothing to fold and no
@@ -150,7 +167,7 @@ function appendExchange(items: ChatRenderItem[], exchange: ChatBlock[], terminal
   let groupIdx = -1;
   for (let i = 0; i < exchange.length; i++) {
     const b = exchange[i]!;
-    if (b.kind === "tool_call") {
+    if (b.kind === "tool_call" && !rendersAsRoutineCard(b)) {
       steps.push({ kind: "tool_call", block: b });
     } else if (b.kind === "assistant_text" && i !== finalAnswerIdx) {
       steps.push({ kind: "narration", block: b });
@@ -175,7 +192,10 @@ function appendExchange(items: ChatRenderItem[], exchange: ChatBlock[], terminal
   items.push({ kind: "tool_group", id: `group-${calls[0]!.id}`, calls, steps, inProgress: !complete });
   for (let i = groupIdx + 1; i < exchange.length; i++) {
     const b = exchange[i]!;
-    if (b.kind === "tool_call" || b.kind === "tool_result") continue;
+    if (b.kind === "tool_result") continue;
+    // Grouped calls already render inside the tool_group; a routine-card call
+    // passes through so it renders standalone at its transcript position.
+    if (b.kind === "tool_call" && !rendersAsRoutineCard(b)) continue;
     if (b.kind === "assistant_text" && i !== finalAnswerIdx) continue;
     items.push({ kind: "block", block: b, ...(i === finalAnswerIdx ? { isFinalAnswer: true } : {}) });
   }

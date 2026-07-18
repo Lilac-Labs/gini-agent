@@ -35,7 +35,7 @@ import type { AgentRecord, ChatSession } from "@/src/types";
 // Home — scoped to a single active agent, mirroring the web sidebar's
 // one-agent-per-panel model and the Pencil "Mobile — Chat (New Model)" frame.
 // The header is the agent switcher (tap opens the slide-out Agents Drawer);
-// below it sit the active agent's "Messages" (its one canonical chat) and
+// below it sit the active agent's "Chat" (its one canonical chat) and
 // "Topics" (its subject-scoped side-conversations). Recurring jobs are no
 // longer a top-level concept here — they surface as Topics.
 export default function ChannelsScreen() {
@@ -52,7 +52,7 @@ export default function ChannelsScreen() {
   const defaultAgentId = agents.data?.defaultAgentId;
 
   // The active agent drives the whole screen. Fall back to the default (then
-  // the first agent) so the header and Messages row still render during the
+  // the first agent) so the header and Chat row still render during the
   // brief window before the runtime reports a selection.
   const activeAgent = useMemo<AgentRecord | undefined>(
     () =>
@@ -62,7 +62,7 @@ export default function ChannelsScreen() {
     [agentList, activeAgentId, defaultAgentId]
   );
 
-  // The active agent's single canonical chat (the "Messages" row). The
+  // The active agent's single canonical chat (the "Chat" row). The
   // resolver is idempotent server-side; the cached session feeds the row's
   // preview / unread, and the tap re-resolves to be safe on first paint.
   const activeChat = useAgentChat(activeAgent?.id ?? null);
@@ -85,7 +85,7 @@ export default function ChannelsScreen() {
   const [newAgentName, setNewAgentName] = useState("");
   const [newAgentError, setNewAgentError] = useState<string | null>(null);
   // Opening the canonical chat is a network hop; track the in-flight state so
-  // the Messages row shows a spinner instead of a dead press. The ref is the
+  // the Chat row shows a spinner instead of a dead press. The ref is the
   // real re-entrancy guard — state alone would weaken a synchronous double-tap.
   const [opening, setOpening] = useState(false);
   const openingRef = useRef(false);
@@ -198,7 +198,7 @@ export default function ChannelsScreen() {
   const messagesPreview =
     chatSession?.lastMessagePreview?.trim() ||
     chatSession?.summary?.trim() ||
-    "No messages yet";
+    "No chats yet";
 
   return (
     <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
@@ -253,19 +253,19 @@ export default function ChannelsScreen() {
             />
           }
         >
-          {/* Messages — the active agent's one canonical chat. */}
+          {/* Chat — the active agent's one canonical chat. */}
           <TouchableOpacity
             onPress={() => void openActiveChat()}
             activeOpacity={0.7}
             style={styles.messagesRow}
             accessibilityRole="button"
-            accessibilityLabel={`Open ${activeName} messages`}
+            accessibilityLabel={`Open ${activeName} chat`}
           >
             <AgentAvatar name={activeName} size={48} online={online} />
             <View style={styles.messagesBody}>
               <View style={styles.messagesTop}>
                 <Text style={styles.messagesTitle} numberOfLines={1}>
-                  Messages
+                  Chat
                 </Text>
                 {opening ? (
                   <ActivityIndicator size="small" color={theme.muted} />
@@ -401,7 +401,7 @@ const styles = StyleSheet.create({
 
   content: { paddingHorizontal: 16, paddingBottom: 24 },
 
-  // Messages row — active agent avatar + "Messages" + preview + unread.
+  // Chat row — active agent avatar + "Chat" + preview + unread.
   messagesRow: {
     flexDirection: "row",
     alignItems: "center",

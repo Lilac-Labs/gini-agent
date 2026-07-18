@@ -30,16 +30,16 @@ Gini's **runtime is the gateway**: a single Bun process per instance owns all du
                                             │
         ┌───────────────────────────────────┼───────────────────────────────────┐
         │                                   │                                   │
-        │ token server-side only            │ Google OAuth via                  │ bearer token
-        │                                   │ hosted edge / owner               │
-        │                                   │ bearer (self-host)                │
+        │ token server-side only            │ owner bearer                      │ bearer token
+        │                                   │                                   │
+        │                                   │                                   │
 ┌───────┴───────┐                  ┌────────┴────────┐                  ┌───────┴────────┐
 │   Next.js     │                  │  Expo mobile    │                  │   CLI          │
 │   BFF + UI    │                  │  app            │                  │   scripts      │
 │               │                  │                 │                  │   MCP clients  │
-│   one per     │                  │  sign in with   │                  │                │
-│   instance    │                  │  Google via the │                  │  direct API    │
-│   localhost   │                  │  hosted edge    │                  │  client        │
+│   one per     │                  │  configured URL │                  │                │
+│   instance    │                  │  + owner token  │                  │  direct API    │
+│   localhost   │                  │                 │                  │  client        │
 └───────┬───────┘                  └─────────────────┘                  └────────────────┘
         │
         │ HTML / JS / SSE
@@ -81,7 +81,7 @@ Gini's **runtime is the gateway**: a single Bun process per instance owns all du
 
 ### Other Clients
 
-The Expo mobile app is a gateway client: on the hosted deployment it signs in with Google via the edge and stores the edge session token as its bearer; against a self-hosted gateway it uses the owner bearer (see [Owner-Token-Only Authentication](adr/owner-token-auth.md)). MCP, messaging bridges, and scripts connect through the same gateway contract. Clients that can safely hold a token may call the gateway directly; browser clients go through a BFF.
+The Expo mobile app is a gateway client: it stores an operator-provided gateway URL and owner bearer (see [Owner-Token-Only Authentication](adr/owner-token-auth.md)). MCP, messaging bridges, and scripts connect through the same gateway contract. Clients that can safely hold a token may call the gateway directly; browser clients go through a BFF.
 
 ## Why This Shape
 
@@ -137,7 +137,7 @@ On macOS a launchd-managed instance is supervised to stay up across crashes, cle
 
 ## Off-LAN Access
 
-Off-LAN access is available through **four runtime-driven tunnel providers** — gini-relay (the managed, zero-prerequisite default), Tailscale, ngrok, and Cloudflare. The user picks a provider and connects (`gini tunnel`, or the web tunnel panel over `/api/tunnel*`). For **gini-relay**, the gateway runs an OAuth-loopback login in a browser on the host, the relay assigns the device a session and a subdomain, and a supervised native `frpc` child exposes the instance's gateway port (the single origin fronting UI + API) at `https://<subdomain>.<relayDomain>` (`relayDomain` default `gini-relay.lilaclabs.ai`, overridable via `GINI_RELAY_DOMAIN`). `tailscale`, `ngrok`, and `cloudflare` are equally drivable when their host prerequisite is detected — the runtime runs `tailscale serve`, `ngrok http`, or a cloudflared tunnel itself; a connect attempt on a provider whose prerequisite is missing is rejected with the machine-readable `provider_unavailable` code, which the web UI uses to open that provider's self-contained guide inline (per-provider pages under [Remote Access](./remote-access.md)). The gateway owns the relay / runtime-tunnel / loopback / `GINI_TRUSTED_ORIGINS` trust decision for web-bound requests — a runtime-managed tunnel's connected URL is trusted automatically, exactly while connected — and rewrites `Host`/`Origin` to loopback before proxying, so the inner web child (BFF) stays relay-agnostic. Those host/origin trust lanes are the whole gate: a trusted non-loopback front is owner-equivalent, exactly like loopback, so expose a front only to devices you fully trust (remote multi-user access is the hosted edge's job). See [Tunnel Connectivity](./adr/tunnel-connectivity.md), [BFF Trust Boundary](./adr/bff-trust-boundary.md), and [Owner-Token-Only Authentication](./adr/owner-token-auth.md).
+Off-LAN access is available through **four runtime-driven tunnel providers** — gini-relay (the zero-prerequisite default), Tailscale, ngrok, and Cloudflare. The user picks a provider and connects (`gini tunnel`, or the web tunnel panel over `/api/tunnel*`). For **gini-relay**, the gateway runs an OAuth-loopback login in a browser on the host, the relay assigns the device a session and a subdomain, and a supervised native `frpc` child exposes the instance's gateway port (the single origin fronting UI + API) at `https://<subdomain>.<relayDomain>` (`relayDomain` default `gini-relay.lilaclabs.ai`, overridable via `GINI_RELAY_DOMAIN`). `tailscale`, `ngrok`, and `cloudflare` are equally drivable when their host prerequisite is detected — the runtime runs `tailscale serve`, `ngrok http`, or a cloudflared tunnel itself; a connect attempt on a provider whose prerequisite is missing is rejected with the machine-readable `provider_unavailable` code, which the web UI uses to open that provider's self-contained guide inline (per-provider pages under [Remote Access](./remote-access.md)). The gateway owns the relay / runtime-tunnel / loopback / `GINI_TRUSTED_ORIGINS` trust decision for web-bound requests — a runtime-managed tunnel's connected URL is trusted automatically, exactly while connected — and rewrites `Host`/`Origin` to loopback before proxying, so the inner web child (BFF) stays relay-agnostic. Those host/origin trust lanes are the whole gate: a trusted non-loopback front is owner-equivalent, exactly like loopback, so expose a front only to devices you fully trust or add an authentication proxy. See [Tunnel Connectivity](./adr/tunnel-connectivity.md), [BFF Trust Boundary](./adr/bff-trust-boundary.md), and [Owner-Token-Only Authentication](./adr/owner-token-auth.md).
 
 ## Mobile + Push
 

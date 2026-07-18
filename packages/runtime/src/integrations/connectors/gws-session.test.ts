@@ -146,7 +146,7 @@ describe("parseGwsAuthStatus tokenRevoked", () => {
   test("the real Google revoke output (has_refresh_token + expired-or-revoked) → tokenRevoked true", () => {
     // Verbatim shape `gws auth status` prints after a myaccount.google.com
     // revoke: token_error is Google's human message, NOT an invalid_grant code,
-    // and client_config_exists is false in the hosted baked-creds setup.
+    // and client_config_exists can be false for a plain credentials.json login.
     const status = parseGwsAuthStatus(
       JSON.stringify({
         client_config_exists: false,

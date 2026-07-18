@@ -2,7 +2,9 @@ import type {
   Authorization,
   ChatSessionRecord,
   ContainerAttention,
+  HomeDoneItem,
   HomeTaskItem,
+  JobRecord,
   RecentItem,
   RuntimeConfig,
   SetupRequest,
@@ -88,6 +90,9 @@ const HOME_ATTENTION_ORDER: Record<ContainerAttention, number> = {
 // Bound the Recents artifact feed — home is a daily surface, not an archive.
 const HOME_RECENTS_CAP = 10;
 
+// Same bound for the collapsible Done section.
+const HOME_DONE_CAP = 10;
+
 // Truncation cap for a home row's outcome line — same one-liner budget as
 // the chat list's lastMessagePreview.
 const HOME_OUTCOME_LINE_CHARS = 140;
@@ -115,6 +120,15 @@ function outcomeLineFor(outcome: ContainerRunOutcome): string {
     : firstLine;
 }
 
+// Saved Gmail drafts render from a fenced email-draft block and do not create
+// a messaging.send authorization until the user chooses Send on the card.
+function taskProducedEmailDraft(task: Task): boolean {
+  return (
+    typeof task.summary === "string" &&
+    /(?:^|\r?\n)[ \t]*```email-draft[ \t]*(?:\r?\n|$)/.test(task.summary)
+  );
+}
+
 // Map a pending Authorization to the home review affordance. `kind` drives
 // the row icon: an outbound message send reads as an email-style review,
 // file writes as a document review, everything else generic. The label is
@@ -136,8 +150,8 @@ function reviewForAuthorization(auth: { id: string; action: string }): NonNullab
 // only needs derived attention + a few facts per container.
 //
 // A container is a home task row iff its derived attention ≠ none (an
-// acknowledged/quiet container never appears — this IS the server-side
-// acknowledged filter) AND the inclusion predicate holds:
+// acknowledged/quiet container never appears as a task row — this IS the
+// server-side acknowledged filter) AND the inclusion predicate holds:
 //   startedBy === "user"
 //   OR attention ∈ {needs_input, review}
 //   OR surfaced === true.
@@ -145,24 +159,40 @@ function reviewForAuthorization(auth: { id: string; action: string }): NonNullab
 // errands surface only when they need a decision, and containers the spawner
 // explicitly marked user-facing surface on any live attention. Headless and
 // archived containers never appear; the root Chat (kind:"agent") and bridge
-// sessions are not containers on home — Chat is the Messages surface.
+// sessions are not containers on home — Chat is its own surface.
 // Message-mode conversations (startedAs === "message") also skip the TASKS
-// list — they live in the sidebar Messages section, so a parked question or
+// list — they live in Home's Chats section, so a parked question or
 // finished reply there never reads as a task row. They still feed Recents.
+//
+// Acknowledged containers whose latest outcome is a completed run resurface
+// in `done` (the collapsible Done section) under the same visibility rules;
+// acknowledged failures and cancellations disappear entirely.
 export function homeView(
   config: RuntimeConfig,
   agentId?: string
-): { owner?: { firstName: string }; tasks: HomeTaskItem[]; recents: RecentItem[] } {
+): { owner?: { firstName: string }; tasks: HomeTaskItem[]; done: HomeDoneItem[]; recents: RecentItem[] } {
   const state = readState(config.instance);
   const index = buildContainerAttentionIndex(state);
   // Tasks that produced an outbound-message draft render with the draft icon
-  // in Recents. One pass over authorizations (any status — the draft was
-  // reviewed by the time the run completed).
+  // in Recents; message-mode containers render with the chat icon instead.
+  // Authorizations cover approval-gated sends; the final summary covers saved
+  // Gmail drafts rendered as cards before any send is requested.
   const draftTaskIds = new Set<string>();
   for (const auth of state.authorizations) {
     if (auth.action === "messaging.send" && auth.taskId) draftTaskIds.add(auth.taskId);
   }
+  // Session → the newest scheduled job created from that conversation (a
+  // chat-created job stamps its originating session on job.chatSessionId).
+  // Precomputed in one pass so each row lookup is O(1); the newest job wins
+  // when several point at one conversation. Drives the row's Routine chip.
+  const routineJobBySession = new Map<string, JobRecord>();
+  for (const job of state.jobs) {
+    if (!job.chatSessionId) continue;
+    const current = routineJobBySession.get(job.chatSessionId);
+    if (!current || job.createdAt > current.createdAt) routineJobBySession.set(job.chatSessionId, job);
+  }
   const tasks: HomeTaskItem[] = [];
+  const done: HomeDoneItem[] = [];
   const recents: RecentItem[] = [];
   for (const session of state.chatSessions) {
     if (session.kind !== "topic" && session.kind !== "channel") continue;
@@ -183,19 +213,37 @@ export function homeView(
         recents.push({
           id: newest.id,
           containerId: session.id,
-          icon: draftTaskIds.has(newest.id) ? "draft" : "document",
+          icon:
+            session.startedAs === "message"
+              ? "chat"
+              : draftTaskIds.has(newest.id) || taskProducedEmailDraft(newest)
+                ? "draft"
+                : "document",
           title: session.title,
           timestamp: newest.updatedAt
         });
       }
     }
     // Recents above still applies; only the task-row path skips message-mode
-    // conversations (they belong to the sidebar Messages section, not the
+    // conversations (they belong to Home's Chats section, not the
     // home tasks queue). Undefined startedAs (older records, router topics)
     // keeps the row exactly as before.
     if (session.startedAs === "message") continue;
     const attention = deriveContainerAttention(state, session, index);
-    if (attention === "none") continue;
+    if (attention === "none") {
+      // Acknowledged containers leave the task queue; the ones whose latest
+      // outcome is a success resurface in the Done section. Acknowledged
+      // failures/cancellations disappear entirely, and agent-spawned
+      // internal errands never show (same visibility rule as task rows).
+      if (!userFacing) continue;
+      const outcome = latestRunOutcome(state, session, index);
+      if (outcome && outcome.status === "completed") {
+        const doneItem: HomeDoneItem = { id: session.id, title: session.title, completedAt: outcome.at };
+        if (outcome.summary) doneItem.outcomeLine = outcomeLineFor(outcome);
+        done.push(doneItem);
+      }
+      continue;
+    }
     if (!userFacing && attention !== "needs_input" && attention !== "review") continue;
     const outcome = latestRunOutcome(state, session, index);
     const item: HomeTaskItem = {
@@ -213,6 +261,8 @@ export function homeView(
       startedBy,
       updatedAt: session.updatedAt
     };
+    const routineJob = routineJobBySession.get(session.id);
+    if (routineJob) item.routineJobId = routineJob.id;
     if (attention === "done_unacknowledged" && outcome) {
       item.outcomeLine = outcomeLineFor(outcome);
       // Only a failure gets the destructive treatment + Retry; cancelled
@@ -248,11 +298,13 @@ export function homeView(
     const byAttention = HOME_ATTENTION_ORDER[a.attention] - HOME_ATTENTION_ORDER[b.attention];
     return byAttention !== 0 ? byAttention : b.updatedAt.localeCompare(a.updatedAt);
   });
+  done.sort((a, b) => b.completedAt.localeCompare(a.completedAt));
   recents.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   const firstName = config.ownerFirstName?.trim();
   return {
     ...(firstName ? { owner: { firstName } } : {}),
     tasks,
+    done: done.slice(0, HOME_DONE_CAP),
     recents: recents.slice(0, HOME_RECENTS_CAP)
   };
 }

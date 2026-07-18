@@ -148,7 +148,7 @@ export function VoiceRecorder({
       activeRef.current = false;
       Alert.alert(
         "Microphone access required",
-        "Enable microphone access in Settings to record voice messages."
+        "Enable microphone access in Settings to record voice chat."
       );
       await finish();
       return;
@@ -186,7 +186,7 @@ export function VoiceRecorder({
       await finish();
       Alert.alert(
         "Couldn't start recording",
-        "Gini couldn't access the microphone to record a voice message. Please try again."
+        "Gini couldn't access the microphone to record voice chat. Please try again."
       );
     }
   }, [recorder, finish]);
@@ -219,7 +219,7 @@ export function VoiceRecorder({
         onSend({ ...ref, durationMs });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        Alert.alert("Voice message failed", message);
+        Alert.alert("Voice chat failed", message);
       } finally {
         setUploading(false);
       }
@@ -266,7 +266,7 @@ export function VoiceRecorder({
         <View
           style={[styles.micButton, (disabled || uploading) && styles.micButtonDisabled]}
           accessibilityRole="button"
-          accessibilityLabel="Hold to record a voice message"
+          accessibilityLabel="Hold to record voice chat"
         >
           <Feather name="mic" size={22} color={theme.buttonText} />
         </View>

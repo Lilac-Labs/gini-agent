@@ -119,6 +119,13 @@ const ALWAYS_ON = new Set([
   "skill_run",
   "vision_query",
   "request_connector",
+  // request_google_account surfaces the connect/reconnect-Google button
+  // (system_note cta → Integrations page). Ungated like request_connector —
+  // a revoked Google session can strand any instance, so the affordance must
+  // pass toolset gating with nothing toggled — but DEFERRED like
+  // list_connectors, so it joins the live tools array only via load_tools
+  // (the steering that routes the model here names the tool explicitly).
+  "request_google_account",
   // ask_user is the single-select question-card meta-tool (chat.choice
   // SetupRequest). Always-on like request_connector: its primary steer —
   // offering setup-vs-alternative choices before connector setup — must
@@ -164,8 +171,9 @@ const ALWAYS_ON = new Set([
   // the "self" toolset (not in defaults) and pass gating, but they are
   // DEFERRED — they only join the live tools array once the model loads
   // them. They are asserted separately (see "deferred tools" below), not
-  // in ALWAYS_ON, because ALWAYS_ON is the set that surfaces in the live
-  // (post-deferral) catalog with no toolsets enabled.
+  // in ALWAYS_ON, because ALWAYS_ON is the set that passes toolset gating
+  // with no toolsets enabled (all live in the post-deferral catalog except
+  // the deferred request_google_account, noted above).
 ]);
 
 // The self-config / introspection tools, now direct deferred tools.
@@ -523,6 +531,13 @@ describe("buildToolCatalog", () => {
     expect(desc).toContain("stable general knowledge");
   });
 
+  test("file_write description advertises the inline generated-file surface", () => {
+    const state = stateWithToolsets([ts("file")]);
+    const catalog = buildToolCatalog(state);
+    const desc = catalog.find((t) => t.function.name === "file_write")?.function.description ?? "";
+    expect(desc).toContain("inline file card in chat");
+  });
+
   describe("cross-toolset routing hints", () => {
     // browser_navigate's description steers content discovery to
     // web_search, and the search/fetch descriptions steer page
@@ -631,6 +646,25 @@ describe("deferred tools", () => {
     const allNames = new Set(catalog.map((t) => t.function.name));
     expect(allNames.has("self_discover")).toBe(false);
     expect(allNames.has("self_invoke")).toBe(false);
+  });
+
+  test("request_google_account is ungated but deferred, surfacing via the on-demand index", () => {
+    // The Google reconnect affordance must pass toolset gating on any
+    // instance (a revoked session can strand a fresh one), but its schema
+    // stays out of the live tools array until the model loads it — the
+    // steering that routes the model here names the tool, and the index
+    // line carries the never-run-gws-auth-login steer.
+    const emptyCatalog = buildToolCatalog(stateWithToolsets([]));
+    const tool = emptyCatalog.find((t) => t.function.name === "request_google_account");
+    expect(tool).toBeDefined();
+    expect(tool?.toolset).toBe("connectors");
+    expect(tool?.deferred).toBe(true);
+    const live = new Set(applyDeferralFilter(emptyCatalog, new Set()).map((t) => t.function.name));
+    expect(live.has("request_google_account")).toBe(false);
+    const index = deferredToolIndex(emptyCatalog, new Set());
+    const entry = index.find((e) => e.name === "request_google_account");
+    expect(entry?.summary).toContain("Integrations page");
+    expect(entry?.summary).toContain("gws auth login");
   });
 
   test("applyDeferralFilter includes a deferred tool once it is loaded", () => {

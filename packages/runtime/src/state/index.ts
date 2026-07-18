@@ -202,6 +202,7 @@ export {
   createMessagingMessageRecord,
   findOrCreateTelegramChatSession,
   findOrCreateDiscordChatSession,
+  findOrCreateSlackChatSession,
   createImportReport,
   createAgentRecord,
   createRelayRecord,

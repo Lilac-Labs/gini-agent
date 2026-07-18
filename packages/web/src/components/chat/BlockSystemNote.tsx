@@ -15,6 +15,10 @@ import type { SystemNoteBlock } from "@runtime/types";
 // to Settings but the CTA reads as "open settings" since there's no key to
 // paste; API-key providers link to the Settings → Providers key form, with the
 // provider's own error shown as the specific cause.
+//
+// A generic cta (block.cta) renders the note text plus an inline button to
+// an in-app route (e.g. request_google_account's "Reconnect Google account"
+// → /integrations). Neutral styling — it's guidance, not an error card.
 export function BlockSystemNote({ block }: { block: SystemNoteBlock }) {
   if (block.authError) {
     const { providerLabel, detail, reauthKind, reauthUrl } = block.authError;
@@ -54,6 +58,16 @@ export function BlockSystemNote({ block }: { block: SystemNoteBlock }) {
             <Link href={url}>{ctaLabel}</Link>
           </Button>
         )}
+      </div>
+    );
+  }
+  if (block.cta) {
+    return (
+      <div>
+        <p className="text-xs italic text-muted-foreground">{block.text}</p>
+        <Button asChild size="sm" variant="outline" className="mt-2">
+          <Link href={block.cta.href}>{block.cta.label}</Link>
+        </Button>
       </div>
     );
   }

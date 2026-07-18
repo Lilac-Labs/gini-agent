@@ -16,18 +16,7 @@
 import type { ConnectorRecord, RuntimeConfig } from "../types";
 import { addAudit, createMcpServerRecord, mutateState, readState } from "../state";
 import { getProvider } from "./connectors/registry";
-
-// A credential is "usable" for auto-register iff it is configured and has
-// either confirmed healthy (probe ran) or — for probe-less providers — has
-// unknown health (no remote check exists). Anything else (disabled, error, or
-// unknown for a probe-based provider) defers registration so a stale or
-// never-probed credential can't be promoted to an MCP entry.
-function connectorUsable(c: ConnectorRecord): boolean {
-  if (c.status !== "configured") return false;
-  if (c.health === "healthy") return true;
-  const hasProbe = Boolean(getProvider(c.provider)?.probe);
-  return !hasProbe && c.health === "unknown";
-}
+import { connectorIsUsable } from "./connectors";
 
 // Register an MCP server for every usable api-key credential that carries
 // `metadata.mcp`. The server row is named by `mcp.name` when set, else the
@@ -46,7 +35,7 @@ async function syncCredentialMcpServers(config: RuntimeConfig, created: string[]
     if (credential.type !== "api-key") continue;
     const mcp = credential.metadata?.mcp;
     if (!mcp?.url) continue;
-    if (!connectorUsable(credential)) continue;
+    if (!connectorIsUsable(credential)) continue;
     const serverName = mcp.name ?? credential.name;
     if (state.mcpServers.some((s) => s.name === serverName)) continue;
     const headerName = mcp.headerName ?? "Authorization";
@@ -56,7 +45,7 @@ async function syncCredentialMcpServers(config: RuntimeConfig, created: string[]
       // Re-check usability and existence inside the lock to lose cleanly to a
       // concurrent disable/delete or `gini mcp add` for the same name.
       const still = mutating.connectors.find((c) => c.id === credential.id);
-      if (!still || still.type !== "api-key" || !connectorUsable(still)) return undefined;
+      if (!still || still.type !== "api-key" || !connectorIsUsable(still)) return undefined;
       if (mutating.mcpServers.some((s) => s.name === serverName)) return undefined;
       const record = createMcpServerRecord(
         mutating,

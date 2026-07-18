@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { parseDraftSendResult, sendGmailDraft } from "./gmail-draft-send";
+import {
+  parseDraftSendResult,
+  resolveDraftSendConfigDir,
+  sendGmailDraft,
+  setAccountsProvider
+} from "./gmail-draft-send";
 
 // parseDraftSendResult is the pure half of sendGmailDraft (the subprocess
 // boundary is the injectable runner). These tests pin the success/failure
@@ -66,5 +71,21 @@ describe("sendGmailDraft", () => {
     });
     expect(result.ok).toBe(false);
     expect(result.message).toContain("reach Gmail");
+  });
+});
+
+describe("resolveDraftSendConfigDir", () => {
+  test("scopes the account lookup to the requested instance", async () => {
+    let requestedInstance: string | undefined;
+    const restore = setAccountsProvider(async (instance) => {
+      requestedInstance = instance;
+      return [{ email: "me@example.com", configDir: "/cfg/me", signedIn: true }];
+    });
+    try {
+      expect(await resolveDraftSendConfigDir("me@example.com", "inst-a")).toBe("/cfg/me");
+      expect(requestedInstance).toBe("inst-a");
+    } finally {
+      restore();
+    }
   });
 });

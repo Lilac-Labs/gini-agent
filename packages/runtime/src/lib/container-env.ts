@@ -6,8 +6,6 @@
 // Kept as pure functions of an injected `env` bag (not module-scope reads of
 // process.env) so each is unit-testable in isolation and the call sites stay a
 // one-liner. See ADR docker-xvfb-deployment.md.
-import { hostedSecretFromFile } from "./hosted-secret-file";
-
 // Truthy-string parse shared by the boolean knobs. Accepts the conventional
 // affirmatives case-insensitively; everything else (including unset) is false.
 // Exported so a test can pin the exact accepted set.
@@ -71,26 +69,4 @@ export function resolveBrowserHeadless(env: NodeJS.ProcessEnv = process.env): bo
 export function containerChromeArgs(env: NodeJS.ProcessEnv = process.env): string[] {
   if (!isTruthyEnv(env.GINI_CHROME_NO_SANDBOX)) return [];
   return ["--no-sandbox", "--disable-dev-shm-usage"];
-}
-
-// The shared secret a hosted "edge" reverse proxy in front of the gateway
-// presents (in the X-Gini-Edge header) to be trusted the same way the local
-// operator is. Returns "" when unset — and "" is DELIBERATELY never a valid
-// secret: the header is honored ONLY when this is non-empty and equals the
-// header value, so an unset/empty env or a request with an empty header can
-// never win the compare. Default off: with the env unset every trust decision
-// is byte-for-byte the pre-edge behavior. Kept as a pure function of the env
-// bag (never a module-scope read) so it stays unit-testable in isolation.
-export function resolveEdgeSecret(env: NodeJS.ProcessEnv = process.env): string {
-  // Hosted restore hardening: a guest resumed from the shared base snapshot has
-  // a FROZEN process.env carrying the base PLACEHOLDER edge secret, which is the
-  // same for every restored guest and known from the image build. Left as-is, a
-  // restored guest would trust that predictable value in X-Gini-Edge — a
-  // defense-in-depth loss that only network isolation would still contain. The
-  // in-guest identity agent writes the TENANT's edge secret to the file named by
-  // GINI_EDGE_SECRET_FILE; read it there (per-tenant) so each restored guest
-  // trusts only its own secret. Falls back to the env value everywhere else
-  // (local, and cold-booted hosted guests before the agent writes the file),
-  // preserving the pre-restore behavior byte-for-byte. See lib/hosted-secret-file.ts.
-  return hostedSecretFromFile("GINI_EDGE_SECRET_FILE", env.GINI_EDGE_SECRET) ?? "";
 }

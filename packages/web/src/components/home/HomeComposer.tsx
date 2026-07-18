@@ -17,7 +17,9 @@ import {
   AttachmentTray,
   useAttachments
 } from "@/components/chat/attachments";
+import { useTopicPanel } from "@/components/chat/TopicPanelContext";
 import { useStartTask, useStatus } from "@/lib/queries";
+import { composerHighlightWord, highlightedTextParts } from "./HomeComposerHighlight";
 
 type ComposerMode = "task" | "message";
 
@@ -28,14 +30,16 @@ const MODE_STORAGE_KEY = "gini.home.composerMode";
 // Enter/Shift-Enter handling, and attachment machinery (shared
 // useAttachments hook) so typing and attaching feel identical. Both modes
 // start a container directly (POST /api/containers): Task mode stays on
-// home with an optimistic working row; Message mode navigates into the new
-// conversation's thread (never the persistent root agent chat).
+// home with an optimistic working row; Chat mode navigates into the new
+// chat thread (never the persistent root agent chat).
 export function HomeComposer() {
   const router = useRouter();
   const params = useSearchParams();
+  const panel = useTopicPanel();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [text, setText] = useState("");
   const [mode, setMode] = useState<ComposerMode>("task");
+  const [highlightWord, setHighlightWord] = useState<string | null>(null);
   const {
     attachments,
     anyUploading,
@@ -69,17 +73,34 @@ export function HomeComposer() {
     }
   };
 
-  // /?compose=message (the sidebar Messages "+") deep-links straight into
-  // Message mode with the textarea focused, then strips the param so
-  // reload/back-nav doesn't re-trigger it. Keyed on the params (not mount):
-  // clicking "+" while already on home only changes the query string, and
-  // the composer never remounts. Declared after the storage read above so
-  // the deep link wins the mount race; deliberately transient — it never
-  // writes the persisted mode chip.
+  // /?compose=message deep-links into Chat mode, while /?compose=task (the
+  // routines "Create routine" entry point) deep-links into Task mode with
+  // the textarea focused, then strips the params so
+  // reload/back-nav doesn't re-trigger. /?prompt=<text> additionally seeds
+  // the composer — pre-fill only, never auto-submit; a bare ?prompt= with no
+  // compose param keeps the legacy Chat-mode seed so external links don't
+  // change behavior. Keyed on the params (not mount) so a query-string
+  // change while already on home works without remounting the composer.
+  // Declared after the storage read above so the deep link
+  // wins the mount race; deliberately transient — it never writes the
+  // persisted mode chip.
   useEffect(() => {
-    if (params?.get("compose") !== "message") return;
-    setMode("message");
-    textareaRef.current?.focus();
+    const compose = params?.get("compose");
+    const seed = params?.get("prompt");
+    const highlight = params?.get("highlight");
+    if (compose !== "message" && compose !== "task" && !seed) return;
+    setMode(compose === "task" ? "task" : "message");
+    if (seed) setText(seed);
+    setHighlightWord(composerHighlightWord(highlight));
+    const el = textareaRef.current;
+    el?.focus();
+    // The controlled value only picks up `seed` on the next render, so move
+    // the caret to the end after that commit (rAF fires before the next
+    // paint); a synchronous setSelectionRange would clamp against the
+    // still-empty textarea.
+    if (seed && el) {
+      requestAnimationFrame(() => el.setSelectionRange(seed.length, seed.length));
+    }
     // Shallow URL cleanup (syncs useSearchParams without a router
     // navigation) — router.replace would run Next's navigation focus
     // management and steal the focus just placed on the textarea.
@@ -113,21 +134,26 @@ export function HomeComposer() {
     const content = text.trim();
     const images = readyRefs();
     // Clear immediately — the optimistic row (Task mode) / navigation
-    // (Message mode) is the feedback; text restored on error. The tray is
+    // (Chat mode) is the feedback; text restored on error. The tray is
     // not restored (its previews are revoked here), matching the chat
     // Composer — the uploads themselves survive server-side.
     setText("");
     clearAttachments();
     const messageMode = mode === "message";
     startTask.mutate(
-      // startedAs records the creation gesture: the sidebar Messages section
+      // startedAs records the creation gesture: the Home Chats section
       // lists startedAs === "message" containers; Task-mode mints stay home
       // work items only.
       { content, images, startedAs: messageMode ? "message" : "task" },
       {
         onSuccess: (data) => {
-          // Message mode opens the new conversation's own thread.
+          // Chat mode opens the new conversation's own thread full-page;
+          // Task mode stays on home and opens the new container in the
+          // right-side topic panel so the user watches the turn in place
+          // (the optimistic Tasks row lands alongside).
+          setHighlightWord(null);
           if (messageMode) router.push(`/chat?session=${data.containerId}`);
+          else panel?.openTopic(data.containerId);
         },
         onError: (error) => {
           setText(content);
@@ -144,6 +170,8 @@ export function HomeComposer() {
     }
   };
 
+  const highlightParts = highlightedTextParts(text, highlightWord);
+
   return (
     // suppressHydrationWarning (shell + textarea): password-manager extensions
     // (e.g. Dashlane's data-dashlane-rid) stamp attributes here before React
@@ -159,21 +187,39 @@ export function HomeComposer() {
     >
       <AttachmentDropOverlay active={dragActive} />
       <AttachmentTray attachments={attachments} onRemove={removeAttachment} />
-      <textarea
-        ref={textareaRef}
-        rows={1}
-        value={text}
-        onChange={(event) => setText(event.target.value)}
-        onKeyDown={handleKeyDown}
-        onPaste={handlePaste}
-        placeholder={mode === "task" ? "Give Gini a task" : "Ask Gini anything"}
-        suppressHydrationWarning
-        data-1p-ignore=""
-        data-lpignore="true"
-        data-bwignore=""
-        data-form-type="other"
-        className="block max-h-32 w-full resize-none border-0 bg-transparent text-sm leading-snug outline-none placeholder:text-muted-foreground"
-      />
+      <div className="relative">
+        {highlightParts ? (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 top-0 whitespace-pre-wrap break-words text-sm leading-snug text-foreground"
+          >
+            {highlightParts[0]}
+            <span className="inline-flex items-center gap-1 rounded-full bg-[#E7F0FF] px-2 py-0.5 font-medium text-[#1769FF]">
+              <span className="size-1.5 rounded-full bg-current" />
+              {highlightParts[1]}
+            </span>
+            {highlightParts[2]}
+          </div>
+        ) : null}
+        <textarea
+          ref={textareaRef}
+          rows={1}
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+          placeholder={mode === "task" ? "Give Gini a task" : "Ask Gini anything"}
+          suppressHydrationWarning
+          data-1p-ignore=""
+          data-lpignore="true"
+          data-bwignore=""
+          data-form-type="other"
+          className={cn(
+            "relative block max-h-32 w-full resize-none border-0 bg-transparent text-sm leading-snug outline-none placeholder:text-muted-foreground",
+            highlightParts && "text-transparent caret-foreground"
+          )}
+        />
+      </div>
       <div className="mt-3.5 flex items-center gap-3.5">
         <input
           ref={fileInputRef}
@@ -194,13 +240,13 @@ export function HomeComposer() {
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="outline" size="sm">
-              {mode === "task" ? "Task" : "Message"}
+              {mode === "task" ? "Task" : "Chat"}
               <ChevronDown className="text-muted-foreground" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             <DropdownMenuItem onSelect={() => selectMode("task")}>Task</DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => selectMode("message")}>Message</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => selectMode("message")}>Chat</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
         <button

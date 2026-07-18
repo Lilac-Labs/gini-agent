@@ -5,6 +5,15 @@
 // and the chat-task agent loop in execution/ pull from here so they ship
 // the same instructions to the model.
 
+/// <reference path="./file-imports.d.ts" />
+// The reference directive above makes the `*.md` file-import ambient type (for
+// the `with { type: "file" }` import below) travel WITH this file across
+// package boundaries. The runtime package's own tsconfig picks up
+// file-imports.d.ts via its `src/**/*.ts` include, but the web/mobile packages
+// follow `@runtime/*` imports into this module under THEIR tsconfig, which does
+// not include the runtime's .d.ts — without this directive, tsc there can't
+// resolve the .md module. See ADR compiled-runtime-binary.md.
+
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentIdentity, ChatClientSurface, IdentitySnapshotRecord, JobRecord } from "./types";
@@ -293,6 +302,8 @@ export function buildClientSurfaceBlock(surface: ChatClientSurface | undefined):
       return "The user is messaging from Telegram — the in-chat browser screencast used for a sign-in / handoff isn't available there, so a browser handoff can't reach them.";
     case "discord":
       return "The user is messaging from Discord — the in-chat browser screencast used for a sign-in / handoff isn't available there, so a browser handoff can't reach them.";
+    case "slack":
+      return "The user is messaging from Slack — the in-chat browser screencast used for a sign-in / handoff isn't available there, so a browser handoff can't reach them.";
     case "openclaw":
       return "The user is messaging through an OpenClaw bridge — the in-chat browser screencast used for a sign-in / handoff isn't available there, so a browser handoff can't reach them.";
     default:

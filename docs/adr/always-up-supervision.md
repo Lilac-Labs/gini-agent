@@ -127,6 +127,31 @@ The model rests on four pieces:
   `enable` frees the port before a reload relaunch (below), the preflight fires
   only for a true duplicate, never a legitimate restart.
 
+Every plist-writing path funnels through `resolveLaunchSpecPair`
+(`packages/runtime/src/cli/autostart.ts`), and the home it resolves — the
+plist's `WorkingDirectory`, i.e. the checkout the services execute — is
+**sticky**. Resolution runs in priority order: an explicit home
+(`gini autostart enable --home <dir>`, or a programmatic `enable({homeDir})`),
+validated as a usable gini-agent checkout (a `package.json` named
+`gini-agent` plus `packages/runtime/src/server.ts`); else the existing
+gateway plist's `WorkingDirectory` whenever it still points at a usable
+checkout — preserved verbatim, so regenerating a plist (the startup
+reconcile, the provider-key refresh, `gini start`'s bootstrap of a
+not-loaded kind, `gini update`'s restart) can never move the instance onto
+whatever checkout the invoking process happened to run from; else the
+first-enable defaults (a gini-agent source checkout at cwd/projectRoot,
+then `~/.gini/runtime` when usable, then the resolved project root). A
+recorded home that is no longer usable — a deleted checkout — is not
+preserved: resolution falls through the defaults and self-heals onto the
+installed runtime instead of leaving launchd spawn-failing into a void.
+Because preservation lives inside `resolveLaunchSpecPair`, the stamp's
+write side (`generatePlist` via enable) and check side (the startup
+reconcile via `supervisedServices`) agree by construction — a preserved
+home never reads as drift. Moving an instance between checkouts therefore
+requires explicit intent: `--home`, or `gini update`, whose contract is to
+converge a launchd instance onto the installed runtime (see
+[Runtime Update Surface And Automatic Restart](runtime-update-surface.md)).
+
 Installed plists are reconciled to the current template on startup, so a
 runtime version update propagates supervision-template changes to *existing*
 installs, not just fresh ones. Each generated plist carries a
@@ -343,6 +368,13 @@ launchd instances so foreground/conductor/tmux runs are unaffected.
   suppress. The loop paces itself at
   `WATCHDOG_TICK_INTERVAL_MS` between ticks and never exits on its own;
   `gini watchdog --once` runs exactly one tick and revives on it.
+- Regenerating a plist preserves the existing gateway plist's
+  `WorkingDirectory` regardless of the invoking process's cwd/projectRoot;
+  `gini autostart enable --home <dir>` moves it, rejecting a dir that is not
+  a usable gini-agent checkout with a non-zero exit before anything touches
+  launchd; a recorded home that no longer exists falls back to the installed
+  runtime; and the first enable (no plist on disk) keeps the
+  source-checkout-then-installed preference.
 - Every generated plist's `EnvironmentVariables` carries a `GINI_PLIST_STAMP`.
   The stamp is identical for two plists that differ only in PATH, a secret
   value, `HOME`, `SHELL`, the state/log roots, or the stdout/err paths, and it

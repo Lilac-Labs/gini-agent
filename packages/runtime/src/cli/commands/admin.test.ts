@@ -13,17 +13,20 @@
 //   - The validation error path for unrecognized GINI_PROVIDER.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CliContext } from "../context";
 import type { ProviderConfig, RuntimeConfig } from "../../types";
 import {
+  convergeUpdatedInstance,
   install_,
   isLaunchdManaged,
+  rehomeUpdatedInstance,
   restartUpdatedInstance,
   shouldStopViaBootout,
   startViaLaunchd,
   stop,
+  type RehomeUpdatedInstanceDeps,
   type RestartUpdatedInstanceDeps,
   type StartViaLaunchdDeps
 } from "./admin";
@@ -599,6 +602,163 @@ describe("restartUpdatedInstance (update restart gateway-loaded routing)", () =>
     await expect(restartUpdatedInstance(config, web, deps)).rejects.toThrow(/Timed out waiting/);
     expect(rec.bootouts).toEqual(["inst"]);
     expect(rec.starts).toBe(0);
+  });
+});
+
+// `gini update` re-homes a launchd instance whose gateway plist points
+// anywhere other than the installed runtime — the wrongly-homed instance
+// keeps executing the wrong checkout's code across every respawn, so the
+// update's work on ~/.gini/runtime never reaches it. All seams are injected;
+// realpath comparisons run against real tmp dirs so the compare semantics
+// (symlinks equal, deleted homes unequal) are pinned for real.
+describe("rehomeUpdatedInstance (update re-home onto the installed runtime)", () => {
+  const config = { instance: "inst", port: 7777 } as unknown as RuntimeConfig;
+  const web: WebOptions = { webPort: 8777, webPortPinned: false, noWeb: false };
+  let scratch: string;
+
+  beforeEach(() => {
+    scratch = `/tmp/gini-rehome-tests/${process.pid}-${Math.random().toString(36).slice(2)}`;
+    mkdirSync(scratch, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
+  interface Recorder {
+    enables: Array<{ instance: string; kinds: PlistKind[]; homeDir: string }>;
+  }
+
+  function makeDeps(opts: {
+    rec: Recorder;
+    plistHome: string | null;
+    installed: string;
+    enableOk?: boolean;
+    healthy?: boolean;
+  }): RehomeUpdatedInstanceDeps {
+    const healthy = opts.healthy ?? true;
+    return {
+      gatewayPlistHome: () => opts.plistHome,
+      installedRuntimeDir: () => opts.installed,
+      enable: async (options) => {
+        opts.rec.enables.push(options);
+        return { ok: opts.enableOk ?? true };
+      },
+      isRunning: (async () => healthy) as RehomeUpdatedInstanceDeps["isRunning"],
+      existingWebUrl: (async () => (healthy ? "http://localhost:8777" : null)) as RehomeUpdatedInstanceDeps["existingWebUrl"],
+      sleep: async () => { /* no real wait */ },
+      // Zero deadline => the health loop runs exactly one poll then exits on
+      // the deadline check, so the unhealthy case is instant and
+      // deterministic; the healthy case breaks on success first.
+      healthDeadlineMs: 0,
+      healthIntervalMs: 1
+    };
+  }
+
+  test("plist homed on a different checkout -> enables all kinds with homeDir=installed runtime", async () => {
+    const wrongHome = join(scratch, "conductor-clone");
+    const installed = join(scratch, "installed-runtime");
+    mkdirSync(wrongHome, { recursive: true });
+    mkdirSync(installed, { recursive: true });
+    const rec: Recorder = { enables: [] };
+    const rehomed = await rehomeUpdatedInstance(config, web, makeDeps({ rec, plistHome: wrongHome, installed }));
+    expect(rehomed).toBe(true);
+    expect(rec.enables).toEqual([
+      { instance: "inst", kinds: ["gateway", "web", "watchdog"], homeDir: installed }
+    ]);
+  });
+
+  test("plist already homed on the installed runtime (via a symlinked spelling) -> no re-home", async () => {
+    const installed = join(scratch, "installed-runtime");
+    mkdirSync(installed, { recursive: true });
+    const alias = join(scratch, "runtime-alias");
+    symlinkSync(installed, alias);
+    const rec: Recorder = { enables: [] };
+    // The plist records the symlinked spelling; realpath compare must read
+    // it as the installed runtime, not as a wrong home to churn on.
+    const rehomed = await rehomeUpdatedInstance(config, web, makeDeps({ rec, plistHome: alias, installed }));
+    expect(rehomed).toBe(false);
+    expect(rec.enables).toEqual([]);
+  });
+
+  test("no gateway plist (foreground / conductor instance) -> untouched", async () => {
+    const installed = join(scratch, "installed-runtime");
+    mkdirSync(installed, { recursive: true });
+    const rec: Recorder = { enables: [] };
+    const rehomed = await rehomeUpdatedInstance(config, web, makeDeps({ rec, plistHome: null, installed }));
+    expect(rehomed).toBe(false);
+    expect(rec.enables).toEqual([]);
+  });
+
+  test("plist homed on a deleted checkout -> re-homes (self-heal)", async () => {
+    const installed = join(scratch, "installed-runtime");
+    mkdirSync(installed, { recursive: true });
+    const rec: Recorder = { enables: [] };
+    const rehomed = await rehomeUpdatedInstance(
+      config,
+      web,
+      makeDeps({ rec, plistHome: join(scratch, "deleted-worktree"), installed })
+    );
+    expect(rehomed).toBe(true);
+    expect(rec.enables.length).toBe(1);
+  });
+
+  test("a failed enable still reports the re-home attempt (caller must not double-restart)", async () => {
+    const wrongHome = join(scratch, "conductor-clone");
+    const installed = join(scratch, "installed-runtime");
+    mkdirSync(wrongHome, { recursive: true });
+    mkdirSync(installed, { recursive: true });
+    const rec: Recorder = { enables: [] };
+    const rehomed = await rehomeUpdatedInstance(
+      config,
+      web,
+      makeDeps({ rec, plistHome: wrongHome, installed, enableOk: false })
+    );
+    expect(rehomed).toBe(true);
+    expect(rec.enables.length).toBe(1);
+  });
+});
+
+// The re-home leg is deliberately INDEPENDENT of the sha-based restart
+// check: a wrongly-homed checkout can sit at the very same sha as the
+// freshly updated runtime (upToDate:true, matching /api/status sha) while
+// every respawn keeps executing the wrong checkout. convergeUpdatedInstance
+// pins the ordering: re-home first, unconditionally; the sha-based restart
+// only when no re-home happened (a re-home already restarted the services).
+describe("convergeUpdatedInstance (re-home is independent of the sha check)", () => {
+  const config = { instance: "inst", port: 7777 } as unknown as RuntimeConfig;
+  const web: WebOptions = { webPort: 8777, webPortPinned: false, noWeb: false };
+
+  test("wrong home re-homes even when upToDate with matching shas, and skips the restart leg", async () => {
+    const calls: string[] = [];
+    await convergeUpdatedInstance(config, web, { upToDate: true, afterSha: "abc123" }, {
+      rehomeUpdatedInstance: async () => { calls.push("rehome"); return true; },
+      // Even a needs-restart=true answer must not run the restart leg after
+      // a re-home — enable already restarted the services on the new home.
+      runningRuntimeNeedsRestart: async () => { calls.push("needsRestart"); return true; },
+      restartUpdatedInstance: async () => { calls.push("restart"); }
+    });
+    expect(calls).toEqual(["rehome"]);
+  });
+
+  test("correct home falls through to the sha-based restart", async () => {
+    const calls: string[] = [];
+    await convergeUpdatedInstance(config, web, { upToDate: false, afterSha: "abc123" }, {
+      rehomeUpdatedInstance: async () => { calls.push("rehome"); return false; },
+      runningRuntimeNeedsRestart: async () => { calls.push("needsRestart"); return true; },
+      restartUpdatedInstance: async () => { calls.push("restart"); }
+    });
+    expect(calls).toEqual(["rehome", "needsRestart", "restart"]);
+  });
+
+  test("correct home + up to date + matching sha -> no restart at all", async () => {
+    const calls: string[] = [];
+    await convergeUpdatedInstance(config, web, { upToDate: true, afterSha: "abc123" }, {
+      rehomeUpdatedInstance: async () => { calls.push("rehome"); return false; },
+      runningRuntimeNeedsRestart: async () => { calls.push("needsRestart"); return false; },
+      restartUpdatedInstance: async () => { calls.push("restart"); }
+    });
+    expect(calls).toEqual(["rehome", "needsRestart"]);
   });
 });
 

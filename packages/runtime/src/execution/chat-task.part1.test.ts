@@ -1828,6 +1828,7 @@ describe("buildAgentIdentity", () => {
       memoryNamespace: "agent_x",
       provider: { name: "echo", model: "test-model" },
       providerSource: "agent",
+      autoMemory: true,
       warnings: []
       // no toolsetFilter — unrestricted
     };
@@ -1844,6 +1845,7 @@ describe("buildAgentIdentity", () => {
       memoryNamespace: "agent_x",
       provider: { name: "echo", model: "test-model" },
       providerSource: "agent",
+      autoMemory: true,
       toolsetFilter: new Set(["terminal", "file"]),
       warnings: []
     };
@@ -1867,6 +1869,7 @@ describe("buildAgentIdentity", () => {
       memoryNamespace: "agent_x",
       provider: { name: "echo", model: "test-model" },
       providerSource: "agent",
+      autoMemory: true,
       // Whitelist includes a disabled-in-state name and an entirely
       // unknown name; both must be filtered out of the rendered
       // identity block.
@@ -1882,6 +1885,7 @@ describe("buildAgentIdentity", () => {
     const effective: EffectiveContext = {
       provider: { name: "echo", model: "test-model" },
       providerSource: "instance",
+      autoMemory: true,
       warnings: []
     };
     const identity = buildAgentIdentity(baseConfig, state, effective);
@@ -1901,6 +1905,7 @@ describe("buildAgentIdentity", () => {
       memoryNamespace: "agent_x",
       provider: { name: "echo", model: "test-model" },
       providerSource: "agent",
+      autoMemory: true,
       warnings: []
     };
     const identity = buildAgentIdentity(baseConfig, state, effective);
@@ -1964,7 +1969,7 @@ describe("buildConnectedAccountsBlock", () => {
     };
   }
 
-  test("returns empty string when no accounts are connected", () => {
+  test("returns empty string when no accounts are registered", () => {
     expect(buildConnectedAccountsBlock([])).toBe("");
   });
 
@@ -1972,7 +1977,7 @@ describe("buildConnectedAccountsBlock", () => {
     const block = buildConnectedAccountsBlock([
       account({ tag: "personal", email: "me@gmail.com", configDir: "/home/u/.config/gws" })
     ]);
-    expect(block).toContain("Connected Google accounts");
+    expect(block).toContain("Registered Google accounts");
     expect(block).toContain("personal");
     expect(block).toContain("me@gmail.com");
     expect(block).toContain("/home/u/.config/gws");
@@ -1980,7 +1985,7 @@ describe("buildConnectedAccountsBlock", () => {
     expect(block).toContain("use it");
   });
 
-  test("surfaces both accounts, aggregate-on-read, and ask-on-write guidance when 2+ are connected", () => {
+  test("surfaces both accounts, aggregate-on-read, and ask-on-write guidance when 2+ are registered", () => {
     const block = buildConnectedAccountsBlock([
       account({ tag: "personal" }),
       account({ tag: "work" })
@@ -1988,7 +1993,7 @@ describe("buildConnectedAccountsBlock", () => {
     expect(block).toContain("personal");
     expect(block).toContain("work");
     // Unscoped reads fan out across every account instead of picking one.
-    expect(block).toContain("EVERY connected account");
+    expect(block).toContain("EVERY registered account");
     // Writes still ask when no account is named.
     expect(block).toContain("ASK which account first");
   });
@@ -1997,6 +2002,30 @@ describe("buildConnectedAccountsBlock", () => {
     const block = buildConnectedAccountsBlock([account({ tag: "school", email: "" })]);
     expect(block).toContain("school");
     expect(block).toContain("(sign-in pending)");
+  });
+
+  test("never asserts sign-in state and directs the model to verify before claiming it", () => {
+    // The registry is presence-only — the block must not frame registration as
+    // "connected" (the model would repeat that framing as per-account status
+    // it never checked).
+    for (const block of [
+      buildConnectedAccountsBlock([account({ tag: "personal" })]),
+      buildConnectedAccountsBlock([account({ tag: "personal" }), account({ tag: "work" })])
+    ]) {
+      expect(block).not.toContain("Connected Google accounts");
+      expect(block).not.toContain("are connected");
+      expect(block).not.toContain("is connected");
+      // The verify-before-asserting instruction: sign-in status is NOT in this
+      // list, check list_connectors, and route auth failures through the
+      // request_google_account reconnect button — never agent-driven OAuth.
+      expect(block).toContain("does NOT include sign-in status");
+      expect(block).toContain("list_connectors");
+      expect(block).toContain("googleAccounts");
+      expect(block).toContain("auth error");
+      expect(block).toContain("request_google_account");
+      expect(block).toContain("Integrations page");
+      expect(block).toContain("Never run `gws auth login`");
+    }
   });
 });
 
@@ -2037,11 +2066,7 @@ describe("buildInactiveSkillsBlock", () => {
     };
   }
 
-  test("routes the google-workspace-oauth credential to request_connector with the provider id", () => {
-    // google-workspace-oauth maps to google-oauth-desktop. In hosted this
-    // provider declares no setup skill (the credential is baked into the guest
-    // at provisioning), so the block emits the bare request_connector shortcut
-    // for the provider id — no read_skill / setup-skill detour.
+  test("routes the google-workspace-oauth credential to request_google_account", () => {
     const skill = makeSkill({
       name: "google-calendar",
       description: "Google Calendar",
@@ -2049,9 +2074,8 @@ describe("buildInactiveSkillsBlock", () => {
     });
     const block = buildInactiveSkillsBlock([skill]);
     expect(block).toContain("google-oauth-desktop");
-    expect(block).toContain("call `request_connector` with provider id `google-oauth-desktop`");
-    // No setup skill is declared, so the block must not tell the model to
-    // read_skill first.
+    expect(block).toContain("call `request_google_account`");
+    expect(block).not.toContain("call `request_connector` with provider id `google-oauth-desktop`");
     expect(block).not.toMatch(/read_skill/);
   });
 
@@ -2069,7 +2093,7 @@ describe("buildInactiveSkillsBlock", () => {
     expect(providerLines[0]).toContain("google-calendar");
     expect(providerLines[0]).toContain("google-gmail");
     expect(providerLines[0]).toContain("google-drive");
-    expect(providerLines[0]).toContain("call `request_connector` with provider id `google-oauth-desktop`");
+    expect(providerLines[0]).toContain("call `request_google_account`");
   });
 
   test("falls back to request_connector guidance for providers without a setup skill", () => {
@@ -2184,19 +2208,17 @@ describe("buildInactiveSkillsBlock", () => {
     expect(block).toContain('{name, type:"api-key", skillId}');
   });
 
-  test("emits no browser-shortcut directive for the Google Workspace credential", () => {
-    // On hosted, the Google account is connected at sign-in through the host
-    // and google-oauth-desktop declares no setup skill, so the Google credential
-    // routes through the bare request_connector line — with no read_skill detour
-    // and no "ONLY correct path" browser-shortcut directive.
+  test("steers Google Workspace setup through the local Integrations flow", () => {
     const skill = makeSkill({
       name: "google-calendar",
       requiredCredentials: ["google-workspace-oauth"]
     });
     const block = buildInactiveSkillsBlock([skill]);
     expect(block).toContain("google-oauth-desktop");
-    expect(block).not.toContain("ONLY correct path");
-    expect(block).not.toContain("browser_navigate");
+    expect(block).toContain("request_google_account");
+    expect(block).toContain("only Google sign-in path");
+    expect(block).toContain("Do NOT use browser tools");
+    expect(block).toContain("do NOT run `gws auth login`");
     expect(block).not.toMatch(/read_skill/);
   });
 

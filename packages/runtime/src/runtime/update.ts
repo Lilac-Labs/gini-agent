@@ -561,7 +561,20 @@ function updateSupport(runtimeDir: string): { supported: boolean; reason?: strin
     return { supported: false, reason: "Installer-managed runtime is not present. Use git pull from this checkout." };
   }
   if (!sameRealPath(runtimeDir, installedRuntimeDir())) {
-    return { supported: false, reason: "Web update is only available from the installer-managed runtime. Use git pull from this checkout." };
+    // The installed runtime exists but THIS process runs from somewhere
+    // else. For a development worktree that's the expected state (git pull
+    // is the workflow), but it is also exactly what a wrongly-homed launchd
+    // instance looks like — and telling that user "use git pull" points
+    // them away from the fix. `gini update` both updates ~/.gini/runtime
+    // and re-homes a launchd instance onto it, so name the running
+    // directory and point there. The message must keep its
+    // "Web update is only available" prefix — statusFromErrorMessage in
+    // src/http.ts maps that prefix to a 400.
+    return {
+      supported: false,
+      reason: `Web update is only available when the gateway runs from the installer-managed runtime (~/.gini/runtime); this gateway is running from ${runtimeDir}. ` +
+        "Run `gini update` in a terminal to update the installed runtime and re-home a launchd-supervised instance onto it; a development checkout should use git pull instead."
+    };
   }
   try {
     assertUpdateTarget(runtimeDir);
@@ -571,7 +584,12 @@ function updateSupport(runtimeDir: string): { supported: boolean; reason?: strin
   }
 }
 
-function sameRealPath(left: string, right: string): boolean {
+// Realpath-compare two directories (symlinked spellings of the installed
+// runtime must read as the installed runtime). Returns false when either
+// path can't be resolved — a home that no longer exists is by definition
+// not the installed runtime. Also used by the `gini update` re-home check
+// in src/cli/commands/admin.ts.
+export function sameRealPath(left: string, right: string): boolean {
   try {
     return realpathSync(left) === realpathSync(right);
   } catch {

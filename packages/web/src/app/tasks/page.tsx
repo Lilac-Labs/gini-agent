@@ -24,7 +24,7 @@ const FILTERS: readonly TaskFilter[] = [
 
 export default function TasksPage() {
   const params = useSearchParams();
-  // Honor ?id=<task-id> so other pages (e.g. Jobs "View trace") deep-link
+  // Honor ?id=<task-id> so other pages (e.g. Routines "View trace") deep-link
   // straight into a specific task. Falls back to "all" filter so the task
   // is visible in the list panel.
   const initial = params?.get("id") ?? null;

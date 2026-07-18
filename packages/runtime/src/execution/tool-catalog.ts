@@ -96,7 +96,7 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
     type: "function",
     function: {
       name: "file_write",
-      description: "Write a workspace file. Approval-gated: the user must approve before the file is written.",
+      description: "Write a workspace file. Successful writes surface as an inline file card in chat, so use this for files the user should view here. Approval-gated: the user must approve before the file is written.",
       parameters: {
         type: "object",
         properties: {
@@ -750,7 +750,7 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
     type: "function",
     function: {
       name: "browser_download",
-      description: "Click an element (by its @eN ref) that triggers a file download and save the file under the agent's downloads directory. Use for 'download the invoice PDF' style tasks where a link or button serves a file. Only works when the click actually fires a download (attachment responses or links with a download attribute) — content the browser renders inline, like most PDF links, never does; use browser_navigate for those (PDF text is extracted on navigation). Approval-gated: the user confirms before the click runs. The result reports the saved path, file size, and the server's suggested filename. Downloads larger than the size cap are rejected and deleted.",
+      description: "Click an element (by its @eN ref) that triggers a file download and save the file under the agent's downloads directory. Use for 'download the invoice PDF' style tasks where a link or button serves a file. Only works when the click actually fires a download (attachment responses or links with a download attribute) — content the browser renders inline, like most PDF links, never does; use browser_navigate for those (PDF text is extracted on navigation). Approval-gated: the user confirms before the click runs. The result reports the saved path, file size, and the server's suggested filename. If the user asked for the file(s) in a specific location, move each saved file there (terminal_exec) right after its download completes — don't leave them staged in the downloads directory until the end of the task. Downloads larger than the size cap are rejected and deleted.",
       parameters: {
         type: "object",
         properties: {
@@ -823,6 +823,34 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
           reason: { type: "string", description: "The full user-visible message shown above the inline Connect form. You are responsible for producing the complete text — including any URLs, project IDs, click instructions, or step-by-step guidance the user needs. Substitute any real values (project ids, etc.) directly into the string; do not leave `${...}` placeholders. The skill body (when one applies) shows the exact format to follow; copy it line-for-line, fill in the real values, and pass the result here verbatim." }
         },
         required: ["reason"]
+      }
+    }
+  },
+  {
+    // Google-account affordance. Google sign-in (connect and reconnect
+    // alike) is browser OAuth on the Integrations page — never an in-chat
+    // credential entry and never agent-driven (ADR google-multi-account.md).
+    // This tool surfaces an inline button in chat that takes the user
+    // there; the agent then waits. Fire-and-forget (no SetupRequest gate):
+    // the user navigates away, completes OAuth, and tells the agent when
+    // they're done. Always-on like request_connector: an expired Google
+    // session can surface on any instance regardless of toolset state.
+    // Deferred (like list_connectors): the steering that routes the model
+    // here (accounts block and Google skills) names the tool,
+    // so the on-demand index line is enough to make it load the schema.
+    toolset: "connectors",
+    displayLabel: "Request Google account",
+    deferred: true,
+    indexSummary: "Show the user an inline button to the Integrations page to connect or reconnect a Google account; never run `gws auth login` yourself.",
+    type: "function",
+    function: {
+      name: "request_google_account",
+      description: "Show the user an inline button in chat that opens the Integrations page, where they connect or reconnect Google accounts via browser OAuth. Call it when a `gws` call fails with an auth error, an account's sign-in is expired or revoked, no Google account is set up, or the user wants to add one. This button is the ONLY path: NEVER run `gws auth login`, and NEVER drive a Google sign-in page with the browser tools. After calling it, tell the user to click the button, then STOP and wait for them to say it's done.",
+      parameters: {
+        type: "object",
+        properties: {
+          message: { type: "string", description: "Optional one-line context shown above the button. Omit to let the runtime compose it from live account status." }
+        }
       }
     }
   },
@@ -992,7 +1020,7 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
     type: "function",
     function: {
       name: "list_messaging_bridges",
-      description: "List the messaging bridges configured on this Gini instance. Returns each bridge's id, name, kind (telegram | discord | demo), status (configured | error | disabled), and bot username when present. Useful before suggesting bridge changes ('do you already have telegram?'), before calling request_remove_messaging_bridge or request_messaging_pairing (so you can target the right bridge id), or whenever the user asks 'what bots are connected?'. Read-only and cheap — call it whenever you need fresh state.",
+      description: "List the messaging bridges configured on this Gini instance. Returns each bridge's id, name, kind (telegram | discord | slack | demo), status (configured | error | disabled), and bot username when present. Useful before suggesting bridge changes ('do you already have telegram?'), before calling request_remove_messaging_bridge or request_messaging_pairing (so you can target the right bridge id), or whenever the user asks 'what bots are connected?'. Read-only and cheap — call it whenever you need fresh state.",
       parameters: {
         type: "object",
         properties: {}
@@ -1261,7 +1289,7 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
           deliveryTargets: {
             type: "array",
             items: { type: "string" },
-            description: "Optional messaging-bridge names to deliver the job's final output to (in addition to its chat thread, if it has one), e.g. [\"telegram\"]. Use when the user asks for the job's output to reach a messaging app. Each entry must match exactly one configured Telegram or Discord bridge by exact id, or by name or kind (case-insensitive), and is stored as the bridge id; unknown or ambiguous entries are rejected with the dispatchable bridge names so you can relay the fix."
+            description: "Optional messaging-bridge names to deliver the job's final output to (in addition to its chat thread, if it has one), e.g. [\"telegram\"]. Use when the user asks for the job's output to reach a messaging app. Each entry must match exactly one configured Telegram, Discord, or Slack bridge by exact id, or by name or kind (case-insensitive), and is stored as the bridge id; a Slack bridge is only accepted when it has a delivery channel configured (a DM-only Slack bridge has nowhere to post job output); unknown or ambiguous entries are rejected with the dispatchable bridge names so you can relay the fix."
           },
           preRunHook: {
             type: "object",
@@ -1334,7 +1362,7 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
           autoApproveCommands: { type: "array", items: { type: "string" }, description: "Optional new list of auto-approve shell patterns for unattended fires." },
           dangerouslyAutoApprove: { type: "boolean", description: "Optional. If true the scheduled task bypasses ALL approval gates at fire-time." },
           timeoutSeconds: { type: "number", description: "Optional. Wall-clock seconds before the spawned task is killed." },
-          deliveryTargets: { type: "array", items: { type: "string" }, description: "Optional new list of messaging-bridge names that receive the job's final output in addition to its chat thread, e.g. [\"telegram\"]. Pass [] to clear. Each entry must match exactly one configured Telegram or Discord bridge by exact id, or by name or kind (case-insensitive), and is stored as the bridge id; unknown or ambiguous entries are rejected." },
+          deliveryTargets: { type: "array", items: { type: "string" }, description: "Optional new list of messaging-bridge names that receive the job's final output in addition to its chat thread, e.g. [\"telegram\"]. Pass [] to clear. Each entry must match exactly one configured Telegram, Discord, or Slack bridge by exact id, or by name or kind (case-insensitive), and is stored as the bridge id; a Slack bridge is only accepted when it has a delivery channel configured; unknown or ambiguous entries are rejected." },
           deliverTo: {
             type: "string",
             enum: ["channel", "chat"],
@@ -1800,11 +1828,11 @@ const TOOL_DEFS: Array<ToolFunctionSpec & { toolset: string; displayLabel?: stri
     toolset: "self",
     displayLabel: "List connectors",
     deferred: true,
-    indexSummary: "Registered connectors (claude-code, codex, linear, …) with provider, status, and health.",
+    indexSummary: "Registered connectors with provider, status, and health, plus live per-account Google sign-in (googleAccounts).",
     type: "function",
     function: {
       name: "list_connectors",
-      description: "List the registered connectors (claude-code, codex, linear, …) with provider, status, and health. Read-only.",
+      description: "List the registered connectors (claude-code, codex, linear, …) with provider, status, and health, plus `googleAccounts`: live per-account Google sign-in status. Read-only.",
       parameters: { type: "object", properties: {} }
     }
   },
@@ -2284,6 +2312,12 @@ export function buildToolCatalog(state: RuntimeState, agentToolsetFilter?: Set<s
     // inactive — gating on a legacy toolset would silently disable the
     // onboarding path.
     if (tool.function.name === "request_connector") return true;
+    // request_google_account is the in-chat affordance that puts a
+    // connect/reconnect-Google button (→ Integrations page) in front of
+    // the user. Same always-on rationale as request_connector: a revoked
+    // Google session can strand any instance, and the recovery path must
+    // be reachable with no toolsets toggled.
+    if (tool.function.name === "request_google_account") return true;
     // ask_user is the in-chat affordance for putting a single-select
     // question card in front of the user mid-turn. Always-on for the
     // same reason as request_connector: offering setup-vs-alternative

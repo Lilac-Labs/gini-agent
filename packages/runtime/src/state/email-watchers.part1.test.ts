@@ -107,12 +107,12 @@ describe("resolveWatchAccount", () => {
     });
   });
 
-  test("set accountEmail not registered => no configDir + a visible warning", () => {
+  test("set accountEmail not attached => no configDir + a visible warning", () => {
     const r = resolveWatchAccount("ghost@nowhere.com", [A]);
     expect(r.configDir).toBeUndefined();
     expect(r.account).toBeUndefined();
     expect(r.warning).toContain("ghost@nowhere.com");
-    expect(r.warning).toContain("not a registered");
+    expect(r.warning).toContain("not connected to this Gini instance");
   });
 });
 

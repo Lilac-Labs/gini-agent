@@ -15,9 +15,9 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createChatSession, createTask, mutateState, readState, recordProviderAuthFailure, upsertTask } from "../state";
-import type { RuntimeConfig } from "../types";
+import type { GoogleAccountStatus, RuntimeConfig } from "../types";
 import { dispatchToolCall } from "./tool-dispatch";
-import { findSelfOperation, SELF_OPERATIONS } from "./self-registry";
+import { findSelfOperation, SELF_OPERATIONS, setGoogleAccountsStatusProvider } from "./self-registry";
 
 const ROOT = mkdtempSync(join(tmpdir(), "gini-self-registry-"));
 process.env.GINI_STATE_ROOT = ROOT;
@@ -286,6 +286,76 @@ describe("direct self tools — query", () => {
       const echo = parsed.providers.find((p) => p.name === "echo");
       expect(echo?.authStatus).toBe("ok");
       expect(echo?.reauth).toBeUndefined();
+    }
+  });
+
+  test("list_connectors surfaces per-account Google sign-in even with NO google connector record", async () => {
+    // Google can be live on an instance whose state has no google-oauth-desktop
+    // record (instance account binding / credentialExternallySatisfied).
+    // The tool must still expose live per-account signedIn — it is the model's
+    // only on-demand truth source (the system-prompt accounts block is
+    // registration-only and directs the model here).
+    const instance = `self-connectors-gacct-${Math.random().toString(36).slice(2, 8)}`;
+    const config = buildConfig(instance);
+    const taskId = await newTask(config);
+    const account = (over: Partial<GoogleAccountStatus>): GoogleAccountStatus => ({
+      id: "gacct_x",
+      tag: "x",
+      email: "x@example.com",
+      configDir: "/home/u/.gini/google-accounts/gacct_x",
+      addedAt: "2026-01-01T00:00:00.000Z",
+      signedIn: false,
+      tokenRevoked: false,
+      services: {},
+      message: "",
+      ...over
+    });
+    let requestedInstance: string | undefined;
+    const restore = setGoogleAccountsStatusProvider(async (requested) => {
+      requestedInstance = requested;
+      return [
+        account({ id: "gacct_p", tag: "personal", email: "me@gmail.com", signedIn: true, primary: true, message: "Signed in to Google" }),
+        account({ id: "gacct_w", tag: "work", email: "me@work.com", signedIn: false, tokenRevoked: true, message: "Google sign-in expired — re-auth needed" })
+      ];
+    });
+    try {
+      const result = await dispatchToolCall(config, taskId, "list_connectors", "call_1", "{}");
+      expect(result.kind).toBe("sync");
+      if (result.kind === "sync") {
+        const parsed = JSON.parse(result.result) as {
+          ok: boolean;
+          connectors: Array<{ provider: string }>;
+          googleAccounts?: Array<{ tag: string; email: string | null; signedIn: boolean; tokenRevoked: boolean; primary: boolean; message: string }>;
+        };
+        expect(parsed.ok).toBe(true);
+        expect(requestedInstance).toBe(instance);
+        // Precondition of this test: the seeded state carries no google record.
+        expect(parsed.connectors.some((c) => c.provider === "google-oauth-desktop")).toBe(false);
+        expect(parsed.googleAccounts).toEqual([
+          { tag: "personal", email: "me@gmail.com", signedIn: true, tokenRevoked: false, primary: true, message: "Signed in to Google" },
+          { tag: "work", email: "me@work.com", signedIn: false, tokenRevoked: true, primary: false, message: "Google sign-in expired — re-auth needed" }
+        ]);
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  test("list_connectors omits googleAccounts when the account registry is empty", async () => {
+    const instance = `self-connectors-noacct-${Math.random().toString(36).slice(2, 8)}`;
+    const config = buildConfig(instance);
+    const taskId = await newTask(config);
+    const restore = setGoogleAccountsStatusProvider(async () => []);
+    try {
+      const result = await dispatchToolCall(config, taskId, "list_connectors", "call_1", "{}");
+      expect(result.kind).toBe("sync");
+      if (result.kind === "sync") {
+        const parsed = JSON.parse(result.result) as { ok: boolean; googleAccounts?: unknown };
+        expect(parsed.ok).toBe(true);
+        expect(parsed.googleAccounts).toBeUndefined();
+      }
+    } finally {
+      restore();
     }
   });
 });

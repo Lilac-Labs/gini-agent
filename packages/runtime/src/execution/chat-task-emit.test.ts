@@ -9,8 +9,8 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
-import { closeAllMemoryDbs, createChatSession, createTopic, listChatBlocks, mutateState } from "../state";
-import { emitSetupRequested, emitToolResult } from "./chat-task-emit";
+import { closeAllMemoryDbs, createChatSession, createTopic, insertChatBlock, listChatBlocks, mutateState } from "../state";
+import { emitSetupRequested, emitToolCallStatus, emitToolResult } from "./chat-task-emit";
 import type { ChatEmitContext } from "./chat-task-emit";
 
 const ROOT = "/tmp/gini-emit-toolresult-test";
@@ -57,6 +57,34 @@ describe("emitToolResult", () => {
     expect(block.truncated).toBe(true);
     expect(block.preview.length).toBeLessThanOrEqual(80);
     expect(block.preview.endsWith("…")).toBe(true);
+  });
+});
+
+describe("emitToolCallStatus", () => {
+  test("passes jobId through to the persisted tool_call block on the ok flip", () => {
+    const instance = "emit-toolcall-jobid";
+    // The running row the loop mounted before dispatch. taskId must match
+    // the emit context — updateToolCallBlock scopes the settle to its turn.
+    insertChatBlock(instance, {
+      kind: "tool_call",
+      sessionId: "chat_j",
+      taskId: "task_emit",
+      toolName: "create_job",
+      displayLabel: "Create scheduled job",
+      argsPreview: "morning-brief",
+      argsFull: { name: "morning-brief" },
+      status: "running",
+      callId: "call_create"
+    });
+    const updated = emitToolCallStatus(ctx(instance, "chat_j"), {
+      callId: "call_create",
+      status: "ok",
+      jobId: "job_from_dispatch"
+    });
+    expect(updated?.kind === "tool_call" && updated.jobId).toBe("job_from_dispatch");
+    const listed = listChatBlocks(instance, "chat_j")[0];
+    expect(listed?.kind === "tool_call" && listed.jobId).toBe("job_from_dispatch");
+    expect(listed?.kind === "tool_call" && listed.status).toBe("ok");
   });
 });
 

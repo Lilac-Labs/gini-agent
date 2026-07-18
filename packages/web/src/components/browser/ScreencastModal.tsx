@@ -1,9 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { api, streamUrl } from "@/lib/api";
+import { openResilientEventSource } from "@/lib/resilient-event-source";
 
 // Live sign-in screencast. Mounted by the browser.connect approval card once
 // the user has approved ("Connect to agent's browser") and the server has
@@ -58,6 +60,13 @@ export function ScreencastModal({
   // used to rescale pointer coordinates from the displayed <img> to the page.
   const pageSize = useRef({ w: 1280, h: 800 });
   const [status, setStatus] = useState<"connecting" | "live" | "error">("connecting");
+  // True once the first frame has painted. Until then the <img> stays hidden and
+  // a placeholder shows, so a src-less <img> never renders the browser's
+  // broken-image glyph (what a stalled/reconnecting stream used to look like).
+  // The ref mirror lets the onStateChange closure read the latest value without
+  // capturing the initial render's.
+  const [hasFrame, setHasFrame] = useState(false);
+  const hasFrameRef = useRef(false);
   // The origin (scheme + host) of the page being screencast, streamed from the
   // gateway. The modal has no address bar, so this is the operator's only
   // trusted signal for which site they're typing credentials into.
@@ -76,32 +85,55 @@ export function ScreencastModal({
   const moveInFlight = useRef(false);
   const pendingMove = useRef<Record<string, unknown> | null>(null);
 
-  // Open the frames SSE. EventSource hits /api/runtime/... so the BFF injects
-  // the bearer; the browser never sees it. Reconnect is EventSource-native.
+  // Open the frames SSE through the RESILIENT wrapper, not a bare EventSource.
+  // EventSource hits /api/runtime/... so the BFF injects the bearer; the browser
+  // never sees it. The catch: a request that lands while the gateway is
+  // restarting (for example during a local update or watchdog recovery)
+  // gets the BFF's retryable 503, and per the SSE spec a non-2xx response
+  // PERMANENTLY closes a bare EventSource (no auto-retry) — stranding the modal
+  // on "Reconnecting…" with no frame. openResilientEventSource reopens on
+  // backoff (same as the main runtime event stream), so the screencast recovers
+  // on its own once the gateway is back. Listeners are (re)registered in
+  // `attach` so they survive each reopen; the reopened stream carries no
+  // Last-Event-ID and the gateway bridge replays its latest frame on
+  // resubscribe, so the page repaints immediately.
   useEffect(() => {
-    const source = new EventSource(streamUrl(`/browser/screencast/${setupRequestId}/frames`));
-    source.addEventListener("frame", (ev) => {
-      try {
-        const frame = JSON.parse((ev as MessageEvent).data) as ScreencastFrameMsg;
-        if (imgRef.current) imgRef.current.src = `data:image/jpeg;base64,${frame.data}`;
-        if (frame.meta?.deviceWidth) pageSize.current.w = frame.meta.deviceWidth;
-        if (frame.meta?.deviceHeight) pageSize.current.h = frame.meta.deviceHeight;
-        setStatus("live");
-      } catch {
-        // drop a malformed frame
+    hasFrameRef.current = false;
+    setHasFrame(false);
+    setStatus("connecting");
+    const handle = openResilientEventSource(streamUrl(`/browser/screencast/${setupRequestId}/frames`), {
+      attach: (source) => {
+        source.addEventListener("frame", (ev) => {
+          try {
+            const frame = JSON.parse((ev as MessageEvent).data) as ScreencastFrameMsg;
+            if (imgRef.current) imgRef.current.src = `data:image/jpeg;base64,${frame.data}`;
+            if (frame.meta?.deviceWidth) pageSize.current.w = frame.meta.deviceWidth;
+            if (frame.meta?.deviceHeight) pageSize.current.h = frame.meta.deviceHeight;
+            hasFrameRef.current = true;
+            setHasFrame(true);
+            setStatus("live");
+          } catch {
+            // drop a malformed frame
+          }
+        });
+        source.addEventListener("url", (ev) => {
+          try {
+            const { url } = JSON.parse((ev as MessageEvent).data) as { url?: string };
+            if (url) setOrigin(new URL(url).origin);
+          } catch {
+            // drop a malformed/unparseable url event
+          }
+        });
+      },
+      // Transition-only connection state. Dropped transport → "Reconnecting…";
+      // reopened → wait for the first frame ("Connecting…"), unless one has
+      // already painted, in which case keep showing the last frame across the
+      // blip (a fresh frame replays immediately on resubscribe).
+      onStateChange: (connected) => {
+        setStatus(connected ? (hasFrameRef.current ? "live" : "connecting") : "error");
       }
     });
-    source.addEventListener("url", (ev) => {
-      try {
-        const { url } = JSON.parse((ev as MessageEvent).data) as { url?: string };
-        if (url) setOrigin(new URL(url).origin);
-      } catch {
-        // drop a malformed/unparseable url event
-      }
-    });
-    source.onopen = () => setStatus((s) => (s === "error" ? "connecting" : s));
-    source.onerror = () => setStatus((s) => (s === "live" ? s : "error"));
-    return () => source.close();
+    return () => handle.close();
   }, [setupRequestId]);
 
   // Fire-and-forget one input event to the gateway. We don't await/toast on
@@ -280,8 +312,12 @@ export function ScreencastModal({
           {/* eslint-disable-next-line @next/next/no-img-element -- live screencast frames, not a static asset */}
           <img
             ref={imgRef}
-            alt="agent browser screen"
-            className="max-h-full max-w-full cursor-crosshair rounded border border-border bg-black"
+            alt="Agent browser screencast"
+            // Kept mounted (imgRef must exist for the frame handler to set .src)
+            // but hidden until the first frame lands: a src-less <img> otherwise
+            // paints the browser's broken-image glyph + alt text, which is
+            // exactly how a stalled/reconnecting stream used to look.
+            className={`max-h-full max-w-full cursor-crosshair rounded border border-border bg-black ${hasFrame ? "" : "invisible"}`}
             draggable={false}
             onMouseDown={onMouseDown}
             onMouseUp={onMouseUp}
@@ -289,6 +325,15 @@ export function ScreencastModal({
             onWheel={onWheel}
             onDoubleClick={(e) => e.preventDefault()}
           />
+          {/* Shown until the first frame arrives (initial connect, or while the
+              resilient wrapper reopens after a gateway restart) so the operator
+              sees a calm connecting state instead of a broken image. */}
+          {!hasFrame ? (
+            <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 rounded border border-border bg-black text-sm text-muted-foreground">
+              <Loader2 className="size-6 animate-spin" aria-hidden />
+              <span>{status === "error" ? "Reconnecting to the agent's browser…" : "Connecting to the agent's browser…"}</span>
+            </div>
+          ) : null}
         </div>
         <div className="mt-2 flex gap-2">
           <Button size="sm" disabled={completing} onClick={onComplete}>

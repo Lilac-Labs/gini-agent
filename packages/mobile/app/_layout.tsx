@@ -143,7 +143,6 @@ export default function RootLayout() {
             <FilePreviewProvider>
               <Stack screenOptions={screenOptions}>
                 <Stack.Screen name="index" options={{ headerShown: false }} />
-                <Stack.Screen name="login" options={{ headerShown: false }} />
                 <Stack.Screen name="setup" options={{ title: "Connect to Gini" }} />
                 {/* channels.tsx (the Channels home) draws its own header
                     with the brand title, inbox icon, and compose button. */}

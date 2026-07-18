@@ -58,18 +58,16 @@ describe("googleOauthDesktopProvider", () => {
     expect(found!.label).toBe(googleOauthDesktopProvider.label);
   });
 
-  test("declares no setup skill — the hosted credential is baked in and satisfied by the boot-registered account", () => {
-    // In hosted there is no local install / gcloud / OAuth-loopback / setup
-    // skill; the credential is provisioned into the guest and the primary Google
-    // account is registered at boot. So the provider owns no setup skill, and
-    // request_connector for it is never gated behind a read_skill prerequisite.
+  test("declares no provider-owned setup skill", () => {
+    // Account connection is owned by the local browser OAuth flow. The provider
+    // therefore does not gate request_connector behind a read_skill prerequisite.
     expect(googleOauthDesktopProvider.setupSkill).toBeUndefined();
   });
 
-  test("gates hosted Workspace skills active via credentialExternallySatisfied", () => {
+  test("activates Workspace skills for an attached account", () => {
     // The presence of any registered Google account satisfies the workspace
     // credential — this is the gate that flips the Workspace API skills ACTIVE
-    // once the host registers the guest's primary account at boot.
+    // once the local flow attaches the account to the instance.
     expect(typeof googleOauthDesktopProvider.credentialExternallySatisfied).toBe("function");
     expect(googleOauthDesktopProvider.credentialName).toBe("google-workspace-oauth");
   });

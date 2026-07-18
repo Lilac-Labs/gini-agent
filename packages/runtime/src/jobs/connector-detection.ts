@@ -22,7 +22,7 @@
 
 import type { ConnectorRecord, RuntimeConfig } from "../types";
 import { addAudit, id, mutateState, now, updateConnectorHealth } from "../state";
-import { listProviders } from "../integrations/connectors/registry";
+import { canonicalCredentialName, listProviders } from "../integrations/connectors/registry";
 import { checkConnector } from "../integrations/connectors";
 
 export interface DetectionReport {
@@ -73,7 +73,7 @@ export async function runConnectorDetection(config: RuntimeConfig): Promise<Dete
       const connector: ConnectorRecord = {
         id: id("id"),
         instance: state.instance,
-        name: result.suggestedName ?? provider.label,
+        name: canonicalCredentialName(provider.id) ?? result.suggestedName ?? provider.label,
         provider: provider.id,
         status: "configured",
         scopes: [],

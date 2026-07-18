@@ -3,7 +3,7 @@ import { parseSubArgs, restAfter } from "../args";
 import { api } from "../api";
 import { print } from "../output";
 
-const ADD_VALUE_FLAGS = new Set(["--bot-token"]);
+const ADD_VALUE_FLAGS = new Set(["--bot-token", "--app-token"]);
 
 const KNOWN_SUBS = new Set([
   "list",
@@ -34,11 +34,14 @@ export async function messaging(ctx: CliContext): Promise<void> {
     const [name, kind = "demo", ...targets] = parsed.positional;
     if (!name) {
       throw new Error(
-        "Usage: gini messaging add <name> [kind] [delivery-targets...] [--bot-token <token>]"
+        "Usage: gini messaging add <name> [kind] [delivery-targets...] [--bot-token <token>] [--app-token <token>]"
       );
     }
     const body: Record<string, unknown> = { name, kind, deliveryTargets: targets };
     if (parsed.flags["--bot-token"]) body.botToken = parsed.flags["--bot-token"];
+    // Slack bridges take a second credential: the app-level xapp- token
+    // that authenticates the Socket Mode connection.
+    if (parsed.flags["--app-token"]) body.appToken = parsed.flags["--app-token"];
     const bridge = await api(config, "/api/messaging", {
       method: "POST",
       body: JSON.stringify(body)

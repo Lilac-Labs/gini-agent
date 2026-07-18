@@ -81,12 +81,12 @@ export async function connector(ctx: CliContext): Promise<void> {
     }
 
     if (action === "add") {
-      // On hosted, a Google account is connected at sign-in through the host —
-      // there is no in-chat setup flow and the CLI can't drive it. Point the
-      // user at the host sign-in instead.
+      // Google OAuth is a browser flow the CLI can't drive. Point the user at
+      // the Integrations page in the web app (in chat, the agent surfaces a
+      // button there via request_google_account).
       print({
         message:
-          "On hosted, your Google account is connected at sign-in through the host — there is no in-chat setup flow. To add or reconnect a Google account, sign in through the host."
+          "The CLI can't drive the Google OAuth flow. To add or reconnect a Google account, open the Integrations page in the web app (in chat, the agent can surface a button there)."
       });
       return;
     }

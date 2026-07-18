@@ -61,7 +61,7 @@ Provider keys land in `~/.gini/secrets.env` because the installed `gini` wrapper
 The migrator surfaces every unmigrated subsystem in the `unsupported` field so you know what is left on the openclaw side:
 
 - **Tasks and cron registries**, **plugin installs**, **device-pair tokens**. Either the feature doesn't exist on the gini side yet or the state is safer to re-establish (devices in particular — openclaw device tokens cannot be reused under gini; re-pair via `gini pair` once you're on gini).
-- **Non-Telegram, non-Discord channels** (WhatsApp, Signal, Slack, etc.). Gini has no bridge implementation for those yet; the migrator lists each unsupported channel by name.
+- **Non-Telegram, non-Discord channels** (WhatsApp, Signal, Slack, etc.). The migrator has no import path for those — gini's Slack bridge (see [slack-bridge.md](adr/slack-bridge.md)) uses a two-token create the openclaw state doesn't carry, and the rest have no gini bridge at all; the migrator lists each unsupported channel by name.
 - **Openclaw file-chunk RAG memory** (`<state>/memory/*.sqlite` with the `chunks` + `files` + `embedding_cache` schema). The chunk shape doesn't map cleanly to gini's `MemoryUnit` model; re-index relevant files via `/api/memory/retain` if you still need them.
 
 ## Idempotency and re-runs

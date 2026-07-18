@@ -10,7 +10,10 @@ import { getOrCreateAgentChat } from "./execution/chat";
 import { createScheduledJob } from "./jobs";
 import { removeMemoryDb } from "./state/memory-db";
 import { listProviders } from "./integrations/connectors/registry";
-import { resetGoogleLoginWebState } from "./integrations/connectors/google-login-web";
+import {
+  resetGoogleLoginWebState,
+  setGoogleLoginWebClientForTests
+} from "./integrations/connectors/google-login-web";
 import { awaitTunnelSettled, setTunnelDeps, type TunnelChild } from "./integrations/tunnel";
 import type { RuntimeConfig } from "./types";
 import type { LoginHandle, RelayDefaults, Session, Store, TunnelOptions } from "gini-relay";
@@ -858,181 +861,6 @@ describe("email watcher routes", () => {
     expect((await arbitrary.json()).error).toContain("configDir must be");
   });
 
-  test("POST /api/google/accounts/provision requires all three credential fields", async () => {
-    const config = testConfig("http-google-provision-400");
-    const handler = createHandler(config);
-    for (const body of [
-      {},
-      { clientId: "id", clientSecret: "secret" },
-      { clientId: "id", refreshToken: "token" },
-      { clientId: "id", clientSecret: "secret", refreshToken: "  " }
-    ]) {
-      const response = await rawCall(
-        handler,
-        config,
-        "/api/google/accounts/provision",
-        { method: "POST", body: JSON.stringify(body) },
-        config.token
-      );
-      expect(response.status).toBe(400);
-      expect((await response.json()).error).toContain("clientId, clientSecret, and refreshToken");
-    }
-  });
-
-  test("POST /api/google/accounts/provision registers a trusted account (201)", async () => {
-    const config = testConfig("http-google-provision-201");
-    const handler = createHandler(config);
-    // The registry is HOME-keyed (machine-global), so point HOME at a scratch
-    // dir for the duration of this test.
-    const prevHome = process.env.HOME;
-    const scratchHome = join(`/tmp/gini-http-tests-${import.meta.file}`, `provision-home-${process.pid}-${Date.now()}`);
-    mkdirSync(scratchHome, { recursive: true });
-    process.env.HOME = scratchHome;
-    try {
-      const response = await rawCall(
-        handler,
-        config,
-        "/api/google/accounts/provision",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            clientId: "edge-client",
-            clientSecret: "edge-secret",
-            refreshToken: "1//refresh",
-            email: "ada@example.com",
-            principal: "sub-ada"
-          })
-        },
-        config.token
-      );
-      expect(response.status).toBe(201);
-      const account = await response.json();
-      expect(account.tag).toBe("ada");
-      expect(account.provisioned).toBe(true);
-      expect(existsSync(join(account.configDir, "credentials.json"))).toBe(true);
-    } finally {
-      if (prevHome === undefined) delete process.env.HOME;
-      else process.env.HOME = prevHome;
-      rmSync(scratchHome, { recursive: true, force: true });
-    }
-  });
-
-  test("POST /api/google/accounts/provision with primary:true heals the hosted baked credential in place", async () => {
-    const config = testConfig("http-google-provision-primary");
-    const handler = createHandler(config);
-    const prevHome = process.env.HOME;
-    const prevHosted = process.env.GINI_HOSTED;
-    const prevCred = process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
-    const scratchHome = join(`/tmp/gini-http-tests-${import.meta.file}`, `provision-primary-${process.pid}-${Date.now()}`);
-    const credentialsFile = join(scratchHome, ".config", "gws-hosted", "credentials.json");
-    mkdirSync(dirname(credentialsFile), { recursive: true });
-    writeFileSync(credentialsFile, "{}");
-    process.env.HOME = scratchHome;
-    process.env.GINI_HOSTED = "1";
-    process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE = credentialsFile;
-    try {
-      const { ensureHostedPrimaryAccount } = await import("./integrations/connectors/google-accounts");
-      const { readGoogleAccounts } = await import("./state/google-accounts");
-      const primary = await ensureHostedPrimaryAccount();
-      expect(primary?.tag).toBe("primary");
-
-      const response = await rawCall(
-        handler,
-        config,
-        "/api/google/accounts/provision",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            clientId: "edge-client",
-            clientSecret: "edge-secret",
-            refreshToken: "1//healed",
-            email: "wilson@example.com",
-            principal: "sub-wilson",
-            primary: true
-          })
-        },
-        config.token
-      );
-      expect(response.status).toBe(201);
-      const account = await response.json();
-      // Landed on the baked primary row — no duplicate minted.
-      expect(account.id).toBe(primary!.id);
-      expect(account.configDir).toBe(dirname(credentialsFile));
-      expect(readGoogleAccounts()).toHaveLength(1);
-      // The fresh token overwrote the baked file gws actually reads.
-      expect(JSON.parse(readFileSync(credentialsFile, "utf8")).refresh_token).toBe("1//healed");
-    } finally {
-      if (prevHome === undefined) delete process.env.HOME;
-      else process.env.HOME = prevHome;
-      if (prevHosted === undefined) delete process.env.GINI_HOSTED;
-      else process.env.GINI_HOSTED = prevHosted;
-      if (prevCred === undefined) delete process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
-      else process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE = prevCred;
-      rmSync(scratchHome, { recursive: true, force: true });
-    }
-  });
-
-  test("POST /api/google/accounts/provision with makePrimary:true persists the account as the primary", async () => {
-    const config = testConfig("http-google-provision-make-primary");
-    const handler = createHandler(config);
-    const prevHome = process.env.HOME;
-    const scratchHome = join(`/tmp/gini-http-tests-${import.meta.file}`, `provision-make-primary-${process.pid}-${Date.now()}`);
-    mkdirSync(scratchHome, { recursive: true });
-    process.env.HOME = scratchHome;
-    try {
-      const { readPrimaryGoogleAccountId } = await import("./state/google-accounts");
-      const provision = (body: Record<string, unknown>) =>
-        rawCall(
-          handler,
-          config,
-          "/api/google/accounts/provision",
-          { method: "POST", body: JSON.stringify(body) },
-          config.token
-        );
-      // An add (no flag) never touches the primary.
-      const added = await provision({
-        clientId: "edge-client",
-        clientSecret: "edge-secret",
-        refreshToken: "1//refresh-a",
-        email: "ada@example.com",
-        principal: "sub-ada"
-      });
-      expect(added.status).toBe(201);
-      expect(readPrimaryGoogleAccountId()).toBeUndefined();
-      // A sign-in-intent provision flips the persisted primary to its account.
-      const signedIn = await provision({
-        clientId: "edge-client",
-        clientSecret: "edge-secret",
-        refreshToken: "1//refresh-b",
-        email: "bob@example.com",
-        principal: "sub-bob",
-        makePrimary: true
-      });
-      expect(signedIn.status).toBe(201);
-      const account = await signedIn.json();
-      expect(readPrimaryGoogleAccountId()).toBe(account.id);
-    } finally {
-      if (prevHome === undefined) delete process.env.HOME;
-      else process.env.HOME = prevHome;
-      rmSync(scratchHome, { recursive: true, force: true });
-    }
-  });
-
-  test("GET /api/google/auth-mode reflects the hosted marker", async () => {
-    const config = testConfig("http-google-auth-mode");
-    const handler = createHandler(config);
-    const prevHosted = process.env.GINI_HOSTED;
-    delete process.env.GINI_HOSTED;
-    try {
-      expect(await call(handler, config, "/api/google/auth-mode")).toEqual({ mode: "loopback" });
-      process.env.GINI_HOSTED = "1";
-      expect(await call(handler, config, "/api/google/auth-mode")).toEqual({ mode: "edge" });
-    } finally {
-      if (prevHosted === undefined) delete process.env.GINI_HOSTED;
-      else process.env.GINI_HOSTED = prevHosted;
-    }
-  });
-
   test("POST /api/google/accounts no longer requires a tag (configDir validation still applies)", async () => {
     const config = testConfig("http-google-accounts-no-tag");
     const handler = createHandler(config);
@@ -1049,12 +877,63 @@ describe("email watcher routes", () => {
     expect((await response.json()).error).toContain("configDir must be");
   });
 
+  test("DELETE /api/google/accounts/:id/instance disconnects only a secondary account", async () => {
+    const config = testConfig("http-google-disconnect-instance");
+    const handler = createHandler(config);
+    const prevHome = process.env.HOME;
+    const scratchHome = join(`/tmp/gini-http-tests-${import.meta.file}`, `disconnect-home-${process.pid}-${Date.now()}`);
+    mkdirSync(scratchHome, { recursive: true });
+    process.env.HOME = scratchHome;
+    try {
+      const { registerAccountForInstance } = await import("./integrations/connectors/google-accounts");
+      const { getGoogleAccountBindings } = await import("./state/google-account-bindings");
+      const { readGoogleAccounts } = await import("./state/google-accounts");
+      const primary = await registerAccountForInstance(config.instance, {
+        tag: "primary",
+        configDir: join(scratchHome, "primary"),
+        trusted: true,
+        email: "primary@example.com"
+      });
+      const secondary = await registerAccountForInstance(config.instance, {
+        tag: "secondary",
+        configDir: join(scratchHome, "secondary"),
+        trusted: true,
+        email: "secondary@example.com"
+      });
+
+      const protectedResponse = await rawCall(
+        handler,
+        config,
+        `/api/google/accounts/${primary.id}/instance`,
+        { method: "DELETE" },
+        config.token
+      );
+      expect(protectedResponse.status).toBe(409);
+      expect((await protectedResponse.json()).error).toContain("Primary Google account cannot be disconnected");
+
+      const disconnected = await rawCall(
+        handler,
+        config,
+        `/api/google/accounts/${secondary.id}/instance`,
+        { method: "DELETE" },
+        config.token
+      );
+      expect(disconnected.status).toBe(200);
+      expect(await disconnected.json()).toEqual({ id: secondary.id });
+      expect(getGoogleAccountBindings(config.instance).attachedAccountIds).toEqual([primary.id]);
+      expect(readGoogleAccounts()).toHaveLength(2);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      rmSync(scratchHome, { recursive: true, force: true });
+    }
+  });
+
   test("GET /api/google/login/start 302s to Google consent with PKCE and the browser-facing redirect_uri", async () => {
     const config = testConfig("http-google-login-start");
     const handler = createHandler(config);
-    const prevHosted = process.env.GINI_HOSTED;
-    delete process.env.GINI_HOSTED;
     resetGoogleLoginWebState();
+    setGoogleLoginWebClientForTests({ clientId: "test-client-id", clientSecret: "test-client-secret" });
     try {
       const origin = encodeURIComponent("http://127.0.0.1:3059");
       const response = await rawCall(
@@ -1073,17 +952,33 @@ describe("email watcher routes", () => {
       expect(location.searchParams.get("code_challenge_method")).toBe("S256");
       expect(location.searchParams.get("state")).toBeTruthy();
     } finally {
-      if (prevHosted === undefined) delete process.env.GINI_HOSTED;
-      else process.env.GINI_HOSTED = prevHosted;
       resetGoogleLoginWebState();
     }
   });
 
-  test("GET /api/google/login/start 400s on a non-loopback origin and in edge auth mode", async () => {
+  test("GET /api/google/login/start requires a locally configured OAuth client", async () => {
+    const config = testConfig("http-google-login-unconfigured");
+    const handler = createHandler(config);
+    resetGoogleLoginWebState();
+    try {
+      const origin = encodeURIComponent("http://127.0.0.1:3059");
+      const response = await rawCall(
+        handler,
+        config,
+        `/api/google/login/start?returnTo=%2Fonboarding&origin=${origin}`,
+        {},
+        config.token
+      );
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toContain("not configured");
+    } finally {
+      resetGoogleLoginWebState();
+    }
+  });
+
+  test("GET /api/google/login/start 400s on a non-loopback origin", async () => {
     const config = testConfig("http-google-login-start-400");
     const handler = createHandler(config);
-    const prevHosted = process.env.GINI_HOSTED;
-    delete process.env.GINI_HOSTED;
     resetGoogleLoginWebState();
     try {
       const lan = await rawCall(
@@ -1095,19 +990,7 @@ describe("email watcher routes", () => {
       );
       expect(lan.status).toBe(400);
       expect((await lan.json()).error).toContain("loopback");
-      process.env.GINI_HOSTED = "1";
-      const edge = await rawCall(
-        handler,
-        config,
-        `/api/google/login/start?origin=${encodeURIComponent("http://127.0.0.1:3059")}`,
-        {},
-        config.token
-      );
-      expect(edge.status).toBe(400);
-      expect((await edge.json()).error).toContain("edge sign-in flow");
     } finally {
-      if (prevHosted === undefined) delete process.env.GINI_HOSTED;
-      else process.env.GINI_HOSTED = prevHosted;
       resetGoogleLoginWebState();
     }
   });

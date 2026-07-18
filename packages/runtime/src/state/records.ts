@@ -416,6 +416,36 @@ export function findOrCreateDiscordChatSession(
   });
 }
 
+// Slack DM sessions are per-THREAD, not per-channel — each top-level
+// DM message starts its own thread (and its own chat session); replies
+// typed inside that thread continue the same session. We key on
+// (bridgeId, channelId, threadTs) where threadTs is the thread ROOT
+// ts, so re-creating the bridge starts fresh conversations — same
+// mental model as Telegram / Discord. The target is the DM channel id
+// the dispatcher hands back to sendMessagingOutput; threadTs is the
+// outbound thread anchor (chat.postMessage's thread_ts).
+export function findOrCreateSlackChatSession(
+  state: RuntimeState,
+  bridgeId: string,
+  channelId: string,
+  threadTs: string
+): ChatSessionRecord {
+  const existing = state.chatSessions.find((session) =>
+    session.source?.kind === "slack" &&
+    session.source.bridgeId === bridgeId &&
+    session.source.channelId === channelId &&
+    session.source.threadTs === threadTs
+  );
+  if (existing) return existing;
+  return createChatSession(state, `Slack thread ${threadTs}`, {
+    kind: "slack",
+    bridgeId,
+    channelId,
+    threadTs,
+    target: channelId
+  });
+}
+
 export function deleteChatSession(state: RuntimeState, id: string): ChatSessionRecord {
   const index = state.chatSessions.findIndex((item) => item.id === id);
   if (index < 0) throw new Error(`Chat session not found: ${id}`);

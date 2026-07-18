@@ -438,6 +438,14 @@ export interface ToolCallBlock extends ChatBlockBase {
   // `running`, so resolution/error/cancellation collapse the block back
   // to its default render.
   runningHint?: string;
+  // Id of the scheduled job a successful `create_job` or `update_job`
+  // call created/patched, stamped when the dispatch settles `ok`.
+  // Structured so clients can render the routine card and open its
+  // details panel without parsing the 80-char-truncated tool_result
+  // preview. Absent on failed calls, on every other tool (including
+  // delete_job — a card for a deleted routine would only ever render
+  // its tombstone), and on blocks predating the field.
+  jobId?: string;
 }
 
 export interface ToolResultBlock extends ChatBlockBase {
@@ -532,12 +540,24 @@ export interface SystemNoteAuthError {
   // 401/403 text — "incorrect key", "quota exceeded", "key disabled").
   detail: string;
   // Where the CTA sends the user to re-establish the credential. "docs" → the
-  // hosted step-through (OAuth/CLI providers like codex, whose re-auth is a
+  // documented step-through (OAuth/CLI providers like codex, whose re-auth is a
   // non-obvious terminal flow); "settings" → the in-app Settings → Providers
   // key form (API-key providers); "aws" → Settings, worded for the AWS access
   // key + secret bedrock stores (no bearer API key). See ADR provider-reauth-guidance.md.
   reauthKind: "docs" | "settings" | "aws";
   reauthUrl: string;
+}
+
+// Generic navigation call-to-action attached to a system note: the web chat
+// renders an inline button linking to `href`. Hrefs are app-relative routes
+  // ("/integrations"), valid because chat and the
+// target page are routes of the one web app served from a single origin
+// (ADR gateway-web-reverse-proxy.md). Unlike SystemNoteAuthError this
+// carries no provider semantics — it's for runtime affordances like
+// request_google_account's "Reconnect Google account" button.
+export interface SystemNoteCta {
+  href: string;
+  label: string;
 }
 
 export interface SystemNoteBlock extends ChatBlockBase {
@@ -547,6 +567,9 @@ export interface SystemNoteBlock extends ChatBlockBase {
   // (see SystemNoteAuthError). Absent for ordinary notes (cancellation,
   // iteration-cap, approval-denied).
   authError?: SystemNoteAuthError;
+  // Present only when this note carries an inline navigation button (see
+  // SystemNoteCta). A note carries authError OR cta, never both.
+  cta?: SystemNoteCta;
 }
 
 // Persistent per-provider auth-failure record (issue #233). Written when a
@@ -1080,8 +1103,8 @@ export interface ChatSessionRecord {
   surfaced?: boolean;
   // Records the creation gesture: which composer mode the user started the
   // container from — "task" (a fire-and-forget work item that lives on home)
-  // or "message" (a conversation the user stays in; the sidebar Messages
-  // section lists these). Immutable presentation intent, not lifecycle —
+  // or "message" (a conversation the user stays in; Home's Chats section lists
+  // these). Immutable presentation intent, not lifecycle —
   // nothing flips it later. Absent on containers minted before the field
   // existed and on router/agent/job-minted containers (unknown ≠ either).
   startedAs?: "task" | "message";
@@ -1179,8 +1202,26 @@ export interface HomeTaskItem {
   // decay to attention "none" and are filtered server-side); the client flips
   // it optimistically after POST /api/containers/:id/acknowledge.
   acknowledged: boolean;
+  // Present when a scheduled job was created from this conversation
+  // (job.chatSessionId points here); the newest such job wins. Drives the
+  // row's violet Routine chip, which opens the routine details panel.
+  routineJobId?: string;
   startedBy: "user" | "agent" | "schedule";
   updatedAt: string;
+}
+
+// One row of the home Done section (GET /api/home): a container whose latest
+// terminal run outcome is completed AND acknowledged. Acknowledged failures
+// and cancellations never appear — Done shows only successful work.
+export interface HomeDoneItem {
+  // Container (chat session) id — the row deep-links to /chat?session=<id>.
+  id: string;
+  title: string;
+  // First line of the completed run's summary (same derivation as
+  // HomeTaskItem.outcomeLine); absent when the run recorded no summary.
+  outcomeLine?: string;
+  // The outcome's `at` timestamp — what the row's relative time renders.
+  completedAt: string;
 }
 
 // One row of the home Recents feed (GET /api/home): one entry per
@@ -1192,7 +1233,10 @@ export interface RecentItem {
   id: string;
   // Owning container (chat session) id — the row deep-links there.
   containerId: string;
-  icon: "draft" | "document";
+  // Row glyph. "chat" marks a message-mode container (startedAs === "message"),
+  // "draft" a task that produced an outbound-message draft, "document" any
+  // other task.
+  icon: "draft" | "document" | "chat";
   title: string;
   timestamp: string;
 }
@@ -1200,15 +1244,23 @@ export interface RecentItem {
 // `lastInboundMessageId` is the most recent originating-message id the
 // chat session received from the bridge — Telegram's numeric
 // `message_id` (the per-chat id used by `reply_to_message_id`, NOT
-// the update id) or Discord's message snowflake string (used by
-// `message_reference.message_id`). It's what scheduled-job replies
-// use to thread their delayed dispatch onto the original user
-// message. The field is updated by the poller every time a new
-// inbound lands so a long-running session always threads onto the
-// most recent prompt.
+// the update id), Discord's message snowflake string (used by
+// `message_reference.message_id`), or Slack's message `ts`. It's what
+// scheduled-job replies use to thread their delayed dispatch onto the
+// original user message (Slack excepted: outbound there anchors on
+// `threadTs`, see below). The field is updated by the poller every
+// time a new inbound lands so a long-running session always threads
+// onto the most recent prompt.
+//
+// Slack sessions are per-THREAD, not per-channel: each top-level DM
+// message starts its own thread (and session), keyed by `threadTs` —
+// the thread root's ts. Outbound dispatch MUST pass `threadTs` as
+// chat.postMessage's thread_ts, never `lastInboundMessageId`: a
+// reply's own ts would fork a broken second thread.
 export type ChatSessionSource =
   | { kind: "telegram"; bridgeId: string; chatId: number; target: string; lastInboundMessageId?: number }
   | { kind: "discord"; bridgeId: string; channelId: string; target: string; lastInboundMessageId?: string }
+  | { kind: "slack"; bridgeId: string; channelId: string; threadTs: string; target: string; lastInboundMessageId?: string }
   // Openclaw migration provenance. The poller-side
   // findOrCreate*ChatSession helpers only match on the telegram and
   // discord kinds, so an "openclaw"-sourced session never receives
@@ -1226,7 +1278,7 @@ export type ChatSessionSource =
 // `source.kind`. An absent/unrecognized value resolves to undefined
 // (unknown), never an error, so older clients keep working. See ADR
 // client-surface-context.md.
-export type ChatClientSurface = "web" | "mobile" | "cli" | "telegram" | "discord" | "openclaw";
+export type ChatClientSurface = "web" | "mobile" | "cli" | "telegram" | "discord" | "slack" | "openclaw";
 
 export interface ChatMessageRecord {
   id: string;
@@ -1347,6 +1399,11 @@ export interface SubagentRecord {
   // enabled skill the parent could see. When set, the "Available skills:"
   // block in the system prompt is filtered down to this subset.
   skillNames?: string[];
+  // Ambient-memory switch for this persona's turns: `false` skips
+  // auto-recall and auto-retain (mirrors AgentRecord.autoMemory). Meant for
+  // high-volume mechanical workers (e.g. the CRM curator) whose durable
+  // memory is their own database.
+  autoMemory?: boolean;
   // Convenience mirror of the populated child task's summary/error so the
   // parent (or UI) can read terminal results off the subagent record without
   // joining against the task table.
@@ -1418,8 +1475,9 @@ export interface MessagingBridgeRecord {
   message?: string;
   createdAt: string;
   updatedAt: string;
-  // Per-bridge encrypted secret refs (Telegram + Discord both store
-  // their bot token here). Stored via the same AES-GCM box as
+  // Per-bridge encrypted secret refs (Telegram + Discord store their
+  // bot token here; Slack stores both its bot token and its app-level
+  // Socket Mode token). Stored via the same AES-GCM box as
   // connectorSecrets — the connectorId namespace we use is
   // `messaging.<bridgeId>` so a bridge delete cleans up its files.
   secretRefs?: ConnectorSecretRef[];
@@ -1439,6 +1497,11 @@ export interface MessagingBridgeRecord {
   //   discord: {
   //     botUsername, botId, globalName?,
   //     lastInboundExternalIds: Record<channelId, snowflake>  // per-channel watermark
+  //   }
+  //   slack: {
+  //     botUserId, botUsername, teamId, teamName   // from auth.test; botUserId
+  //                                                // is what the socket loop uses
+  //                                                // to drop self-authored events
   //   }
   metadata?: Record<string, unknown>;
 }
@@ -1563,6 +1626,16 @@ export interface AgentRecord {
   // beyond the always-on SSRF gate. User-managed by editing the agent
   // record (no CLI/UI surface yet — see ADR browser-domain-policy.md).
   browserDomainPolicy?: BrowserDomainPolicy;
+  // Ambient Hindsight pipeline switch. `false` ⇒ this agent's chat turns
+  // skip auto-recall (the pre-model memory query) and auto-retain (the
+  // post-completion background distillation). Memory TOOLS stay available
+  // when the agent's toolsets expose them — this only silences the
+  // per-turn ambient pipeline. Absent/true ⇒ memory on. Meant for
+  // high-volume mechanical agents (e.g. a CRM curator whose durable
+  // memory is its own agent-data database): recall over a bank the agent
+  // never needs is pure latency, and retaining every processed input
+  // floods the bank and slows recall for everyone.
+  autoMemory?: boolean;
   // ISO timestamp set when the agent is archived (soft delete). Orthogonal
   // to `status` — `activateAgent` flips `status`, so archive state lives in
   // its own field. Absent ⇒ not archived. An archived agent cannot be
@@ -1587,7 +1660,7 @@ export interface RelayRecord {
   name: string;
   endpoint: string;
   status: RelayStatus;
-  mode: "local-only" | "lan" | "hosted";
+  mode: "local-only" | "lan";
   createdAt: string;
   updatedAt: string;
   lastHealthAt?: string;
@@ -2047,6 +2120,25 @@ export interface JobRecord {
   // fire time is skipped with a trace event — never fails the fire. See ADR
   // job-skill-attachments.md.
   skillNames?: string[];
+  // Routine-template provenance: the catalog id this job was installed from
+  // (the /routines gallery or the onboarding starter routines, both via
+  // src/runtime/routine-templates.ts). The gallery keys installed state and
+  // per-template replace/remove on it. Optional — ordinary jobs carry no
+  // templateId, so no state migration. See ADR routine-templates-gallery.md.
+  templateId?: string;
+  // Legacy flat boolean option state from installs predating
+  // templateSettings. No longer stamped by the catalog's buildSpecs; kept
+  // readable so the gallery can normalize old installs through each
+  // template's legacySettings mapping (src/runtime/routine-templates.ts).
+  templateOptions?: Record<string, boolean>;
+  // Resolved settings state the template was installed with (field defaults
+  // merged with the caller's overrides, validated by resolveSettings),
+  // stamped by the catalog's buildSpec alongside templateId so the gallery's
+  // Settings view can render the current configuration. Values are
+  // template-owned shapes (booleans, strings, label-rule lists). Absent on
+  // ordinary jobs and on templates without settings; optional, so no state
+  // migration.
+  templateSettings?: Record<string, unknown>;
   retryLimit: number;
   timeoutSeconds: number;
   costBudget?: number;
@@ -2286,13 +2378,19 @@ export interface ConnectorRecord {
     message: string;
   };
   // Transient, API-enrichment-only. Never persisted to state — GET
-  // /api/connectors attaches the machine-global tagged Google accounts
+  // /api/connectors attaches this instance's tagged Google accounts
   // (each with live `gws auth status` per its config dir) to
   // google-oauth-desktop records, alongside `session`, so clients can
   // show the connected accounts. The accounts registry itself lives
   // machine-globally under ~/.gini/google-accounts (src/state/google-accounts.ts);
   // the connector keeps holding only the OAuth *client* creds.
   accounts?: GoogleAccountStatus[];
+  // Transient, API-enrichment-only. Never persisted to state — GET
+  // /api/connectors computes it from connectorIsUsable (status + health +
+  // probe presence) and, for google-oauth-desktop, at-least-one-signed-in
+  // account. The Integrations page reads this to decide whether the tile
+  // is Connected (green) or Needs attention (warning).
+  usable?: boolean;
 }
 
 // A tagged Google account in the machine-global registry. Account identity ==
@@ -2305,18 +2403,26 @@ export interface GoogleAccount {
   email: string;       // signed-in email from `gws auth status` .user ("" until known)
   configDir: string;   // absolute path to this account's gws config dir
   addedAt: string;     // ISO
-  // Immutable provenance: true only for an account minted by the relay-provisioned
-  // grant path (registerAccount with trusted:true). Lets that path re-find ITS
-  // account idempotently without keying off the mutable display tag — so a user
-  // retagging it, or independently tagging another account "workspace", never
-  // redirects or clobbers the provisioned credential. Absent ⇒ user/manual account.
-  provisioned?: boolean;
-  // The relay/Google principal (the OAuth subject id, relay Session.account) the
-  // provisioned credential belongs to. Set only alongside `provisioned`. Re-find
-  // matches on this, so two different identities provisioned on one machine
-  // (e.g. distinct instances) each keep their OWN dir instead of one clobbering
-  // the other's credential. Absent ⇒ user/manual account.
+  // Google's immutable OAuth subject id. Local OAuth refreshes match on this so
+  // retagging an account or changing its email never mints a duplicate row.
   principal?: string;
+}
+
+export interface GoogleAccountBindingSnapshot {
+  id: string;
+  email?: string;
+  principal?: string;
+  firstSignedInAt: string;
+  lastSignedInAt?: string;
+  lastSignedOutAt?: string;
+}
+
+export interface GoogleAccountBindings {
+  version: 1;
+  attachedAccountIds: string[];
+  accounts: Record<string, GoogleAccountBindingSnapshot>;
+  primaryAccountId?: string;
+  legacyPrimaryMigratedAt?: string;
 }
 
 // A registry account enriched with its live `gws auth status` (per config dir).
@@ -2334,9 +2440,12 @@ export interface GoogleAccountStatus extends GoogleAccount {
   message: string;
   // True on exactly one row: the effective primary account (the persisted
   // primaryAccountId when it still names a registered account, else the
-  // first provisioned row, else the first row). Server-resolved so every
+  // first row). Server-resolved so every
   // client agrees on which account is "the" account.
   primary?: boolean;
+  // True when this account is attached to the current runtime instance. Every
+  // instance-aware product read returns only rows carrying this flag.
+  attached?: boolean;
 }
 
 // Web onboarding record (ADR web-onboarding-flow.md). Persisted per-instance
@@ -2355,12 +2464,23 @@ export interface OnboardingProfile {
   sections: OnboardingProfileSection[];
 }
 
+// A recurring automation inferred from the same mailbox evidence as the
+// onboarding profile. The Routines page presents these as suggestions; the
+// user still chooses one and finishes its schedule/account setup in a task
+// before any job is created.
+export interface OnboardingRoutineSuggestion {
+  name: string;
+  description: string;
+  usesEmail: boolean;
+}
+
 export type OnboardingScanStatus = "idle" | "running" | "ready" | "failed" | "no_account";
 
 // The Gmail profile scan's lifecycle. The deterministic in-runtime pipeline
 // (src/runtime/onboarding-scan.ts) runs in the background while `status ===
-// "running"`; on completion it writes `profile`/`suggestedTasks` (ready) or
-// `error` (failed) and pushes an `onboarding` event so the browser refetches.
+// "running"`; on completion it writes `profile` plus optional
+// `suggestedTasks`/`suggestedRoutines` (ready), or `error` (failed), and pushes
+// an `onboarding` event so the browser refetches.
 export interface OnboardingScan {
   status: OnboardingScanStatus;
   startedAt?: string;
@@ -2368,6 +2488,7 @@ export interface OnboardingScan {
   error?: string;
   profile?: OnboardingProfile;
   suggestedTasks?: string[];
+  suggestedRoutines?: OnboardingRoutineSuggestion[];
 }
 
 export interface OnboardingRecord {

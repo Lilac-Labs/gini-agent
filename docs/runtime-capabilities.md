@@ -74,7 +74,7 @@ Stable local clients use the gateway API:
 - `/api/settings/auto-approve`
 - `/api/parity/hermes`, `/api/readiness/v1`
 
-Native gateway `/api/*` routes require the **owner bearer** (`Authorization: Bearer <config.token>`) — the only credential the runtime authorizes — with health checks and signed upload GETs excepted. Hosted requests arrive pre-authenticated via `X-Gini-Edge`: the edge authenticates the user with Google OAuth and injects the guest's own owner token upstream. See [ADR: Owner-token-only authentication](adr/owner-token-auth.md).
+Native gateway `/api/*` routes require the **owner bearer** (`Authorization: Bearer <config.token>`) — the only credential the runtime authorizes — with health checks and signed upload GETs excepted. Browser requests go through the origin-checked BFF, which injects that bearer server-side. See [ADR: Owner-token-only authentication](adr/owner-token-auth.md).
 
 ## Boundaries
 

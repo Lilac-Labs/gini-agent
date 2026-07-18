@@ -18,25 +18,31 @@ import { useConnectGoogleAccount, useReloginPrimary } from "./useConnectGoogleAc
 //     <email>" runs the FULL sign-in flow (useReloginPrimary), the only path
 //     that re-authorizes the SAME account. "Use a different account" still
 //     offers the add flow as an escape hatch.
-//   - no usable account → "Continue with Google" starts the connect flow;
-//     once the account registers the button swaps to "Continue as".
-// The connect flow is a same-tab OAuth round trip in both auth modes (edge's
-// /auth/google/add or the gateway's loopback PKCE flow — see
+//   - no usable account → a configured local OAuth client starts the connect
+//     flow; otherwise "Set up Google OAuth" opens the encrypted credential
+//     dialog first. Once the account registers the button swaps to "Continue
+//     as".
+// The connect flow is a same-tab loopback PKCE OAuth round trip (see
 // useConnectGoogleAccount), returning to /onboarding so the funnel restarts
 // at this step with the fresh account visible.
-// `onSkip` (self-hosted only — the page withholds it when managed, where the
-// edge's Google sign-in is the session itself) renders a quiet "Skip for now"
+// `onSkip` renders a quiet "Skip for now"
 // that completes onboarding minimally, so a user without a Google account
-// still reaches the app; they can connect one later via settings or skills.
+// still reaches the app; they can connect one later via Integrations.
 // The design's Microsoft button is omitted — no Microsoft integration exists.
 export function StepSignIn({
   onContinue,
   onSkip,
-  skipPending
+  skipPending,
+  oauthConfigured,
+  onSetupOAuth,
+  oauthSetupPending
 }: {
   onContinue: () => void;
   onSkip?: () => void;
   skipPending?: boolean;
+  oauthConfigured: boolean;
+  onSetupOAuth: () => void;
+  oauthSetupPending?: boolean;
 }) {
   const accounts = useGoogleAccounts({ refetchInterval: 5_000 });
   // Signin intent: the account this OAuth completes as becomes the persisted
@@ -50,6 +56,8 @@ export function StepSignIn({
   // The revoked primary (signed out) — its email/tag labels the reconnect
   // button. Resolved against the FULL registry, not just the signed-in subset.
   const revokedPrimary = all.find((account) => account.id === primaryAccountId(all));
+  const connectOrSetup = oauthConfigured ? connect.connect : onSetupOAuth;
+  const reconnectOrSetup = oauthConfigured ? relogin.connect : onSetupOAuth;
 
   return (
     <div className="flex flex-col items-center gap-7 px-7 pb-12 pt-12 text-center sm:px-10">
@@ -70,13 +78,15 @@ export function StepSignIn({
       <div className="flex w-full flex-col items-center gap-3.5">
         {cta === "reconnect" ? (
           <>
-            <GoogleButton onClick={relogin.connect} disabled={relogin.isPending}>
-              Sign-in expired — reconnect {revokedPrimary?.email || revokedPrimary?.tag}
+            <GoogleButton onClick={reconnectOrSetup} disabled={relogin.isPending || oauthSetupPending}>
+              {oauthConfigured
+                ? `Sign-in expired — reconnect ${revokedPrimary?.email || revokedPrimary?.tag}`
+                : "Set up Google OAuth to reconnect"}
             </GoogleButton>
             <button
               type="button"
-              onClick={connect.connect}
-              disabled={connect.isPending}
+              onClick={connectOrSetup}
+              disabled={connect.isPending || oauthSetupPending}
               className="text-[13px] text-[#9A9A94] transition-colors hover:text-[#6B6B66] hover:underline disabled:opacity-50"
             >
               Use a different account
@@ -89,8 +99,8 @@ export function StepSignIn({
             </GoogleButton>
             <button
               type="button"
-              onClick={connect.connect}
-              disabled={connect.isPending}
+              onClick={connectOrSetup}
+              disabled={connect.isPending || oauthSetupPending}
               className="text-[13px] text-[#9A9A94] transition-colors hover:text-[#6B6B66] hover:underline disabled:opacity-50"
             >
               Use a different account
@@ -98,10 +108,10 @@ export function StepSignIn({
           </>
         ) : (
           <GoogleButton
-            onClick={connect.connect}
-            disabled={connect.isPending || accounts.isPending}
+            onClick={connectOrSetup}
+            disabled={connect.isPending || oauthSetupPending || (oauthConfigured && accounts.isPending)}
           >
-            Continue with Google
+            {oauthConfigured ? "Continue with Google" : "Set up Google OAuth"}
           </GoogleButton>
         )}
         {onSkip ? (

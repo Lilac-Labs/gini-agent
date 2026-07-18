@@ -236,6 +236,14 @@ const DISCONNECT_DRAIN_DEADLINE_MS = 5_000;
 // flow for minutes. Overridable via __test.setTeardownCloseTimeoutForTest
 // so close-path tests don't have to wait the full budget.
 let teardownCloseTimeoutMs = 5_000;
+// A page caught between timed-out navigations can leave Playwright's
+// page.evaluate pending forever. browser_console is the read/eval boundary the
+// model reaches immediately afterward, so cap the whole call and reset the
+// shared browser on expiry. The routine browser uses console expressions for
+// batched in-page API work, so the production window stays comfortably above
+// the normal 30-60s batches while still bounding a wedged page.
+const BROWSER_CONSOLE_TIMEOUT_MS_DEFAULT = 120_000;
+let browserConsoleTimeoutMs = BROWSER_CONSOLE_TIMEOUT_MS_DEFAULT;
 // Memoized playwright-core chromium import, used by the cdp provider to
 // connectOverCDP to a user's external Chrome. The spawned provider goes
 // through chrome-launch.ts directly; only the cdp attach needs the bare
@@ -663,6 +671,25 @@ async function settledWithin(op: Promise<unknown>, ms: number): Promise<boolean>
   try {
     const outcome = await Promise.race([op.then(() => undefined, () => undefined), timeout]);
     return outcome !== TIMED_OUT;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+class BrowserConsoleTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`Browser console timed out after ${ms}ms.`);
+    this.name = "BrowserConsoleTimeoutError";
+  }
+}
+
+async function withBrowserConsoleTimeout<T>(op: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new BrowserConsoleTimeoutError(browserConsoleTimeoutMs)), browserConsoleTimeoutMs);
+  });
+  try {
+    return await Promise.race([op, timeout]);
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -3118,7 +3145,18 @@ export async function browserNavigate(
       }, taskId);
     });
   } catch (error) {
-    return fail(error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    const lower = message.toLowerCase();
+    if (lower.includes("timeout") && (lower.includes("goto:") || lower.includes("navigation"))) {
+      // A timed-out goto can leave Chrome's page in an indefinitely-pending
+      // navigation. Reusing that page makes the next page.evaluate (usually
+      // browser_console) hang forever. The browser context owns the persistent
+      // profile, not the cookies themselves, so a bounded disconnect/relaunch
+      // clears the bad page while preserving sign-in state on disk.
+      await disconnectSharedBrowser().catch(() => undefined);
+      return fail(`${message}\nThe browser session was reset after the navigation timeout; retry navigation.`);
+    }
+    return fail(message);
   }
 }
 
@@ -3775,7 +3813,7 @@ export async function browserConsole(taskId: string, args: Record<string, unknow
   const expression = str(args.expression);
   const clear = bool(args.clear, false);
   try {
-    return await withSession(taskId, async (session) => {
+    return await withBrowserConsoleTimeout(withSession(taskId, async (session) => {
       // Refuse to run agent JS on any origin the URL guard rejects (loopback
       // control-plane, cloud metadata, link-local, ...). This is the one tool
       // that executes agent-supplied code in the page's origin, so a
@@ -3885,9 +3923,18 @@ export async function browserConsole(taskId: string, args: Record<string, unknow
         evalResult: redactedEvalResult,
         evalError: evalError ? redactSecretValuesFromString(evalError, secretValues) : null
       }, taskId);
-    });
+    }));
   } catch (error) {
-    return fail(error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof BrowserConsoleTimeoutError) {
+      // The timed-out withSession call is still counted as in-flight. The
+      // disconnect path waits briefly for it, then tears down the context if
+      // Chrome never answers; either way the next browser tool gets a fresh
+      // page instead of inheriting this permanently-pending evaluation.
+      await disconnectSharedBrowser().catch(() => undefined);
+      return fail(`${message} The browser session was reset; retry navigation before reading the console.`);
+    }
+    return fail(message);
   }
 }
 
@@ -4866,9 +4913,27 @@ export async function browserUploadFileApproved(
     return await withSession(taskId, async (session) => {
       // Trust boundary: the approval was granted for the exact stamped
       // element — no resolveRefForAction self-healing here; a lost stamp
-      // fails loudly (see ADR browser-fill-secret.md).
+      // fails loudly (see ADR browser-fill-secret.md). The liveness
+      // pre-check below keeps that stance: it exists only to fail FAST
+      // with actionable guidance when the stamped node vanished between
+      // approval and execution (a menu closed, an SPA re-render), instead
+      // of hanging 10s in setInputFiles and surfacing a raw Playwright
+      // timeout. Unit tests plant minimal locator stubs without count();
+      // treat those as live (same guard as resolveRefForAction).
       const target = session.refs.get(ref);
       if (!target) return fail(`Unknown ref ${ref}. Take a fresh snapshot first.`);
+      if (typeof target.locator.count === "function") {
+        let stampedCount = 0;
+        try {
+          stampedCount = await target.locator.count();
+        } catch {
+          // A failing count (page navigating mid-call, context churn)
+          // reads as a lost stamp: same fast, actionable failure.
+        }
+        if (stampedCount === 0) {
+          return fail(`The element for ${ref} is no longer on the page — it re-rendered or a menu closed since the snapshot. Take a fresh browser_snapshot and retry with the new ref.`);
+        }
+      }
       await target.locator.setInputFiles(resolved.absolute, { timeout: 10_000 });
       const snap = await snapshot(session.page, false, taskId);
       session.refs = snap.refs;
@@ -4946,9 +5011,28 @@ export async function browserDownloadApproved(
       // Trust boundary: the approval was granted for the exact stamped
       // element — no resolveRefForAction self-healing here; a lost stamp
       // fails loudly (same stance as browser_upload_file; see ADR
-      // browser-fill-secret.md).
+      // browser-fill-secret.md). The liveness pre-check below keeps that
+      // stance: it exists only to fail FAST with actionable guidance when
+      // the stamped node vanished between approval and execution (the
+      // common case: downloading from a row menu that closed after the
+      // previous download), instead of hanging 10s in the click and
+      // surfacing a raw Playwright timeout the model then burns minutes
+      // investigating. Unit tests plant minimal locator stubs without
+      // count(); treat those as live (same guard as resolveRefForAction).
       const target = session.refs.get(ref);
       if (!target) return fail(`Unknown ref ${ref}. Take a fresh snapshot first.`);
+      if (typeof target.locator.count === "function") {
+        let stampedCount = 0;
+        try {
+          stampedCount = await target.locator.count();
+        } catch {
+          // A failing count (page navigating mid-call, context churn)
+          // reads as a lost stamp: same fast, actionable failure.
+        }
+        if (stampedCount === 0) {
+          return fail(`The element for ${ref} is no longer on the page — it re-rendered or a menu closed since the snapshot. Take a fresh browser_snapshot and retry with the new ref.`);
+        }
+      }
       if (typeof session.page.waitForEvent !== "function") {
         return fail("Download capture is not supported by this browser session.");
       }
@@ -5060,6 +5144,9 @@ export const __test = {
   },
   resetTeardownCloseTimeoutForTest(): void {
     teardownCloseTimeoutMs = 5_000;
+  },
+  setBrowserConsoleTimeoutForTest(ms: number | null): void {
+    browserConsoleTimeoutMs = ms ?? BROWSER_CONSOLE_TIMEOUT_MS_DEFAULT;
   },
   // Swap the profile-dir Chromium reaper so the wedged-close test can
   // assert it's invoked on timeout without scanning real `ps`.

@@ -75,6 +75,37 @@ describe("gini autostart usage and platform gate", () => {
       rmSync(scratch.logRoot, { recursive: true, force: true });
     }
   });
+
+  // `--home` is validated BEFORE anything touches launchd or writes a plist,
+  // so a typo'd path is a clean non-zero exit with a descriptive error —
+  // never a plist homed on a directory that can't run the runtime.
+  test("enable --home with a non-checkout dir fails fast, before any plist is written", () => {
+    if (process.platform !== "darwin") return; // platform gate prints macOS-only
+    const instance = `home-invalid-${tag()}`;
+    const scratch = makeScratch("home-invalid");
+    try {
+      const result = runCli(
+        [
+          "autostart", "enable",
+          "--instance", instance,
+          "--home", join(scratch.stateRoot, "not-a-checkout"),
+          "--state-root", scratch.stateRoot,
+          "--log-root", scratch.logRoot,
+          "--test-root", scratch.stateRoot
+        ],
+        {}
+      );
+      expect(result.status).not.toBe(0);
+      const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+      expect(parsed.ok).toBe(false);
+      expect(String(parsed.error)).toContain("not a usable gini-agent checkout");
+      // Validation fires before enable() — no plist lands on disk.
+      expect(existsSync(plistPathFor(instance, "gateway"))).toBe(false);
+    } finally {
+      rmSync(scratch.stateRoot, { recursive: true, force: true });
+      rmSync(scratch.logRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 // Run only on macOS — the platform gate kicks in elsewhere and the JSON

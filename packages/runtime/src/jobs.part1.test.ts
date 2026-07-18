@@ -537,10 +537,14 @@ describe("cron lifecycle", () => {
 
     // Confirmation string contains the new job id, cadence, and the bound
     // session id so the model can reference both in its reply to the user.
+    // The id ALSO rides as the structured `jobId` field — the chat-task loop
+    // stamps it onto the tool_call block (the routine card's click target)
+    // instead of parsing it back out of the result string.
     if (result.kind === "sync") {
       expect(result.result).toContain(jobs[0]!.id);
       expect(result.result).toContain("one-shot");
       expect(result.result).toContain(sessionId);
+      expect(result.jobId).toBe(jobs[0]!.id);
     }
     // Audit row with actor:"agent" action:"job.created".
     const audit = stateAfter.audit.find(
@@ -893,6 +897,32 @@ describe("update_job deliverTo rebinding", () => {
     expect(after.chatSessions.length).toBe(sessionCount);
     if (repeat.kind === "sync") {
       expect(repeat.result).toContain("no change");
+    }
+  });
+
+  test("update_job dispatch returns the patched job's structured jobId", async () => {
+    const config = testConfig("jobs-update-tool-jobid");
+    const { taskId } = await seedChatTask(config, "upd-jobid");
+    const job = await createScheduledJob(config, {
+      name: "hydration",
+      intervalSeconds: 600,
+      prompt: "Drink water.",
+      parentTaskId: taskId
+    });
+
+    const result = await dispatchToolCall(
+      config,
+      taskId,
+      "update_job",
+      "call_update_jobid",
+      JSON.stringify({ jobId: job.id, intervalSeconds: 300 })
+    );
+    expect(result.kind).toBe("sync");
+    if (result.kind === "sync") {
+      // Structured id mirrors create_job's: the chat-task loop stamps it on
+      // the tool_call block so the routine card renders for update turns too.
+      expect(result.jobId).toBe(job.id);
+      expect(result.result).toContain("Updated job");
     }
   });
 
@@ -1491,6 +1521,56 @@ describe("job deliveryTargets delivery", () => {
       const audit = readState(config.instance).audit.find((a) => a.action === "job.delivery.failed");
       expect(audit?.target).toBe("job_delivery");
       expect(audit?.evidence?.target).toBe("ghost");
+    } finally {
+      resetMessagingDeps();
+    }
+  });
+
+  test("a Slack bridge with no configured channel records a delivery failure instead of posting to 'local'", async () => {
+    const config = testConfig("jobs-delivery-slack-no-channel");
+    const { addMessagingBridge, setMessagingDeps, resetMessagingDeps } = await import("./integrations/messaging");
+    const { finalizeJobRunFromTask } = await import("./jobs/finalize");
+    const postCalls: Array<{ channel: string; text: string }> = [];
+    setMessagingDeps({
+      slackClientFactory: () => ({
+        async authTest() {
+          return { userId: "UBOT", user: "gini", teamId: "T1", team: "Acme" };
+        },
+        async postMessage(channel: string, text: string) {
+          postCalls.push({ channel, text });
+          return { channel, ts: "1" };
+        },
+        async addReaction() {
+          return true as const;
+        },
+        async removeReaction() {
+          return true as const;
+        }
+      })
+    });
+    try {
+      // A DM-only Slack bridge (empty deliveryTargets) — create_job now
+      // rejects it as a target, but jobs saved before the bridge lost
+      // its channel and raw POST /api/jobs entries can still name one.
+      // Generic dispatch would otherwise fall back to the literal
+      // "local" target and fail with channel_not_found on every fire.
+      const bridge = await addMessagingBridge(config, {
+        name: "slk",
+        kind: "slack",
+        deliveryTargets: [],
+        botToken: "xoxb-TOK",
+        appToken: "xapp-TOK"
+      });
+      const task = await seedJobRun(config, { deliveryTargets: ["slk"], summary: "Briefing with no channel." });
+      await finalizeJobRunFromTask(config, task);
+      // No Slack POST ever fires — not even against "local".
+      expect(postCalls).toHaveLength(0);
+      const run = readState(config.instance).jobRuns.find((r) => r.id === "run_delivery");
+      expect(run?.status).toBe("completed");
+      const audit = readState(config.instance).audit.find((a) => a.action === "job.delivery.failed");
+      expect(audit?.target).toBe("job_delivery");
+      expect(audit?.evidence?.bridgeId).toBe(bridge.id);
+      expect(audit?.evidence?.reason).toContain("no delivery channel configured");
     } finally {
       resetMessagingDeps();
     }

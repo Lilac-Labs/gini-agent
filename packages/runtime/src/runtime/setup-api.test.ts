@@ -45,7 +45,6 @@ describe("setup-api", () => {
     CODEX_AUTH_JSON?: string;
     GINI_PROVIDER?: string;
     GINI_MODEL?: string;
-    GINI_HOSTED?: string;
   };
   let s: ReturnType<typeof scratch>;
   let config: RuntimeConfig;
@@ -60,8 +59,7 @@ describe("setup-api", () => {
       ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
       CODEX_AUTH_JSON: process.env.CODEX_AUTH_JSON,
       GINI_PROVIDER: process.env.GINI_PROVIDER,
-      GINI_MODEL: process.env.GINI_MODEL,
-      GINI_HOSTED: process.env.GINI_HOSTED
+      GINI_MODEL: process.env.GINI_MODEL
     };
     s = scratch();
     process.env.HOME = s.home;
@@ -73,9 +71,6 @@ describe("setup-api", () => {
     // GINI_PROVIDER=echo or similar in the caller's shell.
     delete process.env.GINI_PROVIDER;
     delete process.env.GINI_MODEL;
-    // Scrub the hosted marker so `managed` assertions reflect the flag this
-    // suite sets, not the ambient shell.
-    delete process.env.GINI_HOSTED;
     // Point CODEX_AUTH_JSON at a non-existent scratch path so the codex
     // credential probe in providerHealth() resolves into the test
     // sandbox instead of falling back to ~/.codex/auth.json on the
@@ -108,8 +103,6 @@ describe("setup-api", () => {
     else process.env.GINI_PROVIDER = env.GINI_PROVIDER;
     if (env.GINI_MODEL === undefined) delete process.env.GINI_MODEL;
     else process.env.GINI_MODEL = env.GINI_MODEL;
-    if (env.GINI_HOSTED === undefined) delete process.env.GINI_HOSTED;
-    else process.env.GINI_HOSTED = env.GINI_HOSTED;
     if (prevSkipRefresh === undefined) delete process.env.GINI_SKIP_PLIST_REFRESH;
     else process.env.GINI_SKIP_PLIST_REFRESH = prevSkipRefresh;
     s.cleanup();
@@ -131,16 +124,6 @@ describe("setup-api", () => {
     expect(status.usingFallback).toBe(false);
     expect(status.selectedProvider).toBe("codex");
     expect(status.activeProvider).toBe("codex");
-    // Self-hosted default: no hosted marker, so the deployment is not managed.
-    expect(status.managed).toBe(false);
-  });
-
-  test("status: managed reflects the GINI_HOSTED=1 hosted marker", () => {
-    process.env.GINI_HOSTED = "1";
-    expect(getSetupStatus(config).managed).toBe(true);
-    // Only the exact "1" counts — any other value stays self-hosted.
-    process.env.GINI_HOSTED = "true";
-    expect(getSetupStatus(config).managed).toBe(false);
   });
 
   test("status: providerConfigured is true via a transient fallback when the selected provider is unconfigured", () => {

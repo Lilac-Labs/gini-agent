@@ -398,6 +398,45 @@ export async function createScheduledJob(
     const parsed = parseSkillNamesInput(input.skillNames);
     if (parsed.length > 0) skillNames = parsed;
   }
+  // Routine-template provenance (see ADR routine-templates-gallery.md). The
+  // gallery install and onboarding routine paths stamp the catalog id so
+  // installed state and per-template replace/remove can key on it.
+  let templateId: string | undefined;
+  if (input.templateId !== undefined && input.templateId !== null) {
+    if (typeof input.templateId !== "string" || input.templateId.length === 0) {
+      throw new Error(`Invalid input: templateId must be a non-empty string (got ${String(input.templateId)})`);
+    }
+    templateId = input.templateId;
+  }
+  // Resolved routine-template options (JobRecord.templateOptions): the
+  // option state buildSpec composed the spec from, stamped next to
+  // templateId so the gallery's Settings view can render the installed
+  // selection.
+  let templateOptions: Record<string, boolean> | undefined;
+  if (input.templateOptions !== undefined && input.templateOptions !== null) {
+    if (typeof input.templateOptions !== "object" || Array.isArray(input.templateOptions)) {
+      throw new Error("Invalid input: templateOptions must be an object of booleans");
+    }
+    for (const [key, value] of Object.entries(input.templateOptions as Record<string, unknown>)) {
+      if (typeof value !== "boolean") {
+        throw new Error(`Invalid input: templateOptions.${key} must be a boolean (got ${String(value)})`);
+      }
+    }
+    templateOptions = { ...(input.templateOptions as Record<string, boolean>) };
+  }
+  // Resolved routine-template settings (JobRecord.templateSettings): the
+  // settings state buildSpec composed the spec from, stamped next to
+  // templateId so the gallery's Settings view can render the installed
+  // configuration. Values are template-owned shapes (booleans, strings,
+  // label-rule lists) validated per-field by resolveSettings upstream; here
+  // only the container shape is checked.
+  let templateSettings: Record<string, unknown> | undefined;
+  if (input.templateSettings !== undefined && input.templateSettings !== null) {
+    if (typeof input.templateSettings !== "object" || Array.isArray(input.templateSettings)) {
+      throw new Error("Invalid input: templateSettings must be a plain object");
+    }
+    templateSettings = { ...(input.templateSettings as Record<string, unknown>) };
+  }
   // A parent task that has already transitioned terminal must not
   // create a durable scheduled job. Without this, a `cancelTask`
   // queued between the dispatcher's lock-free pre-check and our
@@ -500,6 +539,9 @@ export async function createScheduledJob(
       deliveryTargets: Array.isArray(input.deliveryTargets) ? input.deliveryTargets.map(String) : [],
       context: Array.isArray(input.context) ? input.context.map(String) : [],
       skillNames,
+      templateId,
+      templateOptions,
+      templateSettings,
       retryLimit,
       timeoutSeconds,
       costBudget: typeof input.costBudget === "number" ? input.costBudget : undefined,

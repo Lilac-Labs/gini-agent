@@ -8,6 +8,6 @@ tokens (`PairedDevice` rows) minted through an operator-approved handshake, a
 redirect), the `/api/pairing/*` routes, and the mobile app's relay-link native
 pairing client. The runtime is now owner-token-only — a bearer authorizes iff
 it equals the singleton `config.token`, trusted non-loopback fronts are
-owner-equivalent with no pairing cookie gate, and multi-user access is the
-hosted edge's job (Google OAuth with owner-token injection). See
+owner-equivalent with no pairing cookie gate. Multi-user access requires a
+separate authentication proxy and isolation boundary. See
 [owner-token-auth.md](owner-token-auth.md).

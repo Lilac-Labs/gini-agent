@@ -70,6 +70,21 @@ The agent runs its own SQL, so isolation is the safety property:
   (WAL); `dbQuery` (read-only guard + row cap `MAX_RESULT_ROWS` with a
   `truncated` flag so an unbounded SELECT can't flood context), `dbExecute`,
   `dbListTables`.
+- **Schema migrations.** Every open runs a recorded migration ladder
+  (`_gini_migrations` table: id → applied_at; hidden from `dbListTables`).
+  Each migration runs at most once per database, inside its own transaction —
+  a failure rolls back, surfaces, and is retried on the next open. The ladder
+  currently backfills `updated_at`/`description`/`last_spoke_at` and rebuilds
+  the retired email-PK contacts shape into the modern id-PK schema: rows are
+  copied through JS so values the modern CHECKs would reject are normalized
+  (emails lowercased, bare-domain urls scheme-qualified, phones squeezed to
+  E.164) instead of aborting the open; unfixable values move into the profile
+  text rather than being dropped; agent-added extra columns are carried over;
+  rows that collapse onto one identity (same normalized email, or same name
+  once malformed emails move aside) merge instead of failing. Idempotent
+  guards that agent DDL could undo (baseline `CREATE IF NOT EXISTS`, the
+  relations edge dedupe + unique index, the `updated_at` touch trigger) stay
+  every-open, outside the ladder.
 - `packages/runtime/src/data/import-table.ts`: deterministic CSV/XLSX → table loader. Domain
   agnostic — columns come from the file's own header (sanitized to snake_case,
   de-duplicated), preamble lines (`< 2` non-empty cells) are skipped (or pinned

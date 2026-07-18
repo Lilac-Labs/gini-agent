@@ -21,7 +21,6 @@ import {
   connectTunnel,
   defaultLogout,
   defaultOpenBrowser,
-  defaultPersistWorkspaceGrant,
   defaultReadCloudflareConfig,
   defaultRunCommand,
   defaultTunnelProcSpawn,
@@ -230,7 +229,6 @@ function depsNoPort(over: Partial<TunnelDeps> = {}): Partial<TunnelDeps> {
     },
     probeLocalPort: () => Promise.resolve(true),
     logout: () => Promise.resolve(),
-    persistWorkspaceGrant: () => Promise.resolve(),
     drivers: fakeDrivers(),
     ...over
   };

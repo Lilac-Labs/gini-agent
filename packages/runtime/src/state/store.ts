@@ -431,6 +431,36 @@ function dropDeadMemoryImprovements(state: RuntimeState): void {
   }
 }
 
+// Filesystem reloads upsert discovered skills but deliberately do not prune
+// missing rows, because a temporarily-unmounted user skill must not disappear.
+// Retired bundled skills are different: the repository is authoritative for
+// that source, and leaving their persisted bodies behind would keep removed
+// product-specific behavior visible and callable after an upgrade.
+const RETIRED_BUNDLED_SKILLS = new Set(["yc-cli"]);
+
+function dropRetiredBundledSkills(state: RuntimeState): void {
+  const removed = state.skills.filter(
+    (skill) => skill.source === "bundled" && RETIRED_BUNDLED_SKILLS.has(skill.name)
+  );
+  if (removed.length === 0) return;
+  state.skills = state.skills.filter(
+    (skill) => skill.source !== "bundled" || !RETIRED_BUNDLED_SKILLS.has(skill.name)
+  );
+  for (const skill of removed) {
+    addAudit(
+      state,
+      {
+        actor: "runtime",
+        action: "skill.bundled.retired",
+        target: skill.id,
+        risk: "low",
+        evidence: { name: skill.name, reason: "not part of the local distribution" }
+      },
+      { system: true }
+    );
+  }
+}
+
 // Defensive drop of the legacy `state.memories` field. The migration in
 // `migratePinnedMemoriesToUserProfile` clears the array and sets a marker
 // so this normally runs against an empty array, but old state files from
@@ -784,6 +814,92 @@ function matchGenericByEnv(skillEnv: string[], generics: GenericCredential[]): s
   return undefined;
 }
 
+// Rename connector records whose name no longer matches their provider's
+// canonical credential name. Skill activation matches credentials BY NAME
+// (isSkillActive, connectors/index.ts) and the skill loader maps legacy
+// `requires.connectors` providers through `canonicalCredentialName`
+// (connectors/registry.ts) — so a record auto-detected under a display label
+// (e.g. "Codex", "Claude Code") before its provider declared a
+// `credentialName` never matches the skill's requiredCredentials and the
+// skill stays inactive despite a healthy connector. The detection job never
+// renames existing records (runConnectorDetection skips providers that
+// already have a record), so this one-time rename is the only path that
+// heals pre-existing instances.
+//
+// Marker-gated on `state.migrations.connectorsCanonicalNames` so it runs
+// once per instance, idempotent, with a single summary audit row. Runs AFTER
+// migrateConnectorsToTypedCredentials so template records (linear /
+// google-oauth-desktop) already carry their canonical names and pass through
+// untouched. Providers with no canonical name (generic, demo) are skipped.
+//
+// Collision (same rule as the typed-credential migration, LOCKED decision 4):
+// if the canonical name is already claimed by another record, the claimer
+// keeps it and the renamed record takes the first free `<name>_N` with a
+// `connector.migration_collision` audit.
+function migrateConnectorCanonicalNames(state: RuntimeState): void {
+  const dyn = state as unknown as {
+    migrations?: { connectorsCanonicalNames?: string };
+  };
+  if (dyn.migrations?.connectorsCanonicalNames) return;
+  if (!Array.isArray(state.connectors)) state.connectors = [];
+
+  const at = now();
+  const claimedNames = new Set(state.connectors.map((c) => c.name));
+  // Pick the first `<name>_N` not already claimed (loops past `_2`, `_3`, …)
+  // so two colliding records can't both land on `<name>_2`.
+  const firstFreeSuffixedName = (base: string): string => {
+    let n = 2;
+    while (claimedNames.has(`${base}_${n}`)) n += 1;
+    return `${base}_${n}`;
+  };
+
+  const renames: Array<{ connectorId: string; from: string; to: string }> = [];
+  const collisions: Array<{ connectorId: string; from: string; to: string }> = [];
+  for (const connector of state.connectors) {
+    const canonical = canonicalCredentialName(connector.provider);
+    if (!canonical || connector.name === canonical) continue;
+    let target = canonical;
+    if (claimedNames.has(target)) {
+      target = firstFreeSuffixedName(canonical);
+      collisions.push({ connectorId: connector.id, from: connector.name, to: target });
+    }
+    renames.push({ connectorId: connector.id, from: connector.name, to: target });
+    connector.name = target;
+    claimedNames.add(target);
+  }
+
+  // Emit the audit rows only when something actually renamed — a fresh or
+  // already-canonical instance sets the marker silently.
+  if (renames.length > 0) {
+    addAudit(
+      state,
+      {
+        actor: "runtime",
+        action: "connector.migration.canonical_names",
+        target: "state.connectors",
+        risk: "low",
+        evidence: { renamed: renames.length, renames, collisions: collisions.length }
+      },
+      { system: true }
+    );
+    for (const collision of collisions) {
+      addAudit(
+        state,
+        {
+          actor: "runtime",
+          action: "connector.migration_collision",
+          target: collision.connectorId,
+          risk: "low",
+          evidence: { from: collision.from, to: collision.to }
+        },
+        { system: true }
+      );
+    }
+  }
+
+  dyn.migrations = { ...(dyn.migrations ?? {}), connectorsCanonicalNames: at };
+}
+
 // Archive job channels orphaned by a job deletion that pre-dated removeJob's
 // channel cleanup. A recurring job's dedicated channel (kind:"channel",
 // origin:"job") is surfaced on the Recurring Jobs rails (web sidebar + mobile
@@ -967,6 +1083,60 @@ function migrateJobsDeliveryPolicyDefaulted(state: RuntimeState): void {
     job.deliveryPolicy ??= "always";
   }
   dyn.migrations = { ...(dyn.migrations ?? {}), jobsDeliveryPolicyDefaulted: now() };
+}
+
+// Auto-inbox used to be installable as a normal message-delivering routine.
+// Existing installs must be repaired on read so the watcher stays headless and
+// only its spawned draft tasks surface on Home.
+function migrateAutoInboxJobsToSilentDelivery(state: RuntimeState): void {
+  let repaired = 0;
+  let mintedChannels = 0;
+  const at = now();
+  for (const job of state.jobs) {
+    if (job.templateId !== "auto-inbox") continue;
+    let mutated = false;
+    if (job.deliveryPolicy !== "silent") {
+      job.deliveryPolicy = "silent";
+      mutated = true;
+    }
+
+    let session = job.chatSessionId
+      ? state.chatSessions.find((candidate) => candidate.id === job.chatSessionId)
+      : undefined;
+    if (!session || session.kind !== "channel") {
+      session = createChatSession(state, job.name || "Auto-inbox", undefined, job.agentId, "job", "channel");
+      job.chatSessionId = session.id;
+      mintedChannels += 1;
+      mutated = true;
+    }
+
+    if (session.headless !== true) {
+      session.headless = true;
+      mutated = true;
+    }
+    if (session.archivedAt !== undefined) {
+      delete session.archivedAt;
+      mutated = true;
+    }
+    if (mutated) {
+      job.updatedAt = at;
+      session.updatedAt = at;
+      repaired += 1;
+    }
+  }
+  if (repaired > 0) {
+    addAudit(
+      state,
+      {
+        actor: "runtime",
+        action: "auto-inbox.silent-delivery.migrated",
+        target: state.instance,
+        risk: "low",
+        evidence: { repaired, mintedChannels }
+      },
+      { system: true }
+    );
+  }
 }
 
 // Backfill `pinned: true` on existing non-archived Topics. The sidebar's
@@ -1327,6 +1497,7 @@ export function normalizeState(instance: Instance, state: RuntimeState): Runtime
   state.audit ??= [];
   state.skills ??= [];
   state.jobs ??= [];
+  dropRetiredBundledSkills(state);
   // The device-pairing subsystem is gone (auth is owner-token-only; see ADR
   // owner-token-auth.md). Old state files still carry its collections — drop
   // them on read so the next write sheds the legacy keys.
@@ -1503,6 +1674,7 @@ export function normalizeState(instance: Instance, state: RuntimeState): Runtime
   migrateJobsToTopics(state);
   // Default deliveryPolicy on jobs that predate the field. Marker-gated.
   migrateJobsDeliveryPolicyDefaulted(state);
+  migrateAutoInboxJobsToSilentDelivery(state);
   // Archive job channels orphaned by a pre-cleanup job deletion (issue #369).
   // Runs after the channel-kind backfill above so a legacy `origin:"job"`
   // session that just gained `kind:"channel"` is in scope, and after
@@ -1564,6 +1736,11 @@ export function normalizeState(instance: Instance, state: RuntimeState): Runtime
   // every skill's requires is on the provider shape this migration reads.
   // Marker-gated + idempotent.
   migrateConnectorsToTypedCredentials(state);
+  // Rename records to their provider's canonical credential name (e.g. a
+  // pre-existing auto-detected "Codex" record → "codex") so name-based skill
+  // activation (isSkillActive) matches them. Runs after the typed-credential
+  // migration so template records already carry canonical names. Marker-gated.
+  migrateConnectorCanonicalNames(state);
   for (const subagent of state.subagents) {
     // Slice 4 introduced `systemPrompt` (always present) and optional
     // toolsetIds/skillNames/resultSummary/resultError. Records persisted

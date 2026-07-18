@@ -16,28 +16,35 @@
 // (src/state/onboarding.ts). The scan is a deterministic in-runtime pipeline
 // (src/runtime/onboarding-scan.ts): one `gws auth export` mints a Gmail access
 // token, direct parallel Gmail HTTP reads fetch the mailbox with no model and
-// no tool loop, then two parallel structured model calls synthesize the
-// profile and the suggested tasks. startOnboardingScan runs it in the
+// no tool loop, then three parallel structured model calls synthesize the
+// profile, suggested tasks, and suggested routines. startOnboardingScan runs it in the
 // background and finalizes the record + pushes an `onboarding` event over the
 // events stream (the browser is notified instead of polling). Validation
 // errors throw with the "Invalid input:" prefix the gateway maps to a 400.
 
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-
-import { assertSkillNamesResolve, createScheduledJob, removeJob } from "../jobs";
+import { resolveEffectiveContext } from "../execution/effective-context";
+import { assertSkillNamesResolve, removeJob } from "../jobs";
+import { primeCrmExtractionThreads } from "../jobs/crm-extractor";
 import { appendEvent, mutateState, readState } from "../state";
-import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../state/google-accounts";
+import { getGoogleAccountBindings } from "../state/google-account-bindings";
+import { readGoogleAccounts } from "../state/google-accounts";
 import { now } from "../state/ids";
 import { defaultOnboardingRecord, readOnboarding, writeOnboarding } from "../state/onboarding";
 import { runProfileScan } from "./onboarding-scan";
-import type { ChatSessionRecord, JobRecord, OnboardingProfile, OnboardingRecord, OnboardingScan, RuntimeConfig, Task } from "../types";
+import {
+  ROUTINE_TEMPLATES,
+  createRoutineJob,
+  resolveInstallSettings,
+  reusableRoutineSessionId,
+  routineTemplate,
+  validateTimezone
+} from "./routine-templates";
+import type { ChatSessionRecord, GoogleAccount, JobRecord, OnboardingProfile, OnboardingRecord, OnboardingRoutineSuggestion, OnboardingScan, RuntimeConfig, Task } from "../types";
 
 // A running scan older than this is treated as orphaned by a runtime restart
 // (the background pipeline died with the process) and flipped to failed on the
 // next GET, so the web's "Try again" resubmits it. The deterministic pipeline
-// (one parallel HTTP fetch window + two parallel model calls) settles well
+// (one parallel HTTP fetch window + three parallel model calls) settles well
 // within this.
 const SCAN_STALE_MS = 5 * 60_000;
 
@@ -136,7 +143,7 @@ export function patchOnboarding(config: RuntimeConfig, payload: Record<string, u
 // all (re)submit, so a retry after connecting an account just works.
 //
 // The deterministic pipeline (mint a Gmail token via gws auth export →
-// parallel HTTP mailbox fetch → two parallel structured model calls) runs in
+// parallel HTTP mailbox fetch → three parallel structured model calls) runs in
 // the BACKGROUND: the record is flipped to "running" and returned immediately,
 // and finalizeScan writes the terminal record + pushes an `onboarding` event
 // when it settles.
@@ -144,18 +151,21 @@ export async function startOnboardingScan(config: RuntimeConfig): Promise<Onboar
   const record = getOnboarding(config);
   if (record.completed) return record;
   if (record.scan.status === "running" || record.scan.status === "ready") return record;
-  if (!hasGoogleAccess()) {
+  const account = resolveScanAccount(config);
+  if (!account) {
     record.scan = { status: "no_account" };
     writeOnboarding(config.instance, record);
     return record;
   }
   record.scan = { status: "running", startedAt: now() };
   writeOnboarding(config.instance, record);
-  const configDir = resolveScanConfigDir();
   // Fire-and-forget: run the pipeline off the request, then finalize. Any
   // pipeline fault already resolves inside runProfileScan (never throws); the
   // extra .catch is belt-and-suspenders so an unexpected throw still finalizes.
-  void runProfileScan(config, { ...(configDir ? { configDir } : {}) })
+  void runProfileScan(config, {
+    configDir: account.configDir,
+    onMailboxFetched: (snapshot) => primeCrmExtractionThreads(config.instance, account.id, snapshot.threads),
+  })
     .catch((error): { status: "failed"; error: string } => ({
       status: "failed",
       error: error instanceof Error ? error.message : String(error)
@@ -169,12 +179,29 @@ export async function startOnboardingScan(config: RuntimeConfig): Promise<Onboar
 // isn't clobbered, and only applies when the scan is still "running" — a
 // completed user or a resubmit that raced ahead wins. The event is
 // system-attributed (the scan has no agent owner).
-function finalizeScan(config: RuntimeConfig, outcome: { status: "ready"; profile: OnboardingProfile; suggestedTasks?: string[] } | { status: "failed"; error: string }): void {
+function finalizeScan(
+  config: RuntimeConfig,
+  outcome:
+    | {
+        status: "ready";
+        profile: OnboardingProfile;
+        suggestedTasks?: string[];
+        suggestedRoutines?: OnboardingRoutineSuggestion[];
+      }
+    | { status: "failed"; error: string }
+): void {
   const record = readOnboarding(config.instance);
   if (!record || record.scan.status !== "running") return;
   const scan: OnboardingScan =
     outcome.status === "ready"
-      ? { ...record.scan, status: "ready", profile: outcome.profile, ...(outcome.suggestedTasks ? { suggestedTasks: outcome.suggestedTasks } : {}), finishedAt: now() }
+      ? {
+          ...record.scan,
+          status: "ready",
+          profile: outcome.profile,
+          ...(outcome.suggestedTasks ? { suggestedTasks: outcome.suggestedTasks } : {}),
+          ...(outcome.suggestedRoutines ? { suggestedRoutines: outcome.suggestedRoutines } : {}),
+          finishedAt: now()
+        }
       : { ...record.scan, status: "failed", error: outcome.error, finishedAt: now() };
   record.scan = scan;
   writeOnboarding(config.instance, record);
@@ -187,49 +214,37 @@ function finalizeScan(config: RuntimeConfig, outcome: { status: "ready"; profile
   });
 }
 
-// Whether ANY Gmail credential is plausibly present: a registered account in
-// the machine-global registry (ADR google-multi-account.md), the hosted
-// provisioning credentials file, or a legacy default ~/.config/gws session
-// dir. Presence-only — sign-in liveness is the pipeline's problem.
-function hasGoogleAccess(): boolean {
-  if (readGoogleAccounts().length > 0) return true;
-  if (process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE) return true;
-  const home = process.env.HOME || homedir();
-  return existsSync(join(home, ".config", "gws"));
-}
-
-// The gws config dir the scan should target: the persisted primary account's
-// dir when it still names a registered row, else the first provisioned row,
-// else the first row, else undefined (default gws — the hosted baked credential
-// or a legacy ~/.config/gws session, both read without a config dir). Mirrors
-// effectivePrimaryAccountId's precedence but stays registry-only (no gws probe)
-// so kicking the scan off is cheap; the pipeline's own credential export +
-// token mint is the liveness gate.
-function resolveScanConfigDir(): string | undefined {
+// The account the scan should target: the persisted instance primary when it
+// still names a registered row. Returning the whole row lets the completed
+// fetch hand its normalized threads to the same account's People queue.
+// Machine-global credentials alone are not enough: a fresh local instance must
+// not scan whatever Gmail account happens to exist elsewhere on the machine.
+function resolveScanAccount(config: RuntimeConfig): GoogleAccount | undefined {
   const accounts = readGoogleAccounts();
   if (accounts.length === 0) return undefined;
-  const persisted = readPrimaryGoogleAccountId();
-  const primary =
-    (persisted ? accounts.find((a) => a.id === persisted) : undefined) ??
-    accounts.find((a) => a.provisioned) ??
-    accounts[0];
-  return primary?.configDir;
+  const bindings = getGoogleAccountBindings(config.instance);
+  const primary = bindings.primaryAccountId
+    ? accounts.find((account) => account.id === bindings.primaryAccountId)
+    : undefined;
+  return primary;
 }
 
 // POST /api/onboarding/routines body:
 //   { timezone?, autoInbox?: { enabled, labelNewMail, archiveUnimportant,
 //     assistScheduling, draftReplies }, morningBriefing?: { enabled,
 //     personalizedNews }, meetingBriefing?: { enabled } }
-// Idempotent replace: delete the jobs a previous pass created (ids that no
-// longer exist are ignored), then create one job per enabled routine via the
-// jobs module — the same createScheduledJob call POST /api/jobs makes.
+// Idempotent replace: delete the jobs a previous pass created — plus the
+// owning agent's live jobs carrying a catalog templateId, which the
+// /routines gallery may have installed — then create one job per enabled
+// routine via createRoutineJob, which also provisions (or carries forward)
+// a dedicated conversation for templates that deliver into Messages.
 export async function applyOnboardingRoutines(
   config: RuntimeConfig,
   payload: Record<string, unknown>
 ): Promise<{ record: OnboardingRecord; jobs: JobRecord[] }> {
   const record = getOnboarding(config);
   const timezone = payload.timezone !== undefined ? validateTimezone(payload.timezone) : (record.timezone ?? "UTC");
-  const specs = routineJobSpecs(payload, timezone);
+  const specs = routineJobSpecs(payload, timezone, config.instance);
   // Every spec's skills must resolve BEFORE the previous jobs are deleted: a
   // disabled Workspace skill then surfaces as a clean 400 with zero side
   // effects, instead of createScheduledJob throwing mid-loop after the old
@@ -238,7 +253,37 @@ export async function applyOnboardingRoutines(
   for (const spec of specs) {
     assertSkillNamesResolve(state, spec.skillNames as string[]);
   }
-  for (const jobId of record.routineJobIds) {
+  // The replace pass deletes BOTH the ids this record tracks AND any live
+  // job of the owning agent stamped with a catalog templateId: the /routines
+  // gallery (src/runtime/routine-templates.ts) installs the same templates
+  // without updating routineJobIds, so record ids alone can go stale — the
+  // templateId sweep is what keeps "at most one live job per template per
+  // agent" an invariant across both writers. Owning agent resolved
+  // server-side, same as createScheduledJob stamps agentId on the
+  // replacements below.
+  const owningAgentId = resolveEffectiveContext(state, config).agentId;
+  const catalogIds = new Set(ROUTINE_TEMPLATES.map((template) => template.id));
+  // Capture each replaced template's conversation BEFORE the replace pass:
+  // removeJob archives a job's dedicated channel with the job, and
+  // createRoutineJob un-archives + rebinds it so a re-apply keeps
+  // message-delivering routines' history (same reuse rule as the gallery
+  // install). Hidden-worker templates (Auto-inbox) reuse the captured
+  // headless channel so their spawned child-task dedup keys stay scoped to
+  // one stable parent container.
+  const reusableSessions = new Map<string, string>();
+  for (const job of state.jobs) {
+    if (job.agentId !== owningAgentId || job.templateId === undefined || !catalogIds.has(job.templateId)) continue;
+    if (reusableSessions.has(job.templateId)) continue;
+    const sessionId = reusableRoutineSessionId(state, job);
+    if (sessionId !== undefined) reusableSessions.set(job.templateId, sessionId);
+  }
+  const staleJobIds = new Set([
+    ...record.routineJobIds,
+    ...state.jobs
+      .filter((j) => j.templateId !== undefined && catalogIds.has(j.templateId) && j.agentId === owningAgentId)
+      .map((j) => j.id)
+  ]);
+  for (const jobId of staleJobIds) {
     try {
       await removeJob(config, jobId);
     } catch {
@@ -252,7 +297,7 @@ export async function applyOnboardingRoutines(
   writeOnboarding(config.instance, record);
   const jobs: JobRecord[] = [];
   for (const spec of specs) {
-    const job = await createScheduledJob(config, spec);
+    const job = await createRoutineJob(config, spec, reusableSessions.get(spec.templateId as string));
     jobs.push(job);
     record.routineJobIds.push(job.id);
     writeOnboarding(config.instance, record);
@@ -260,67 +305,35 @@ export async function applyOnboardingRoutines(
   return { record, jobs };
 }
 
-// Build the createScheduledJob payloads for the enabled routines. Prompts are
-// product-owned here (never composed in the browser) and the Auto-inbox
-// prompt is composed ONLY of the behaviors the user toggled on.
-function routineJobSpecs(payload: Record<string, unknown>, timezone: string): Record<string, unknown>[] {
+// Build the createScheduledJob payloads for the enabled routines by mapping
+// the POST body's toggle state onto the shared routine-template catalog
+// (src/runtime/routine-templates.ts) — the prompts/crons/skills are
+// product-owned there (never composed in the browser). The body's flat
+// booleans go through the same resolveInstallSettings path the gallery
+// install uses (each template's legacySettings hook, field defaults filled,
+// and for per-account templates the flat selection applied to every
+// registered account), and the Auto-inbox spec is composed ONLY of the
+// behaviors the user toggled on (zero behaviors ⇒ buildSpec returns
+// undefined ⇒ no job).
+function routineJobSpecs(
+  payload: Record<string, unknown>,
+  timezone: string,
+  instance: string
+): Record<string, unknown>[] {
+  const selections: Array<{ templateId: string; section: unknown; options: string[] }> = [
+    { templateId: "auto-inbox", section: payload.autoInbox, options: ["labelNewMail", "archiveUnimportant", "assistScheduling", "draftReplies"] },
+    { templateId: "morning-briefing", section: payload.morningBriefing, options: ["personalizedNews"] },
+    { templateId: "meeting-briefing", section: payload.meetingBriefing, options: [] }
+  ];
   const specs: Record<string, unknown>[] = [];
-  const autoInbox = payload.autoInbox;
-  if (flag(autoInbox, "enabled")) {
-    const behaviors: string[] = [];
-    if (flag(autoInbox, "labelNewMail")) {
-      behaviors.push("- Label new mail into sensible Gmail labels.");
-    }
-    if (flag(autoInbox, "archiveUnimportant")) {
-      behaviors.push("- Archive clearly-unimportant mail (promotions, notifications) — never anything personal or important.");
-    }
-    const assistScheduling = flag(autoInbox, "assistScheduling");
-    if (assistScheduling) {
-      behaviors.push("- Detect scheduling requests and propose times based on the user's calendar.");
-    }
-    if (flag(autoInbox, "draftReplies")) {
-      behaviors.push("- Draft (never send) replies to important emails awaiting a response.");
-    }
-    if (behaviors.length > 0) {
-      specs.push({
-        name: "Auto-inbox",
-        cronExpression: "*/30 * * * *",
-        cronTimezone: timezone,
-        skillNames: assistScheduling ? ["google-gmail", "google-calendar"] : ["google-gmail"],
-        prompt: [
-          "Tidy the user's Gmail inbox: work through mail that arrived since the last run.",
-          ...behaviors,
-          "Gini never sends email or messages without the user's review — save drafts only, never send."
-        ].join("\n")
-      });
-    }
-  }
-  if (flag(payload.morningBriefing, "enabled")) {
-    const personalizedNews = flag(payload.morningBriefing, "personalizedNews");
-    specs.push({
-      name: "Morning Briefing",
-      cronExpression: "0 8 * * *",
-      cronTimezone: timezone,
-      skillNames: ["google-gmail", "google-calendar"],
-      forwardToChat: true,
-      prompt: [
-        "Prepare the user's morning briefing: a brief digest of important unread email plus today's calendar.",
-        ...(personalizedNews
-          ? ["Add a short section of news relevant to the user's work, using what you know about them from memory and their profile."]
-          : [])
-      ].join("\n")
-    });
-  }
-  if (flag(payload.meetingBriefing, "enabled")) {
-    specs.push({
-      name: "Meeting Briefing",
-      cronExpression: "*/15 * * * *",
-      cronTimezone: timezone,
-      skillNames: ["google-calendar", "google-gmail"],
-      forwardToChat: true,
-      prompt:
-        "Check the user's calendar for meetings starting within the next hour that haven't been briefed yet. When one is found, prepare a prep note: attendees, recent email context with them, and the agenda. Otherwise do nothing and finish quietly."
-    });
+  for (const { templateId, section, options } of selections) {
+    if (!flag(section, "enabled")) continue;
+    const template = routineTemplate(templateId);
+    if (!template) continue;
+    const legacyOptions = Object.fromEntries(options.map((key) => [key, flag(section, key)]));
+    const settings = resolveInstallSettings(template, { options: legacyOptions }, instance);
+    const spec = template.buildSpec(settings, timezone);
+    if (spec) specs.push(spec);
   }
   return specs;
 }
@@ -330,31 +343,14 @@ function flag(section: unknown, key: string): boolean {
   return !!section && typeof section === "object" && (section as Record<string, unknown>)[key] === true;
 }
 
-// Probe-validate an IANA timezone by constructing a formatter with it — Intl
-// throws a RangeError on unknown zones. A membership check against
-// Intl.supportedValuesOf("timeZone") would be wrong here: that list is
-// NARROWER than what Intl (and croner, which also resolves zones through
-// Intl) accepts — this runtime's ICU lists legacy aliases like Asia/Calcutta
-// while browsers report the modern canonical Asia/Kolkata, so real user
-// timezones would be rejected. A zone that passes the probe never fails job
-// creation. Used by both the PATCH and routines paths.
-function validateTimezone(value: unknown): string {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error("Invalid input: timezone must be a non-empty string");
-  }
-  try {
-    new Intl.DateTimeFormat(undefined, { timeZone: value });
-  } catch {
-    throw new Error(`Invalid input: timezone "${value}" is not a valid IANA timezone`);
-  }
-  return value;
-}
-
 // Upper bounds folded over the scan deliverable. The deliverable is model
-// text derived from attacker-controllable email, and suggestedTasks render as
-// pre-checked one-click task seeds — so oversized output is clamped rather
-// than rejected (bounds are generous relative to the prompt's asks).
+// text derived from attacker-controllable email, while suggestedTasks and
+// suggestedRoutines become one-click task seeds — so oversized output is
+// clamped rather than rejected (bounds are generous relative to the prompts).
 const MAX_SUGGESTED_TASKS = 10;
+const MAX_SUGGESTED_ROUTINES = 5;
+const MAX_ROUTINE_NAME_CHARS = 80;
+const MAX_ROUTINE_DESCRIPTION_CHARS = 300;
 const MAX_PROFILE_SECTIONS = 12;
 const MAX_SECTION_BULLETS = 12;
 const MAX_LINE_CHARS = 300;
@@ -382,6 +378,38 @@ export function validateScanTasks(value: unknown): string[] | undefined {
   return rawTasks
     .filter((t): t is string => typeof t === "string" && t.trim().length > 0 && t.length <= MAX_LINE_CHARS)
     .slice(0, MAX_SUGGESTED_TASKS);
+}
+
+// Shape-check + clamp the routines call's structured deliverable
+// `{ suggestedRoutines: [{ name, description, usesEmail }] }`. Invalid rows
+// drop independently; duplicate names collapse case-insensitively so the
+// gallery never renders two cards for the same inferred automation.
+export function validateScanRoutines(value: unknown): OnboardingRoutineSuggestion[] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const rawRoutines = (value as { suggestedRoutines?: unknown }).suggestedRoutines;
+  if (!Array.isArray(rawRoutines)) return undefined;
+  const seen = new Set<string>();
+  const routines: OnboardingRoutineSuggestion[] = [];
+  for (const raw of rawRoutines) {
+    if (!raw || typeof raw !== "object") continue;
+    const item = raw as Record<string, unknown>;
+    if (typeof item.name !== "string" || typeof item.description !== "string" || typeof item.usesEmail !== "boolean") {
+      continue;
+    }
+    const name = collapseScanText(item.name).slice(0, MAX_ROUTINE_NAME_CHARS);
+    const description = collapseScanText(item.description).slice(0, MAX_ROUTINE_DESCRIPTION_CHARS);
+    if (!name || !description) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    routines.push({ name, description, usesEmail: item.usesEmail });
+    if (routines.length === MAX_SUGGESTED_ROUTINES) break;
+  }
+  return routines;
+}
+
+function collapseScanText(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
 }
 
 // Truncate profile strings and cap section/bullet counts — keep what fits,

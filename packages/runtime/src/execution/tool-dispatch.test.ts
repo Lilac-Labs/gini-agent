@@ -252,11 +252,9 @@ describe("request_connector dispatch", () => {
   });
 
   test("google-oauth-desktop: request_connector proceeds to a pending approval with no read_skill prerequisite", async () => {
-    // In hosted, the Google Workspace credential is baked into the guest at
-    // provisioning and satisfied by the boot-registered account, so
-    // google-oauth-desktop declares no setup skill. request_connector for it
-    // behaves like any other registered provider: it mints a pending
-    // connector.request approval directly, with no read_skill gate.
+    // The local account OAuth flow is separate, but an operator may still use
+    // request_connector to store a custom Desktop OAuth client. The provider
+    // declares no setup-skill prerequisite for that credential form.
     const instance = `req-connector-gws-${Math.random().toString(36).slice(2, 8)}`;
     const config = buildConfig(instance);
     const taskId = await newTask(config);
@@ -1372,7 +1370,7 @@ describe("request_connector dispatch", () => {
       taskId,
       "request_messaging_bridge",
       "call_bridge_bad",
-      JSON.stringify({ kind: "slack" })
+      JSON.stringify({ kind: "whatsapp" })
     );
     expect(result.kind).toBe("sync");
     if (result.kind === "sync") {
@@ -1408,6 +1406,33 @@ describe("request_connector dispatch", () => {
       const parsed = JSON.parse(result.result);
       expect(parsed.ok).toBe(false);
       expect(parsed.error).toContain("Discord");
+      expect(parsed.error).toContain("settings page");
+    }
+    const state = readState(instance);
+    expect(state.setupRequests.filter((a) => a.taskId === taskId).length).toBe(0);
+  });
+
+  test("request_messaging_bridge: rejects kind=slack with a points-to-settings error", async () => {
+    // Same shape as the discord refusal: the chat card collects a
+    // single bot token, and Slack bridges need TWO credentials (bot
+    // token + app-level Socket Mode token) — so a slack-kind approval
+    // would render but /connect would fail with no way for the user
+    // to provide the second token.
+    const instance = `req-messaging-bridge-slack-${Math.random().toString(36).slice(2, 8)}`;
+    const config = buildConfig(instance);
+    const taskId = await newTask(config);
+    const result = await dispatchToolCall(
+      config,
+      taskId,
+      "request_messaging_bridge",
+      "call_bridge_slack",
+      JSON.stringify({ kind: "slack" })
+    );
+    expect(result.kind).toBe("sync");
+    if (result.kind === "sync") {
+      const parsed = JSON.parse(result.result);
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain("Slack");
       expect(parsed.error).toContain("settings page");
     }
     const state = readState(instance);

@@ -197,10 +197,10 @@ export function useAgentChat(agentId: string | null) {
   });
 }
 
-// Job records. Pass an agentId to scope to one agent (the chat detail's
-// Jobs tab); pass `"all"` to fetch every job in the instance (the
-// Channels screen pairs each job with its delivery channel via
-// job.chatSessionId so the "Recurring Jobs" rows show the schedule +
+// Routine records. Pass an agentId to scope to one agent (the chat detail's
+// Routines tab); pass `"all"` to fetch every routine in the instance (the
+// Channels screen pairs each routine with its delivery channel via
+// job.chatSessionId so the recurring routine rows show the schedule +
 // next-run). `null` disables the query.
 export function useJobs(agentId: string | null | "all") {
   return useQuery<JobRecord[]>({

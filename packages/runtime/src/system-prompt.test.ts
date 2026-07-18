@@ -178,6 +178,17 @@ describe("buildAgentSystemContext", () => {
     expect(out).toContain("not a citable source of external fact");
   });
 
+  test("bundled default instructions make unspecified documents inline Markdown files", () => {
+    // A bare request to draft a doc should stay in Gini's workspace so the
+    // generated-file card can open it in chat. External document services are
+    // reserved for requests that name the service or require collaboration.
+    const out = getDefaultGiniInstructions();
+    expect(out).toContain("default to a workspace Markdown (`.md`) file");
+    expect(out).toContain("write it with `file_write`");
+    expect(out).toContain("can be previewed inline in chat");
+    expect(out).toContain("Do not default to Google Docs");
+  });
+
   test("bundled default instructions steer user-only decisions to ask_user options, not prose", () => {
     // A model that asks for missing details in plain text and completes the
     // run leaves a "done"-looking task on home with the question buried in

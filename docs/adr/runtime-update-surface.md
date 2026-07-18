@@ -37,6 +37,23 @@ The CLI `gini update` keeps the same installer-managed target
 `gini stop && gini start`. If the selected instance is running and the
 update changed code, the CLI restarts it directly.
 
+`gini update` also converges a launchd-supervised instance's *home* onto
+the installed runtime. The launchd plist home is sticky (see
+[Always-Up Supervision](always-up-supervision.md)), so an instance whose
+gateway plist's `WorkingDirectory` points at some other checkout keeps
+executing that checkout's code across every respawn — updating
+`~/.gini/runtime` alone would never reach it. After `updateRuntime`
+succeeds, the CLI reads the gateway plist's `WorkingDirectory`; when it
+realpath-differs from `~/.gini/runtime` (including a home that no longer
+exists), it re-homes the instance — `autostart enable` with an explicit
+home of the installed runtime, which regenerates the plists and restarts
+the services on it — then waits for the gateway and web to report healthy.
+The re-home check is deliberately independent of the sha-based restart
+check: a wrongly-homed checkout can sit at the very same sha as the freshly
+updated runtime while remaining the wrong thing to execute, so the home
+converges even when the update reports up-to-date. Instances with no
+gateway plist (foreground / `gini run` / conductor) are never re-homed.
+
 When it is running from the installer-managed runtime, the web control
 plane surfaces the version in the sidebar and lets the operator trigger
 the update from the browser. Repo/worktree runs show version metadata
@@ -67,7 +84,12 @@ installer-origin guardrails rather than adding a browser-only shortcut.
   behavior consistent.
 - Web-triggered updates are only enabled when the running source tree is
   the installer-managed runtime. This prevents a repo checkout from
-  accidentally mutating a different installed runtime.
+  accidentally mutating a different installed runtime. When the installed
+  runtime exists but the gateway runs from elsewhere, the unsupported
+  reason names the directory the gateway is actually running from and
+  points at the terminal `gini update` (which updates the installed runtime
+  and re-homes a launchd instance onto it) rather than steering every such
+  user to git pull.
 - Browser-triggered updates schedule a post-response restart helper so the
   HTTP response can flush before the current gateway exits.
 - The web client treats a browser-triggered update as a modal operation:
@@ -151,10 +173,6 @@ installer-origin guardrails rather than adding a browser-only shortcut.
   rather than duplicating them.
 - Update remains scoped to the installer-managed runtime. Repo worktrees
   should still use normal git workflows.
-- Managed (platform-hosted) deployments roll updates platform-side, so the
-  web hides the sidebar's version/Update row there (see ADR
-  managed-deployment-mode.md); the update API itself is unchanged.
-
 ## Acceptance Checks
 
 - The sidebar shows a package/git version and an Update button.
@@ -173,6 +191,12 @@ installer-origin guardrails rather than adding a browser-only shortcut.
   the target revision and build, the gate reloads onto the new app instead
   of showing the "taking longer than expected" notice.
 - `gini update` no longer prints a manual restart instruction.
+- `gini update` on a launchd instance whose gateway plist home is not the
+  installed runtime re-homes it onto `~/.gini/runtime` (regenerating the
+  plists and restarting the services there) even when the update reports
+  `upToDate: true` and the running gateway reports the matching sha; a
+  correctly-homed instance keeps the sha-gated restart; an instance without
+  a gateway plist is untouched.
 - The gateway answers `/api/status` while a `POST /api/update` is running;
   a concurrent `POST /api/update` returns 409; `GET /api/version` reports
   `updateInProgress: true` exactly while an update is in flight; the

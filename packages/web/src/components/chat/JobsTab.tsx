@@ -10,8 +10,8 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { scheduleLabel } from "@/app/jobs/_components/schedule-label";
-import { CalendarView } from "@/app/jobs/_components/calendar/calendar-view";
+import { scheduleLabel } from "@/components/jobs/schedule-label";
+import { CalendarView } from "@/components/jobs/calendar/calendar-view";
 import { adaptJob, adaptRun } from "@/components/calendar/types";
 import { api } from "@/lib/api";
 import { useAllChatSessions, useInvalidate, useJobRuns, useJobs } from "@/lib/queries";
@@ -28,9 +28,9 @@ const STATUS_FILTER_LABELS: Record<StatusFilter, string> = {
   paused: "Paused"
 };
 
-// Per-agent Jobs tab — design `pu4J9` ("Agent Page — Jobs list").
-// A Page Header (Jobs title + subtitle and a List⇆Calendar toggle) sits above
-// a two-column list body: jobs on the left, recent runs on the right.
+// Per-agent Routines tab — design `pu4J9` ("Agent Page — Routines list").
+// A Page Header (Routines title + subtitle and a List⇆Calendar toggle) sits above
+// a two-column list body: routines on the left, recent runs on the right.
 // `useJobs`/`useJobRuns` are already scoped to the active agent, so both
 // columns show only this agent's jobs and runs.
 export function JobsTab() {
@@ -44,8 +44,8 @@ export function JobsTab() {
   const [view, setView] = useState<View>("list");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // Job pending delete confirmation. Null when the dialog is closed. Deleting a
-  // job cascade-removes its run history, so the confirmation is mandatory.
+  // Routine pending delete confirmation. Null when the dialog is closed. Deleting a
+  // routine cascade-removes its run history, so the confirmation is mandatory.
   const [deletingJob, setDeletingJob] = useState<JobRecord | null>(null);
 
   const action = useMutation({
@@ -117,9 +117,9 @@ export function JobsTab() {
       {/* Page Header — design `ZR4lj` */}
       <div className="flex shrink-0 items-center justify-between border-b border-border px-8 py-[22px]">
         <div className="flex flex-col gap-1.5">
-          <h2 className="text-[28px] font-bold leading-none text-foreground">Jobs</h2>
+          <h2 className="text-[28px] font-bold leading-none text-foreground">Routines</h2>
           <p className="text-sm font-medium text-muted-foreground">
-            Scheduled prompts and scripts owned by this agent
+            Scheduled routines owned by this agent
           </p>
         </div>
         <ViewToggle view={view} onChange={setView} />
@@ -141,11 +141,11 @@ export function JobsTab() {
       ) : view === "list" ? (
         <ScrollArea className="min-h-0 flex-1">
           <div className="flex gap-6 px-8 pb-8 pt-6">
-            {/* Jobs column */}
+            {/* Routines column */}
             <div className="flex w-[520px] shrink-0 flex-col gap-3.5">
               <div className="flex items-center justify-between px-1">
                 <span className="text-[11px] font-bold uppercase tracking-[0.6px] text-muted-foreground">
-                  Jobs · {allJobs.length}
+                  Routines · {allJobs.length}
                 </span>
                 <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as StatusFilter)}>
                   <SelectTrigger
@@ -162,7 +162,7 @@ export function JobsTab() {
                 </Select>
               </div>
               {filteredJobs.length === 0 ? (
-                <EmptyColumn label={allJobs.length === 0 ? "No jobs yet" : "No jobs match this filter"} />
+                <EmptyColumn label={allJobs.length === 0 ? "No routines yet" : "No routines match this filter"} />
               ) : (
                 filteredJobs.map((job) => (
                   <JobCard
@@ -185,7 +185,7 @@ export function JobsTab() {
                   Recent runs · {runsLast24h} in the last 24h
                 </span>
                 <Link
-                  href="/jobs"
+                  href="/routines"
                   className="flex items-center gap-1 text-[11px] font-semibold text-foreground transition-opacity hover:opacity-80"
                 >
                   View all runs
@@ -231,10 +231,10 @@ export function JobsTab() {
       >
         <DialogContent className="gap-5 border-border bg-card p-7 sm:max-w-md">
           <DialogTitle className="text-base font-bold text-foreground">
-            Delete {deletingJob?.name ?? "job"}?
+            Delete {deletingJob?.name ?? "routine"}?
           </DialogTitle>
           <DialogDescription className="text-[13px] text-muted-foreground">
-            This permanently removes the job and its run history. This can&rsquo;t be undone.
+            This permanently removes the routine and its run history. This can&rsquo;t be undone.
           </DialogDescription>
           <div className="flex items-center justify-end gap-2.5 border-t border-border pt-4">
             <Button
@@ -291,7 +291,7 @@ function ViewToggle({ view, onChange }: { view: View; onChange: (v: View) => voi
   );
 }
 
-// Read-only delivery-binding label for a job card: the dedicated channel's
+// Read-only delivery-binding label for a routine card: the dedicated channel's
 // title when channel-bound, the agent's chat when bound to any other session,
 // null (no line) when the job is session-less or the session can't resolve.
 function deliveryLabel(job: JobRecord, sessionsById: Map<string, ChatSession>): string | null {
@@ -301,8 +301,8 @@ function deliveryLabel(job: JobRecord, sessionsById: Map<string, ChatSession>): 
   return session.kind === "channel" ? `# ${session.title}` : "this agent's chat";
 }
 
-// Job card — design `y6aU9` (Job List Item). The header is a click target that
-// opens the job details view; the action buttons stop propagation so
+// Routine card — design `y6aU9` (Routine List Item). The header is a click target that
+// opens the routine details view; the action buttons stop propagation so
 // Run/Pause/Resume don't also select.
 function JobCard({
   job,
@@ -374,7 +374,7 @@ function JobCard({
           type="button"
           onClick={onRequestDelete}
           aria-label={`Delete ${job.name}`}
-          title="Delete job"
+          title="Delete routine"
           className="ml-auto flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-[13px] font-semibold text-muted-foreground transition-colors hover:border-destructive/40 hover:bg-destructive/10 hover:text-destructive"
         >
           <Trash2 className="size-[15px]" />
@@ -385,9 +385,9 @@ function JobCard({
   );
 }
 
-// Job details view shown when a JobCard is selected. A header card (name,
+// Routine details view shown when a JobCard is selected. A header card (name,
 // schedule, status, and the same Run/Pause/Resume/Delete actions as the list
-// card) over the job's full details — schedule stats, prompt/script, optional
+// card) over the routine's full details — schedule stats, prompt/script, optional
 // chip sections — with the fan-out concern list as one final section. JobFanout
 // owns the generic-vs-email branch; this panel stays domain-agnostic.
 function JobDetailPanel({
@@ -413,7 +413,7 @@ function JobDetailPanel({
         className="flex w-fit items-center gap-1.5 text-[13px] font-semibold text-muted-foreground transition-colors hover:text-foreground"
       >
         <ArrowLeft className="size-[14px]" />
-        Back to jobs
+        Back to routines
       </button>
 
       <div className="flex flex-col gap-3.5 rounded-[10px] border border-border bg-card p-4">
@@ -463,7 +463,7 @@ function JobDetailPanel({
             type="button"
             onClick={onRequestDelete}
             aria-label={`Delete ${job.name}`}
-            title="Delete job"
+            title="Delete routine"
             className="ml-auto flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-[13px] font-semibold text-muted-foreground transition-colors hover:border-destructive/40 hover:bg-destructive/10 hover:text-destructive"
           >
             <Trash2 className="size-[15px]" />
@@ -621,7 +621,7 @@ function RunCard({
   );
 }
 
-// Job status badge — ACTIVE (green) / PAUSED (gray) / FAILED (red), per the
+// Routine status badge — ACTIVE (green) / PAUSED (gray) / FAILED (red), per the
 // design's badge styling (`yvi2R` active, `w3otfA` paused).
 function JobStatusBadge({ status }: { status: JobStatus }) {
   const tone =

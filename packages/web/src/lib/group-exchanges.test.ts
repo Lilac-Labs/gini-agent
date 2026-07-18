@@ -373,6 +373,80 @@ describe("groupExchanges narration folding", () => {
   });
 });
 
+describe("groupExchanges routine card exemption", () => {
+  // A successful create_job carries the created job's structured jobId and
+  // renders as the standalone RoutineCreatedCard, so it must leave the
+  // collapsed tool group and pass through as its own block item in place.
+  test("a jobId-stamped create_job renders standalone while other calls still group", () => {
+    const items = groupExchanges(
+      [
+        user("create a routine", "task_routine"),
+        toolCall({ toolName: "web_search", argsPreview: "cron syntax", status: "ok", taskId: "task_routine" }),
+        toolCall({ toolName: "create_job", displayLabel: "Create scheduled job", argsPreview: "hn-mentions", status: "ok", jobId: "job_1", taskId: "task_routine" }),
+        assistant("routine created", "task_routine")
+      ],
+      new Set(["task_routine"])
+    );
+    const kinds = items.map((i) => (i.kind === "block" ? i.block.kind : i.kind));
+    expect(kinds).toEqual(["user_text", "tool_group", "tool_call", "assistant_text"]);
+    // The group holds only the non-card call.
+    const group = items.find((i) => i.kind === "tool_group");
+    expect(group?.kind === "tool_group" && group.calls.map((c) => c.toolName)).toEqual(["web_search"]);
+  });
+
+  // Running/failed create_job calls and legacy blocks without a jobId keep
+  // the generic tool-row treatment inside the group.
+  test("a create_job without a jobId (failed or legacy) stays inside the tool group", () => {
+    const items = groupExchanges(
+      [
+        user("create a routine", "task_routine_err"),
+        toolCall({ toolName: "create_job", displayLabel: "Create scheduled job", argsPreview: "bad", status: "error", taskId: "task_routine_err" }),
+        toolCall({ toolName: "create_job", displayLabel: "Create scheduled job", argsPreview: "legacy", status: "ok", taskId: "task_routine_err" }),
+        assistant("could not create it", "task_routine_err")
+      ],
+      new Set(["task_routine_err"])
+    );
+    expect(items.some((i) => i.kind === "block" && i.block.kind === "tool_call")).toBe(false);
+    const group = items.find((i) => i.kind === "tool_group");
+    expect(group?.kind === "tool_group" && group.calls.length).toBe(2);
+  });
+
+  // update_job turns card exactly like create turns: the runtime stamps the
+  // patched job's id, so a schedule change surfaces the same routine card
+  // while the sibling calls (list_jobs here) still collapse.
+  test("a jobId-stamped update_job renders standalone while sibling calls still group", () => {
+    const items = groupExchanges(
+      [
+        user("change my routine to every 5 minutes", "task_routine_upd"),
+        toolCall({ toolName: "list_jobs", displayLabel: "List scheduled jobs", argsPreview: "", status: "ok", taskId: "task_routine_upd" }),
+        toolCall({ toolName: "update_job", displayLabel: "Update scheduled job", argsPreview: "hello", status: "ok", jobId: "job_upd", taskId: "task_routine_upd" }),
+        assistant("updated", "task_routine_upd")
+      ],
+      new Set(["task_routine_upd"])
+    );
+    const kinds = items.map((i) => (i.kind === "block" ? i.block.kind : i.kind));
+    expect(kinds).toEqual(["user_text", "tool_group", "tool_call", "assistant_text"]);
+    const group = items.find((i) => i.kind === "tool_group");
+    expect(group?.kind === "tool_group" && group.calls.map((c) => c.toolName)).toEqual(["list_jobs"]);
+  });
+
+  // A turn whose ONLY call is a card-rendering create_job has nothing left to
+  // group: the whole exchange passes through as bubbles with the card in place.
+  test("a card-only turn produces no tool_group", () => {
+    const items = groupExchanges(
+      [
+        user("create a routine", "task_routine_only"),
+        toolCall({ toolName: "create_job", displayLabel: "Create scheduled job", argsPreview: "hn-mentions", status: "ok", jobId: "job_2", taskId: "task_routine_only" }),
+        assistant("routine created", "task_routine_only")
+      ],
+      new Set(["task_routine_only"])
+    );
+    expect(items.some((i) => i.kind === "tool_group")).toBe(false);
+    const kinds = items.map((i) => (i.kind === "block" ? i.block.kind : i.kind));
+    expect(kinds).toEqual(["user_text", "tool_call", "assistant_text"]);
+  });
+});
+
 describe("groupExchanges ask_user exemption", () => {
   // ask_user renders as the agent speaking: the chat.choice setup_requested
   // block is the sole representation, so the tool_call must produce neither

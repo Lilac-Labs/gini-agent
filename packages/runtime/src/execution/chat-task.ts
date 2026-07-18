@@ -11,7 +11,6 @@
 // the side effect runs and resumeChatTask() is called with the captured
 // tool result; the loop then continues from where it stopped.
 
-import { buildAuthPreflightBlock } from "./auth-preflight";
 import {
   appendEvent,
   appendLog,
@@ -29,7 +28,7 @@ import {
   recordProviderAuthFailure,
   recordUsage
 } from "../state";
-import { readGoogleAccounts } from "../state/google-accounts";
+import { googleAccountsForInstance } from "../integrations/connectors/google-accounts";
 import { ApprovedActionFailedError, findTask, scheduleAutoRetain } from "../agent";
 import { recordObjectiveOutcomes } from "../learning/outcomes";
 import { recall } from "../memory";
@@ -40,6 +39,7 @@ import {
   isAbortError,
   isAuthExpiredError,
   isContextOverflowError,
+  isRetryableProviderError,
   isStreamIdleTimeoutError,
   providerAuthNote,
   redactSecrets,
@@ -127,7 +127,7 @@ import { finalizeJobRunFromTask } from "../jobs/finalize";
 import { listJobs } from "../jobs";
 import { isSilentReply } from "../jobs/silent";
 import { peekRefLabel } from "../tools/browser";
-import { isSkillActive } from "../integrations/connectors";
+import { isSkillActive, markConnectorUnhealthyForProvider, reprobeConnectorsForProvider } from "../integrations/connectors";
 import { getProvider, providerForCredentialName } from "../integrations/connectors/registry";
 import { resolveEffectiveContext } from "./effective-context";
 import {
@@ -206,6 +206,13 @@ const MAX_INLINE_SKILL_SCRIPT_ROWS = 40;
 const MAX_IDENTICAL_TOOL_REPEATS = 3;
 const MAX_SAME_ACTION_REPEATS = 6;
 const MAX_NAVIGATION_WITHOUT_ACTION = 8;
+// Bounded re-issue budget for the dropped-tool-call anomaly: the provider
+// reports finishReason "tool_calls" but no tool call survived parsing (a
+// truncated id/name delta the parsers drop). Re-issuing a few times lets a
+// transient parse gap self-heal instead of silently completing the turn, while
+// the cap stops a persistently broken provider from spinning to the iteration
+// limit.
+const MAX_EMPTY_TOOLCALL_RETRIES = 3;
 // Whether an all-chat.choice park exposes the `needs_input` task status.
 // GINI_NEEDS_INPUT_STATUS=0 is a one-release compat escape hatch for clients
 // whose status renderers lag behind the TaskStatus expansion (mobile): the
@@ -580,11 +587,15 @@ function addCost(accumulator: CostRecord | undefined, increment: CostRecord | un
 // Matched signals: the streaming idle/stall timeout (classified by provider's
 // own isStreamIdleTimeoutError — the single source of truth for that error
 // shape, matching both its StreamIdleTimeoutError name and its "stream idle
-// timeout" message marker), and the connection/socket faults Bun's fetch
-// surfaces ("operation timed out", "fetch failed", "connection reset"/ECONNRESET,
-// ETIMEDOUT). The idle-timeout error is NOT an AbortError-named DOMException
-// (provider re-wraps it into a named Error), so the user-cancel gate above does
-// not claim it — by the time we reach here an AbortError is already excluded.
+// timeout" message marker); provider-side transient HTTP faults (throttling,
+// 5xx, overloaded — delegated to the provider's own isRetryableProviderError,
+// which keys off the HTTP status carried by a ProviderHttpError and, for
+// no-status streaming error events, the stable exception-vocabulary markers);
+// and the connection/socket faults Bun's fetch surfaces ("operation timed out",
+// "fetch failed", "connection reset"/ECONNRESET, ETIMEDOUT). The idle-timeout
+// error is NOT an AbortError-named DOMException (provider re-wraps it into a
+// named Error), so the user-cancel gate above does not claim it — by the time
+// we reach here an AbortError is already excluded.
 const TRANSIENT_MODEL_ERROR_MARKERS = [
   "operation timed out",
   "fetch failed",
@@ -599,6 +610,9 @@ function isTransientModelError(error: unknown, message: string | undefined): boo
   // The streaming idle/stall timeout: match provider's canonical predicate so
   // this stays pinned to the exact shape provider.ts throws (name + message).
   if (isStreamIdleTimeoutError(error)) return true;
+  // Provider-side transient HTTP faults (throttling/5xx/overloaded): delegated
+  // to the provider's classifier so status/marker knowledge lives in one place.
+  if (isRetryableProviderError(error)) return true;
   if (!message) return false;
   const lower = message.toLowerCase();
   return TRANSIENT_MODEL_ERROR_MARKERS.some((marker) => lower.includes(marker));
@@ -753,19 +767,36 @@ export async function runChatTask(config: RuntimeConfig, taskId: string): Promis
   });
   appendLog(config.instance, "task.started", { taskId, mode: "chat" });
 
-  // Resolve the active agent up-front so memory recall and pinned-memory
-  // filtering both use the same isolation key (Phase C). Without an active
-  // agent we skip auto-recall — Hindsight requires a namespace.
+  // Resolve the task's OWNING agent up-front (Task.agentId, stamped at
+  // submission; falls back to the active agent) so memory recall and
+  // pinned-memory filtering both use the same isolation key (Phase C) even
+  // when the user switches the active agent while this task runs. Without
+  // an agent we skip auto-recall — Hindsight requires a namespace.
   const stateForAgent = readState(config.instance);
-  const effectiveForAgent = resolveEffectiveContext(stateForAgent, config);
+  const effectiveForAgent = resolveEffectiveContext(stateForAgent, config, task.agentId);
   const agentIdForMemory = effectiveForAgent.agentId;
+  // Subagent personas can opt their turns out of the ambient memory
+  // pipeline (autoMemory: false) — high-volume mechanical workers pay
+  // recall as pure latency and would flood the bank with retained inputs.
+  const subagentForMemory = getSubagentForTask(stateForAgent, task);
+  const ambientMemoryOn = effectiveForAgent.autoMemory && subagentForMemory?.autoMemory !== false;
 
   // Auto-recall: queries the Hindsight bank for relevant context. If
   // recall fails we continue without it — the model can still answer
-  // off USER.md / SOUL.md and the task input.
+  // off USER.md / SOUL.md and the task input. Agents (or subagent
+  // personas) with `autoMemory: false` skip the query entirely — recall
+  // embeds the full task input and scans the bank in-process, which is
+  // pure latency for a worker that never needs ambient memory.
   let recalledContext: string | undefined;
   let hindsightUnitsRecalled = 0;
-  if (agentIdForMemory) {
+  if (agentIdForMemory && !ambientMemoryOn) {
+    appendTrace(config.instance, taskId, {
+      type: "memory",
+      message: "auto-recall skipped: agent autoMemory off",
+      data: { agentId: agentIdForMemory }
+    });
+  }
+  if (agentIdForMemory && ambientMemoryOn) {
     try {
       const recalled = await recall(config, {
         agentId: agentIdForMemory,
@@ -888,10 +919,10 @@ export async function runChatTask(config: RuntimeConfig, taskId: string): Promis
     (skill) => skill.status === "enabled" && !isSkillActive(state, skill)
   );
   const inactiveSkillsBlock = buildInactiveSkillsBlock(inactiveSkills, state);
-  // Connected Google accounts (multi-account): surface tag/email/config-dir so
+  // This instance's Google accounts (multi-account): surface tag/email/config-dir so
   // the model can target the right account per `gws` command and ask when the
-  // request is ambiguous. Registry is machine-global; read it directly.
-  const connectedAccountsBlock = buildConnectedAccountsBlock(readGoogleAccounts());
+  // request is ambiguous. Other instances' reusable credentials stay hidden.
+  const connectedAccountsBlock = buildConnectedAccountsBlock(googleAccountsForInstance(config.instance));
   // Bound-jobs block: if this chat session has one or more JobRecords whose
   // chatSessionId matches, surface them in the system prompt so the model
   // can act on "this job" / "the reminder" without first calling list_jobs.
@@ -981,20 +1012,6 @@ export async function runChatTask(config: RuntimeConfig, taskId: string): Promis
   let ephemeralContext = subagent
     ? ""
     : renderEphemeralContext(identityBlock, recalledContext, buildClientSurfaceBlock(task.clientSurface));
-  // Deterministic auth preflight: runs the yc/gws auth checks BEFORE the
-  // first model call and prepends any failures (as factual, action-ordering
-  // context) to the turn's user-role ephemeral block — never the system prompt.
-  // Best-effort: a checker fault degrades to no block and never blocks the turn.
-  if (!subagent) {
-    try {
-      const authBlock = await buildAuthPreflightBlock();
-      if (authBlock.length > 0) {
-        ephemeralContext = ephemeralContext.length > 0 ? `${authBlock}\n\n${ephemeralContext}` : authBlock;
-      }
-    } catch {
-      // never let the preflight crash a turn
-    }
-  }
   const currentUserMessage = await buildUserMessage(config, task, modality);
   const nonPriorMessages: ToolCallingMessage[] = [
     { role: "system", content: systemContext },
@@ -1697,8 +1714,8 @@ export function buildEnabledSkillsBlock(skills: SkillRecord[]): string {
 // Inactive-but-enabled skills block. Distinct from buildEnabledSkillsBlock:
 // these skills are turned on but unusable because a required credential is
 // missing. We tell the model exactly which provider needs connecting so it
-// can either invoke the provider's setup skill (when the provider declares
-// one) or call `request_connector` directly to ask the user to connect.
+// can invoke the provider's setup skill, call `request_google_account` for
+// Google Workspace, or call `request_connector` directly.
 //
 // Skills with `requiredCredentials` undefined / empty are skipped: those are
 // inactive for some other reason (validation status, etc.) and there's no
@@ -1779,6 +1796,9 @@ export function buildInactiveSkillsBlock(skills: SkillRecord[], state?: RuntimeS
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, entry]) => {
       const skillList = Array.from(new Set(entry.skills)).sort().join(", ");
+      if (key === "google-oauth-desktop") {
+        return `- ${key} (used by: ${skillList}) — call \`request_google_account\` so the user can connect Google through the local Integrations flow.`;
+      }
       if (entry.setupSkill) {
         return `- ${key} (used by: ${skillList}) — run \`read_skill\` with \`${entry.setupSkill}\` first; request_connector will be rejected until you do.`;
       }
@@ -1797,9 +1817,10 @@ export function buildInactiveSkillsBlock(skills: SkillRecord[], state?: RuntimeS
   // Browser tools exist for unrelated web tasks; they are not a bypass for
   // the connector handshake.
   const hasSetupSkill = Array.from(grouped.values()).some((entry) => entry.setupSkill);
+  const hasGoogleAccountFlow = grouped.has("google-oauth-desktop");
   const intro = hasSetupSkill
-    ? "Skills below need an external connector. The runtime gates `request_connector` for providers that declare a setup skill — call `read_skill` with the setup skill first (it owns the full prerequisite flow and will invoke request_connector itself). For a registered provider WITHOUT a setup skill, call `request_connector` with the provider id; for a credential with no registered provider, call `request_connector` with `{name, type:\"api-key\", skillId}` as the line indicates. Each line tells you exactly how to call it."
-    : "Skills below need an external connector. For a registered provider, call `request_connector` with the provider id; for a credential with no registered provider, call `request_connector` with `{name, type:\"api-key\", skillId}` as the line indicates. Each line tells you exactly how to call it. Never ask the user to paste a key as a chat message — request_connector captures it securely.";
+    ? "Skills below need an external connector. The runtime gates `request_connector` for providers that declare a setup skill — call `read_skill` with the setup skill first (it owns the full prerequisite flow and will invoke request_connector itself). For Google Workspace, call `request_google_account`; for another registered provider without a setup skill, call `request_connector` with the provider id; for a credential with no registered provider, call `request_connector` with `{name, type:\"api-key\", skillId}` as the line indicates. Each line tells you exactly how to call it."
+    : "Skills below need an external connector. For Google Workspace, call `request_google_account`; for another registered provider, call `request_connector` with the provider id; for a credential with no registered provider, call `request_connector` with `{name, type:\"api-key\", skillId}` as the line indicates. Each line tells you exactly how to call it. Never ask the user to paste a key as a chat message — request_connector captures it securely.";
   const sections: string[] = [
     intro,
     ...lines
@@ -1809,10 +1830,15 @@ export function buildInactiveSkillsBlock(skills: SkillRecord[], state?: RuntimeS
       "IMPORTANT: When a skill above lists a setup skill, that setup skill is the ONLY correct path to satisfy the user's request. Do NOT use `browser_navigate`, `browser_click`, or other browser tools to access the provider's web surface directly (e.g. navigating to gmail.com or calendar.google.com to extract data, or opening a Google sign-in page outside the setup flow). The browser tools are for unrelated tasks. If the user asks for something that requires a missing-connector skill, your first step is `read_skill` with the listed setup skill — never `browser_navigate`."
     );
   }
+  if (hasGoogleAccountFlow) {
+    sections.push(
+      "IMPORTANT: `request_google_account` is the only Google sign-in path. Do NOT use browser tools to open a Google sign-in page, and do NOT run `gws auth login`; the user completes OAuth through Integrations."
+    );
+  }
   return sections.join("\n");
 }
 
-// Connected Google accounts block. Multiple Google accounts can be tagged and
+// Registered Google accounts block. Multiple Google accounts can be tagged and
 // authorized against the single google-workspace-oauth client; each one is a
 // `gws` config dir. We surface every account's tag, email, and config dir so
 // the model can target the right one per `gws` command (by inline-prefixing
@@ -1820,6 +1846,14 @@ export function buildInactiveSkillsBlock(skills: SkillRecord[], state?: RuntimeS
 // every account and aggregates; for a write with no account named it asks.
 // Byte-stable for a given registry: preserves registry order and carries no
 // timestamps, so it doesn't churn the prefix cache.
+//
+// Registration is presence-only: the registry says nothing about whether an
+// account's sign-in is currently live, and probing that live (`gws auth
+// status` is a subprocess per config dir) is too costly for per-turn prompt
+// assembly. So the block says "registered" — never "connected"/"signed in" —
+// and instructs the model to verify via `list_connectors` (which carries live
+// per-account signedIn) before asserting any account's status, instead of
+// fabricating one from this list.
 //
 // Exported for unit testing; production callers use it via runChatTask.
 export function buildConnectedAccountsBlock(accounts: GoogleAccount[]): string {
@@ -1830,18 +1864,19 @@ export function buildConnectedAccountsBlock(accounts: GoogleAccount[]): string {
   });
   const selectionRule =
     accounts.length === 1
-      ? "Only one account is connected — use it (still pass its config dir)."
+      ? "Only one account is registered — use it (still pass its config dir)."
       : [
-          "Two or more accounts are connected. Choose the target account by the operation:",
+          "Two or more accounts are registered. Choose the target account by the operation:",
           "- The user named or clearly implied one account (an explicit tag, an email address, or unambiguous context) → use only that account.",
-          "- A read / lookup / search the user did NOT tie to a specific account (e.g. \"what's on my calendar\", \"find the budget doc\", \"search my email\") → run it against EVERY connected account (one `gws` call per config dir) and aggregate the results, labeling each by the account's tag and email. Don't pick just one, and don't ask — the user wants the whole picture across accounts.",
+          "- A read / lookup / search the user did NOT tie to a specific account (e.g. \"what's on my calendar\", \"find the budget doc\", \"search my email\") → run it against EVERY registered account (one `gws` call per config dir) and aggregate the results, labeling each by the account's tag and email. Don't pick just one, and don't ask — the user wants the whole picture across accounts.",
           "- A write (send, create, edit, delete) with no account named → ASK which account first; never guess."
         ].join("\n");
   return [
-    "Connected Google accounts:",
-    "These Google accounts are connected. Any `gws` command can target a specific one by prefixing it with `GOOGLE_WORKSPACE_CLI_CONFIG_DIR=\"<configDir>\" gws ...`.",
+    "Registered Google accounts:",
+    "These Google accounts are registered on this machine. Any `gws` command can target a specific one by prefixing it with `GOOGLE_WORKSPACE_CLI_CONFIG_DIR=\"<configDir>\" gws ...`.",
     ...rows,
-    selectionRule
+    selectionRule,
+    "This list is registration only — it does NOT include sign-in status, and any account's sign-in may be expired or revoked. Never assert an account's sign-in status from this list: before telling the user whether an account is signed in or working, check `list_connectors` (its `googleAccounts` field carries each account's live signedIn status). If a `gws` call fails with an auth error, treat that account's sign-in as expired: call `request_google_account` to put a reconnect button (→ the Integrations page) in the chat, tell the user to click it, then stop and wait for them to say it's done. Never run `gws auth login`, and never drive a Google sign-in page with the browser tools."
   ].join("\n");
 }
 
@@ -1980,8 +2015,9 @@ async function runLoop(
   // toolset filter narrows buildToolCatalog before the subagent filter
   // narrows further (state → agent → subagent composition). On fresh
   // entry runChatTask hands us the already-resolved EffectiveContext;
-  // resumeChatTask omits it so the resume picks up any agent change.
-  const effective = inheritedEffective ?? resolveEffectiveContext(state0, config);
+  // resumeChatTask omits it so the resume picks up any agent change (still
+  // pinned to the task's owning agent when one is stamped).
+  const effective = inheritedEffective ?? resolveEffectiveContext(state0, config, taskRow?.agentId);
   // Usage-ledger attribution for every model call in this turn. The source
   // distinguishes a subagent child / scheduled job / ordinary chat by the
   // task's own provenance; compaction/aux calls override source to "aux".
@@ -2121,6 +2157,7 @@ async function runLoop(
   let sameActionRunLength = 0;
   let navStall = initialNavStallState();
   let loopStallReason: "repeat" | "navigation" | undefined;
+  let emptyToolCallRetries = 0;
 
   // The current turn's most recent pre-tool-call narration. This — never a
   // re-scan of workingMessages — is what the partial-result exit below
@@ -2365,24 +2402,6 @@ async function runLoop(
         void enqueueFlush();
       }
     };
-    // Native (server-side) web search runs inside the provider call and never
-    // reaches the tool-dispatch loop, so the user would otherwise have no signal
-    // it happened. Surface each search as a display-only "Web search" chip the
-    // moment it completes: the provider fires this mid-stream, BEFORE the
-    // assistant message streams, so the chip's block lands ahead of the answer
-    // block (born lazily on the first text delta). Ordering matters for more than
-    // aesthetics — a chip trailing the answer pushes the answer out of its
-    // standalone bubble in group-exchanges (it folds into the collapsed tool
-    // group). Status goes straight to "ok": the search already ran on the
-    // provider, there's nothing to await or dispatch. See ADR web-search-connectors.md.
-    let webSearchSeq = 0;
-    const onWebSearch = (query: string): void => {
-      if (!emitCtx) return;
-      const callId = `websearch_${taskId}_${iterations}_${webSearchSeq++}`;
-      emitToolCallRunning(emitCtx, { toolName: "web_search", callId, args: { query } });
-      emitToolCallStatus(emitCtx, { callId, status: "ok" });
-    };
-
     // Re-check terminal status under the lock that flips
     // currentStep to "Thinking" so a cancel queued between the
     // lock-free top-of-loop check and this mutation doesn't get
@@ -2585,8 +2604,7 @@ async function runLoop(
           providerTools,
           onDelta,
           providerOverride,
-          turnSignal,
-          onWebSearch
+          turnSignal
         );
       } catch (error) {
         // Turn-abort: cancelTask aborted the in-flight model call. Drain any
@@ -2745,11 +2763,16 @@ async function runLoop(
     // lock-free first, so the common healthy path writes no state.
     // `evidenceFrom` keeps a record written by a concurrent task while this
     // call was in flight: that failure is newer evidence than this success.
-    await clearProviderAuthFailureIfPresent(config.instance, result.provider.name, {
+    const cleared = await clearProviderAuthFailureIfPresent(config.instance, result.provider.name, {
       reason: "provider call succeeded",
       taskId,
       evidenceFrom: callStartedAt
     });
+    // When the clear actually dropped a needs-reauth record, re-probe the
+    // matching connector so recovery doesn't wait for the 30-min reprobe.
+    if (cleared) {
+      void reprobeConnectorsForProvider(config, result.provider.name);
+    }
 
     // First successful provider call in this runLoop entry: commit the
     // deferred identity snapshot. We only persist once per fresh
@@ -2791,6 +2814,27 @@ async function runLoop(
     // The model's text for this turn, used by both the final-answer and
     // tool-call paths.
     const cleanedTurnText = result.text || "";
+
+    // Dropped-tool-call reconciliation (OPE-66): a finishReason of "tool_calls"
+    // with an empty toolCalls array means the model asked for a tool but its
+    // id/name delta never survived the provider parser (the `if (!id || !name)
+    // continue` drops). The loop otherwise keys done-vs-continue solely on an
+    // empty toolCalls array, so this would silently complete the turn mid-task.
+    // Re-issue the model call a bounded number of times — a one-off dropped
+    // delta self-heals — before falling through to the (now traced) finish.
+    if (
+      result.toolCalls.length === 0 &&
+      result.finishReason === "tool_calls" &&
+      emptyToolCallRetries < MAX_EMPTY_TOOLCALL_RETRIES
+    ) {
+      emptyToolCallRetries += 1;
+      appendTrace(config.instance, taskId, {
+        type: "warning",
+        message: `Provider reported finishReason "tool_calls" but no tool call parsed; re-issuing (attempt ${emptyToolCallRetries}/${MAX_EMPTY_TOOLCALL_RETRIES}).`,
+        data: { iterations, finishReason: result.finishReason }
+      });
+      continue;
+    }
 
     // Final answer path: no tool calls, model said stop (or unknown but
     // produced text).
@@ -3306,8 +3350,10 @@ async function runLoop(
           // block carrying a truncated preview of the dispatch result. An
           // agent-produced attachment reaches the user via a markdown ref the
           // model pastes into its reply (see ADR outbound-chat-attachments.md),
-          // so the tool_result block itself stays text-only.
-          emitToolCallStatus(emitCtx, { callId: call.id, status: "ok" });
+          // so the tool_result block itself stays text-only. `jobId` (set only
+          // by a create_job that created a job) rides onto the block so the
+          // routine card has a structured click target.
+          emitToolCallStatus(emitCtx, { callId: call.id, status: "ok", jobId: dispatch.jobId });
           emitToolResult(emitCtx, { callId: call.id, result: dispatch.result });
           // Mirror onto the legacy Task.recentToolCalls display payload so
           // clients still reading the task record (rather than the block
@@ -3623,11 +3669,14 @@ async function runLoop(
     // Same clear seam as the main loop: a successful summary call proves the
     // credential works, so drop any persistent needs-reauth record (issue
     // #233). Lock-free check first — no state write on the healthy path.
-    await clearProviderAuthFailureIfPresent(config.instance, summaryResult.provider.name, {
+    const summaryCleared = await clearProviderAuthFailureIfPresent(config.instance, summaryResult.provider.name, {
       reason: "provider call succeeded",
       taskId,
       evidenceFrom: summaryCallStartedAt
     });
+    if (summaryCleared) {
+      void reprobeConnectorsForProvider(config, summaryResult.provider.name);
+    }
     const finalText = summaryResult.text || "(no content)";
     const exhausted = await mutateState(config.instance, (state) => {
       const item = findTask(state, taskId);
@@ -3741,6 +3790,11 @@ async function runLoop(
       item.updatedAt = now();
       return item;
     });
+    // Bridge provider auth failure to connector health so the Integrations
+    // page reflects it immediately.
+    if (authProvider) {
+      void markConnectorUnhealthyForProvider(config.instance, authProvider, message);
+    }
     // Summary-call fail path: emit a system_note so the chat thread has
     // an explicit marker rather than just trailing off after the last
     // assistant_text. Phase blocks track currentStep; the system_note

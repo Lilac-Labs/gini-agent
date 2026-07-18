@@ -300,6 +300,47 @@ describe("resolveEffectiveContext", () => {
     expect(ctx.warnings).toEqual([]);
     expect(ctx.providerSource).toBe("agent");
   });
+
+  test("autoMemory defaults to true when no active agent", () => {
+    const state = buildState({ agents: [], activeAgentId: undefined });
+    const ctx = resolveEffectiveContext(state, buildConfig());
+    expect(ctx.autoMemory).toBe(true);
+  });
+
+  test("autoMemory defaults to true when the agent record omits the field", () => {
+    const agent = buildAgent();
+    const state = buildState({ agents: [agent], activeAgentId: agent.id });
+    const ctx = resolveEffectiveContext(state, buildConfig());
+    expect(ctx.autoMemory).toBe(true);
+  });
+
+  test("autoMemory is false only for an explicit agent opt-out", () => {
+    const agent = buildAgent({ autoMemory: false });
+    const state = buildState({ agents: [agent], activeAgentId: agent.id });
+    const ctx = resolveEffectiveContext(state, buildConfig());
+    expect(ctx.autoMemory).toBe(false);
+  });
+
+  test("agentIdOverride pins resolution to the named agent regardless of the active one", () => {
+    const active = buildAgent({ id: "agent_active", toolsets: ["file"] });
+    const pinned = buildAgent({ id: "agent_pinned", toolsets: ["memory"] });
+    const state = buildState({
+      agents: [active, pinned],
+      activeAgentId: active.id,
+      toolsets: [buildToolset("file"), buildToolset("memory")]
+    });
+    const ctx = resolveEffectiveContext(state, buildConfig(), "agent_pinned");
+    expect(ctx.agentId).toBe("agent_pinned");
+    expect(ctx.memoryNamespace).toBe("agent_pinned");
+    expect([...(ctx.toolsetFilter ?? [])]).toEqual(["memory"]);
+  });
+
+  test("an override naming a deleted agent falls back to the active agent", () => {
+    const active = buildAgent({ id: "agent_active" });
+    const state = buildState({ agents: [active], activeAgentId: active.id });
+    const ctx = resolveEffectiveContext(state, buildConfig(), "agent_gone");
+    expect(ctx.agentId).toBe("agent_active");
+  });
 });
 
 // Transient dispatch fallback: when the resolved provider (instance OR

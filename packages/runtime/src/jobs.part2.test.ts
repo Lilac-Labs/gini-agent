@@ -931,6 +931,69 @@ describe("cron lifecycle", () => {
     expect(readState(config.instance).jobs).toHaveLength(0);
   });
 
+  test("create_job dispatch rejects a Slack bridge with no configured delivery channel", async () => {
+    const config = testConfig("jobs-create-tool-delivery-slack-dm");
+    const { addMessagingBridge } = await import("./integrations/messaging");
+    // A DM-only Slack bridge has empty deliveryTargets by design (DM
+    // channels are discovered at event time) — accepting it here would
+    // make generic dispatch fall back to the literal "local" target and
+    // fail with channel_not_found on every fire.
+    await addMessagingBridge(config, {
+      name: "slk",
+      kind: "slack",
+      deliveryTargets: [],
+      botToken: "xoxb-TOK",
+      appToken: "xapp-TOK"
+    });
+    const taskId = await mutateState(config.instance, (state) => {
+      const task = createTask(state.instance, "test", undefined, undefined, undefined, undefined);
+      upsertTask(state, task);
+      return task.id;
+    });
+
+    await expect(
+      dispatchToolCall(
+        config,
+        taskId,
+        "create_job",
+        "call_delivery_slack_dm",
+        JSON.stringify({ name: "briefing", intervalSeconds: 60, prompt: "x", deliveryTargets: ["slk"] })
+      )
+    ).rejects.toThrow(/Slack bridge 'slk' has no delivery channel configured/);
+    expect(readState(config.instance).jobs).toHaveLength(0);
+  });
+
+  test("create_job dispatch accepts a Slack bridge that has a delivery channel configured", async () => {
+    const config = testConfig("jobs-create-tool-delivery-slack-channel");
+    const { addMessagingBridge } = await import("./integrations/messaging");
+    // The manual channel-id escape hatch: an operator-configured
+    // channel gives the text-only job dispatch a real target.
+    const bridge = await addMessagingBridge(config, {
+      name: "slk",
+      kind: "slack",
+      deliveryTargets: ["C123"],
+      botToken: "xoxb-TOK",
+      appToken: "xapp-TOK"
+    });
+    const taskId = await mutateState(config.instance, (state) => {
+      const task = createTask(state.instance, "test", undefined, undefined, undefined, undefined);
+      upsertTask(state, task);
+      return task.id;
+    });
+
+    await dispatchToolCall(
+      config,
+      taskId,
+      "create_job",
+      "call_delivery_slack_channel",
+      JSON.stringify({ name: "briefing", intervalSeconds: 60, prompt: "x", deliveryTargets: ["slk"] })
+    );
+
+    const jobs = readState(config.instance).jobs;
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.deliveryTargets).toEqual([bridge.id]);
+  });
+
   test("create_job dispatch rejects an ambiguous deliveryTargets entry, listing the candidates", async () => {
     const config = testConfig("jobs-create-tool-delivery-ambiguous");
     const { addMessagingBridge } = await import("./integrations/messaging");
@@ -1056,6 +1119,10 @@ describe("cron lifecycle", () => {
     if (result.kind === "sync") {
       expect(result.result).toContain(job.id);
       expect(result.result).toContain("to-delete");
+      // delete_job deliberately carries NO structured jobId (unlike
+      // create_job/update_job) — a routine card pointing at a deleted job
+      // could only ever render its tombstone state.
+      expect(result.jobId).toBeUndefined();
     }
 
     expect(readState(config.instance).jobs.find((j) => j.id === job.id)).toBeUndefined();
@@ -1813,6 +1880,106 @@ describe("cron lifecycle", () => {
       const taskBObj = readState(config.instance).tasks.find((t) => t.id === taskB)!;
       await finalizeJobRunFromTask(config, taskBObj);
       expect(sendCalls.length).toBe(0);
+    } finally {
+      resetMessagingDeps();
+    }
+  });
+
+  test("dispatchJobReplyToBridge threads a Slack mirror on the session's thread ROOT ts, never lastInboundMessageId", async () => {
+    // The Slack session source carries two message coordinates:
+    // threadTs (the thread root the session is keyed on) and
+    // lastInboundMessageId (the most recent inbound ts, updated on
+    // every message). chat.postMessage's thread_ts MUST be the root —
+    // anchoring on a reply's own ts makes Slack fork a broken second
+    // thread — so the finalizer's slack branch reads threadTs and
+    // ignores lastInboundMessageId entirely.
+    const config = testConfig("jobs-slack-thread-root");
+    const { addMessagingBridge, setMessagingDeps, resetMessagingDeps } = await import("./integrations/messaging");
+    const { findOrCreateSlackChatSession } = await import("./state");
+    const { finalizeJobRunFromTask } = await import("./jobs/finalize");
+    const postCalls: Array<{ channel: string; text: string; threadTs?: string }> = [];
+    setMessagingDeps({
+      slackClientFactory: () => ({
+        async authTest() {
+          return { userId: "UBOT", user: "gini", teamId: "T1", team: "Acme" };
+        },
+        async postMessage(channel, text, options) {
+          postCalls.push({ channel, text, ...(options?.threadTs ? { threadTs: options.threadTs } : {}) });
+          return { channel, ts: "1700000010.000900" };
+        },
+        async addReaction() {
+          return true as const;
+        },
+        async removeReaction() {
+          return true as const;
+        }
+      })
+    });
+
+    try {
+      const bridge = await addMessagingBridge(config, {
+        name: "slk",
+        kind: "slack",
+        deliveryTargets: [],
+        botToken: "xoxb-TOK",
+        appToken: "xapp-TOK"
+      });
+      const sessionId = await mutateState(config.instance, (state) => {
+        const session = findOrCreateSlackChatSession(state, bridge.id, "D1", "1700000001.000100");
+        // A follow-up inside the thread advanced the inbound stamp —
+        // the dispatch must NOT anchor on it.
+        if (session.source?.kind === "slack") {
+          session.source.lastInboundMessageId = "1700000005.000500";
+        }
+        return session.id;
+      });
+
+      const taskId = await mutateState(config.instance, (state) => {
+        const t = createTask(state.instance, "scheduled", undefined, undefined, undefined, undefined);
+        t.status = "completed";
+        t.summary = "reminder fired";
+        t.jobId = "job_slk";
+        upsertTask(state, t);
+        const session = state.chatSessions.find((s) => s.id === sessionId)!;
+        session.taskIds.push(t.id);
+        state.jobs.push({
+          id: "job_slk",
+          instance: state.instance,
+          name: "slk",
+          status: "active",
+          prompt: "p",
+          deliveryTargets: [],
+          context: [],
+          retryLimit: 0,
+          timeoutSeconds: 600,
+          chatSessionId: sessionId,
+          runIds: [],
+          taskIds: [],
+          runCount: 0,
+          missedRuns: 0,
+          nextRunAt: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+        state.jobRuns.push({
+          id: "run_slk",
+          instance: state.instance,
+          jobId: "job_slk",
+          status: "running",
+          taskId: t.id,
+          attempt: 1,
+          trigger: "schedule",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+        return t.id;
+      });
+      const taskObj = readState(config.instance).tasks.find((t) => t.id === taskId)!;
+      await finalizeJobRunFromTask(config, taskObj);
+      expect(postCalls.length).toBe(1);
+      expect(postCalls[0]?.channel).toBe("D1");
+      expect(postCalls[0]?.threadTs).toBe("1700000001.000100");
+      expect(postCalls[0]?.text).toContain("reminder fired");
     } finally {
       resetMessagingDeps();
     }

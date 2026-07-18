@@ -13,32 +13,25 @@ import {
   Home,
   Menu,
   Moon,
-  MoreHorizontal,
-  Plus,
+  Plug,
   RefreshCw,
+  Repeat,
   ScrollText,
   Settings,
   Sun,
   Trash2,
+  Users,
   WandSparkles
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { useMemo, useState, useSyncExternalStore } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { useAllChatSessions, useInvalidate, useManagedMode, useStatus } from "@/lib/queries";
+import { useAllChatSessions, useInvalidate, useStatus } from "@/lib/queries";
 import { useChatReadState } from "@/lib/use-chat-read-state";
 import {
   DropdownMenu,
@@ -66,16 +59,9 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
   const [archiveTarget, setArchiveTarget] = useState<AgentRow | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AgentRow | null>(null);
-  const [deleteMessageTarget, setDeleteMessageTarget] = useState<ChatSession | null>(null);
   const [topicsCollapsed, toggleTopics] = useSectionCollapsed("topics");
-  const [messagesCollapsed, toggleMessages] = useSectionCollapsed("messages");
 
   const status = useStatus();
-  // Managed (platform-hosted) deployments hide the self-serve footer: the
-  // tunnel menu (ingress is platform-provided) and the self-update row
-  // (updates are platform-rolled). Absent/failed answers render the footer —
-  // self-hosted behavior is the default. See ADR managed-deployment-mode.md.
-  const managed = useManagedMode().data?.managed === true;
   const activeAgentId = status.data?.activeAgent?.id;
   const agentsQuery = useQuery({
     queryKey: ["agents"],
@@ -102,7 +88,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
   // work-item containers surface on home, never here. Newest-activity first
   // so the most recently touched subject sits on top; scoped to the active
   // agent (each Topic belongs to that agent's Chat) so the section tracks
-  // the selected agent, like the Messages/agent rows.
+  // the selected agent, like the Chats/agent rows.
   const topics = useMemo<ChatSession[]>(() => {
     return (allSessions.data ?? [])
       .filter(
@@ -112,31 +98,6 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
           (activeAgentId == null || s.agentId === activeAgentId)
       )
       .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
-  }, [allSessions.data, activeAgentId]);
-
-  // Messages: the user's own active conversations — unpinned (pinning
-  // promotes a conversation into Topics), non-archived, non-headless
-  // topic/channel containers the user started by hand (no spawnedByTaskId
-  // and origin !== "job", so router/agent/schedule-minted containers stay
-  // off the chrome) in the composer's Message mode (startedAs === "message";
-  // Task-mode mints stay home work items only, and containers predating the
-  // field drop out of the section). Newest activity first, capped to keep
-  // the section scannable; agent-scoped like Topics.
-  const messages = useMemo<ChatSession[]>(() => {
-    return (allSessions.data ?? [])
-      .filter(
-        (s) =>
-          (s.kind === "topic" || s.kind === "channel") &&
-          s.startedAs === "message" &&
-          s.pinned !== true &&
-          !s.archivedAt &&
-          s.headless !== true &&
-          !s.spawnedByTaskId &&
-          s.origin !== "job" &&
-          (activeAgentId == null || s.agentId === activeAgentId)
-      )
-      .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))
-      .slice(0, 15);
   }, [allSessions.data, activeAgentId]);
 
   const { isUnread } = useChatReadState(allSessions.data);
@@ -155,33 +116,6 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
   const unarchiveMutation = useMutation({
     mutationFn: (id: string) => api(`/agents/${encodeURIComponent(id)}/unarchive`, { method: "POST" }),
     onSuccess: () => invalidate(["agents", "state", "status"]),
-    onError: (error: Error) => toast.error(error.message)
-  });
-
-  // If the archived/deleted conversation is the one currently on screen,
-  // step away from it: close the home panel (shallow URL, the closeTopic
-  // idiom in app/page.tsx) or leave its /chat surface for home.
-  const closeIfOpen = (sessionId: string) => {
-    if (pathname === "/chat" && params?.get("session") === sessionId) {
-      router.push("/");
-    } else if (pathname === "/" && params?.get("panel") === sessionId) {
-      window.history.replaceState(null, "", "/");
-    }
-  };
-
-  // Archive is immediate (no confirm): the conversation leaves the section
-  // but keeps its history and stays reachable by deep link.
-  const archiveMessageMutation = useMutation({
-    mutationFn: (session: ChatSession) =>
-      api(`/containers/${encodeURIComponent(session.id)}`, {
-        method: "PATCH",
-        body: JSON.stringify({ archived: true })
-      }),
-    onSuccess: (_data, session) => {
-      toast.success(`"${session.title}" archived`);
-      invalidate(["chat", "home", "state"]);
-      closeIfOpen(session.id);
-    },
     onError: (error: Error) => toast.error(error.message)
   });
 
@@ -306,7 +240,12 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
-        <div className="flex flex-col gap-[18px] px-3 py-2">
+        <div
+          className={cn(
+            "flex flex-col px-3 py-2",
+            topics.length > 0 ? "gap-[18px]" : "gap-0.5"
+          )}
+        >
           {/* Home — the daily surface */}
           <ul className="flex flex-col gap-0.5">
             <li>
@@ -316,112 +255,6 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
               </Link>
             </li>
           </ul>
-
-          <div className="h-px bg-sidebar-border" />
-
-          {/* Messages — the user's active (unpinned) conversations */}
-          {messages.length > 0 ? (
-            <>
-              <div className="flex flex-col gap-1">
-                <div className="flex items-center justify-between px-2">
-                  <button
-                    type="button"
-                    onClick={toggleMessages}
-                    aria-expanded={!messagesCollapsed}
-                    className="flex items-center gap-1.5 text-sidebar-foreground/55 hover:text-sidebar-foreground/80"
-                  >
-                    <ChevronDown
-                      className={cn("size-3 transition-transform", messagesCollapsed && "-rotate-90")}
-                    />
-                    <span className="text-[11px] font-semibold tracking-[0.5px]">Messages</span>
-                  </button>
-                  <button
-                    type="button"
-                    aria-label="New message"
-                    onClick={() => {
-                      router.push("/?compose=message");
-                      onNavigate?.();
-                    }}
-                    className="flex size-5 items-center justify-center rounded-md text-sidebar-foreground/55 transition-colors hover:bg-sidebar-accent/50 hover:text-sidebar-foreground/80"
-                  >
-                    <Plus className="size-3.5" />
-                  </button>
-                </div>
-                <ul className={cn("flex flex-col gap-0.5", messagesCollapsed && "hidden")}>
-                  {messages.map((session) => {
-                    const active = onChat && selectedSession === session.id;
-                    const unread = !active && isUnread(session);
-                    return (
-                      // The row is a <button>, so the hover actions trigger
-                      // can't nest inside it (invalid HTML) — it floats over
-                      // the row's right edge instead, the same absolute-
-                      // overlay idiom as the agent-list archive button above.
-                      <li key={session.id} className="group/row relative">
-                        <button
-                          type="button"
-                          onClick={() => selectChannel(session.id)}
-                          className={cn(
-                            "group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors",
-                            active ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/50"
-                          )}
-                        >
-                          <span
-                            aria-hidden
-                            className="w-3.5 shrink-0 text-center text-sm font-medium text-sidebar-foreground/55"
-                          >
-                            #
-                          </span>
-                          <span
-                            className={cn(
-                              "min-w-0 flex-1 truncate text-[13px]",
-                              active || unread
-                                ? "font-semibold text-sidebar-accent-foreground"
-                                : "font-medium text-sidebar-foreground"
-                            )}
-                          >
-                            {session.title}
-                          </span>
-                          {unread ? (
-                            <span
-                              aria-hidden
-                              className="size-[7px] shrink-0 rounded-full bg-sidebar-primary group-hover/row:opacity-0"
-                            />
-                          ) : null}
-                        </button>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <button
-                              type="button"
-                              aria-label={`Actions for ${session.title}`}
-                              className="absolute top-1/2 right-1.5 flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-sidebar-foreground/60 opacity-0 transition-opacity hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:opacity-100 group-hover/row:opacity-100 data-[state=open]:opacity-100"
-                            >
-                              <MoreHorizontal className="size-3.5" />
-                            </button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="start" className="w-40">
-                            <DropdownMenuItem
-                              onSelect={() => archiveMessageMutation.mutate(session)}
-                            >
-                              <Archive className="size-3.5" />
-                              Archive
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              variant="destructive"
-                              onSelect={() => setDeleteMessageTarget(session)}
-                            >
-                              <Trash2 className="size-3.5" />
-                              Delete
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-              <div className="h-px bg-sidebar-border" />
-            </>
-          ) : null}
 
           {/* Topics */}
           {topics.length > 0 ? (
@@ -483,12 +316,30 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
             </>
           ) : null}
 
-          {/* Nav: Skills, Logs, Settings */}
+          {/* Nav: People, Routines, Skills, Integrations, Logs, Settings */}
           <ul className="flex flex-col gap-0.5">
+            <li>
+              <Link href="/people" onClick={onNavigate} className={navItem(pathname === "/people")}>
+                <Users className="size-3.5 text-sidebar-foreground/70" />
+                People
+              </Link>
+            </li>
+            <li>
+              <Link href="/routines" onClick={onNavigate} className={navItem(pathname === "/routines")}>
+                <Repeat className="size-3.5 text-sidebar-foreground/70" />
+                Routines
+              </Link>
+            </li>
             <li>
               <Link href="/skills" onClick={onNavigate} className={navItem(pathname === "/skills")}>
                 <WandSparkles className="size-3.5 text-sidebar-foreground/70" />
                 Skills
+              </Link>
+            </li>
+            <li>
+              <Link href="/integrations" onClick={onNavigate} className={navItem(pathname === "/integrations")}>
+                <Plug className="size-3.5 text-sidebar-foreground/70" />
+                Integrations
               </Link>
             </li>
             <li>
@@ -507,15 +358,11 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
         </div>
       </ScrollArea>
 
-      {managed ? null : (
-        <>
-          <div className="px-3 pb-2 pt-3">
-            <TunnelMenu />
-          </div>
-          <div className="h-px bg-sidebar-border" />
-          <UpdateReminder />
-        </>
-      )}
+      <div className="px-3 pb-2 pt-3">
+        <TunnelMenu />
+      </div>
+      <div className="h-px bg-sidebar-border" />
+      <UpdateReminder />
       <CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} />
       <ArchiveAgentDialog
         agent={archiveTarget}
@@ -531,70 +378,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
           if (!open) setDeleteTarget(null);
         }}
       />
-      <DeleteConversationDialog
-        session={deleteMessageTarget}
-        open={deleteMessageTarget !== null}
-        onOpenChange={(open) => {
-          if (!open) setDeleteMessageTarget(null);
-        }}
-        onDeleted={(sessionId) => {
-          invalidate(["chat", "home", "state"]);
-          closeIfOpen(sessionId);
-        }}
-      />
     </div>
-  );
-}
-
-// Confirm-then-delete for a sidebar Messages row (DELETE /api/containers/:id)
-// — the DeleteAgentDialog pattern. The server refuses while a run is live
-// (409); the error text surfaces in the toast so the user knows to let the
-// run finish (or cancel it) first.
-function DeleteConversationDialog({
-  session,
-  open,
-  onOpenChange,
-  onDeleted
-}: {
-  session: ChatSession | null;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onDeleted: (sessionId: string) => void;
-}) {
-  const remove = useMutation({
-    mutationFn: (id: string) => api(`/containers/${encodeURIComponent(id)}`, { method: "DELETE" }),
-    onSuccess: (_data, id) => {
-      toast.success(session ? `"${session.title}" deleted` : "Conversation deleted");
-      onOpenChange(false);
-      onDeleted(id);
-    },
-    onError: (error: Error) => toast.error(error.message)
-  });
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Delete {session ? `"${session.title}"` : "this conversation"}?</DialogTitle>
-          <DialogDescription>
-            This permanently deletes the conversation and its full history. This can&apos;t be
-            undone.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={remove.isPending}>
-            Cancel
-          </Button>
-          <Button
-            variant="destructive"
-            onClick={() => session && remove.mutate(session.id)}
-            disabled={remove.isPending}
-          >
-            {remove.isPending ? "Deleting…" : "Delete"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 

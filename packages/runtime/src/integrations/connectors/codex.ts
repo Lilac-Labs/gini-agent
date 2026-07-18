@@ -116,6 +116,9 @@ export const codexProvider: ProviderModule = {
   id: "codex",
   label: "Codex",
   description: "Delegate coding work to the Codex CLI. No secrets stored — auth lives in your host install.",
+  // Credential name so canonicalCredentialName resolves and skills with
+  // `requires: connectors: codex` gate on this connector's health.
+  credentialName: "codex",
   fields: [],
   async probe(ctx) {
     const path = whichImpl("codex");

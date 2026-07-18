@@ -3,8 +3,7 @@ import {
   containerChromeArgs,
   isTruthyEnv,
   resolveBindHost,
-  resolveBrowserHeadless,
-  resolveEdgeSecret
+  resolveBrowserHeadless
 } from "./container-env";
 
 describe("isTruthyEnv", () => {
@@ -65,19 +64,5 @@ describe("containerChromeArgs", () => {
       "--no-sandbox",
       "--disable-dev-shm-usage"
     ]);
-  });
-});
-
-describe("resolveEdgeSecret", () => {
-  test("returns \"\" when unset (default off — the header is never honored)", () => {
-    expect(resolveEdgeSecret({})).toBe("");
-  });
-  test("returns \"\" verbatim when explicitly empty (empty is never a valid secret)", () => {
-    expect(resolveEdgeSecret({ GINI_EDGE_SECRET: "" })).toBe("");
-  });
-  test("returns the configured secret verbatim (no trim/normalize) when set", () => {
-    expect(resolveEdgeSecret({ GINI_EDGE_SECRET: "s3cr3t-edge-token" })).toBe("s3cr3t-edge-token");
-    // Preserved exactly so the full-string compare stays byte-for-byte.
-    expect(resolveEdgeSecret({ GINI_EDGE_SECRET: "  padded  " })).toBe("  padded  ");
   });
 });

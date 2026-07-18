@@ -1082,9 +1082,7 @@ export async function run(
 
 // Resolve a watch's in-state from the multi-watch input. State is keyed by
 // routeKey at the top level; a legacy `{ byWatcher }` blob is still read for one
-// transition tick (the first new tick rewrites it flat). A watch is "targeted"
-// when it names a single sender or a thread — those CLAIM their matches first so a
-// broad `in:inbox` watch never re-drafts mail a targeted concern already owns.
+// transition tick (the first new tick rewrites it flat).
 function watchRouteKey(watch: Watch): string {
   return watch.routeKey ?? watch.watcherId;
 }
@@ -1098,8 +1096,16 @@ function readWatchState(
   const legacy = (input as { byWatcher?: Record<string, DetectState> }).byWatcher;
   return legacy?.[routeKey] ?? {};
 }
-function isTargeted(watch: Watch): boolean {
-  return Boolean(watch.sender || watch.threadId);
+// Specificity tier for the one-owner-per-message claim order (lower = more
+// specific, runs earlier): a thread watch (0) beats a sender watch (1) beats any
+// other user query watch (2) beats the synthetic whole-inbox triage concern (3).
+// Watches claim the message ids they keep in tier order, so an email matching
+// several watches is owned by exactly one — the most specific — per tick.
+function watchTier(watch: Watch): number {
+  if (watch.threadId) return 0;
+  if (watch.sender) return 1;
+  if (watchRouteKey(watch) === "triage") return 3;
+  return 2;
 }
 
 // Run one detection tick across ALL enabled watches of the shared email-watch job.
@@ -1118,12 +1124,14 @@ function isTargeted(watch: Watch): boolean {
 //     Empty buckets are omitted (per-concern short-circuit; an idle concern costs
 //     zero model turns). When EVERY bucket is empty the whole tick is a silent
 //     shortCircuit (a joined non-silent backlog notice if any fired with no match).
-//   - Precedence: TARGETED watches (sender / thread) run first and CLAIM their
-//     matched message ids; a broad `in:inbox` watch then DROPS any already-claimed
-//     id so one email matching a targeted concern + the broad watch lands in the
-//     targeted bucket only (no double-draft). Per-watch newness/dedup
-//     (cursor+seen) is unchanged — precedence only reassigns which bucket an item
-//     is delivered in; every watch's cursor still advances over what IT consumed.
+//   - Precedence: every message id has exactly ONE owning watch per tick. Watches
+//     run in specificity order — thread > sender > query > the synthetic triage
+//     concern, watches-list (creation) order within a tier — and EVERY watch
+//     claims the ids it keeps and drops ids already claimed earlier in the tick,
+//     so an email matching several watches lands in the most-specific bucket only
+//     (no double-draft). Per-watch newness/dedup (cursor+seen) is unchanged —
+//     precedence only reassigns which bucket an item is delivered in; every
+//     watch's cursor still advances over what IT consumed.
 //
 // Commit timing is preserved by the consumer: a context bucket's state is
 // persisted only after THAT bucket's drafting worker dispatches (at-least-once
@@ -1157,9 +1165,10 @@ export async function runWatches(args: DetectArgsMulti, gwsSpawn: GwsSpawn): Pro
     return resolved;
   }
 
-  // Targeted watches run first so they CLAIM their matched ids before any broad
-  // watch is assigned; a broad watch's already-claimed matches are dropped.
-  const ordered = [...watches].sort((a, b) => Number(isTargeted(b)) - Number(isTargeted(a)));
+  // Most-specific watches run first so they claim their matched ids before any
+  // less specific watch is assigned; the stable sort keeps the watches-list
+  // (creation) order as the within-tier tiebreak.
+  const ordered = [...watches].sort((a, b) => watchTier(a) - watchTier(b));
   const claimedIds = new Set<string>();
   // The account identity per routeKey (the watch's resolved account, else its
   // self-address) — the key the cross-account Message-ID dedup groups on so two
@@ -1216,22 +1225,23 @@ export async function runWatches(args: DetectArgsMulti, gwsSpawn: GwsSpawn): Pro
     // signed-in self-address) for the cross-account Message-ID dedup below.
     accountByRoute.set(routeKey, (watch.account ?? auth.selfEmail)?.toLowerCase());
     if (result.kind === "context" && result.items) {
-      // Precedence: a broad (non-targeted) watch drops match items already claimed
-      // by a targeted watch this tick; a targeted watch claims its own. Trusted
-      // items (objective / follow-up) carry no id and always ride through.
+      // Precedence: every watch drops match items a more specific (or earlier-
+      // created same-tier) watch already claimed this tick, and claims the ids
+      // it keeps — one owning bucket per message id. Trusted items (objective /
+      // follow-up) carry no id and always ride through.
       const kept: ResultItem[] = [];
       for (const item of result.items) {
         const id = matchItemId(item);
         if (id) {
-          if (!isTargeted(watch) && claimedIds.has(id)) continue;
-          if (isTargeted(watch)) claimedIds.add(id);
+          if (claimedIds.has(id)) continue;
+          claimedIds.add(id);
         }
         kept.push(item);
       }
-      // A broad watch can drop EVERY match to precedence, leaving only trusted
-      // items (objective rides ONLY on a real match, so a fully-claimed broad
-      // watch yields nothing). Only open a bucket when an actual match survives —
-      // an empty/match-less bucket spawns no worker.
+      // A watch can drop EVERY match to precedence, leaving only trusted items
+      // (objective rides ONLY on a real match, so a fully-claimed watch yields
+      // nothing). Only open a bucket when an actual match survives — an
+      // empty/match-less bucket spawns no worker.
       if (kept.some((i) => i.untrusted)) buckets[routeKey] = kept;
     } else if (result.summary && result.summary.trim() !== "[SILENT]" && result.summary.trim().length > 0) {
       // A non-silent shortCircuit summary (a per-watch backlog notice). Route it

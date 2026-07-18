@@ -4,12 +4,11 @@ import { ProviderPicker } from "@/components/ProviderPicker";
 import { serif } from "./bits";
 
 // Capability-derived provider step (ADR web-onboarding-flow.md): shown only
-// when the deployment is self-hosted AND no model provider is configured
+// when no model provider is configured
 // (needsProviderStep in ./lib). It sits between sign-in and the wizard proper
 // because the Gmail profile scan — kicked off before the welcome step — needs
-// the model; managed deployments provision the provider at the platform and
-// never see this step (ADR managed-deployment-mode.md). Like sign-in it is a
-// prerequisite gate, not one of the dotted product steps. The body is the
+// the model. Like sign-in it is a prerequisite gate, not one of the dotted
+// product steps. The body is the
 // shared ProviderPicker (the exact surface /setup renders), so the catalog,
 // per-provider config forms, and POST /api/setup/provider behavior are all
 // inherited. "Skip for now" is the step's own footer — NOT the picker's

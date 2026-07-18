@@ -108,6 +108,17 @@ remote previews, screen readers) would need the same translation code.
   that block on an external event the agent cannot drive (today only
   `wait_for_messaging_pair`, waiting on an inbound Telegram DM up to
   600s) and is cleared automatically when status leaves `running`.
+  `ToolCallBlock` also carries an optional `jobId`: the id of the
+  scheduled job a successful `create_job` or `update_job` call
+  created/patched, stamped when the dispatch settles `ok`. It is a
+  structured side channel for the routine card — clients open the
+  routine's details from the block without parsing the id back out of
+  the 80-char-truncated `tool_result` preview. The id originates as
+  `DispatchResult.jobId` from the job-creating/updating tool handlers
+  (never extracted from the result string) and is absent on failed
+  calls, on every other tool — including `delete_job`, whose card
+  could only ever render a deleted-routine tombstone — and on blocks
+  predating the field.
   Outbound (agent → user) media rides a DIFFERENT channel than inbound:
   the block schema is unchanged — `AssistantTextBlock` and `ToolResultBlock`
   carry NO `images` field (only `UserTextBlock.images` exists, for the
@@ -250,8 +261,13 @@ remote previews, screen readers) would need the same translation code.
   falls back to the bare id when the job can't be resolved. `terminal_exec`
   masks its `argsPreview` (returns `""`) because a raw shell command line is
   noise — and a path/secret-leak risk — in an end-user inline preview; the
-  full command stays in `argsFull.command` and clients surface it on row
-  expansion.
+  full command stays in `argsFull.command` and clients normally surface it on
+  row expansion. The web client treats direct `gws gmail` invocations as an
+  end-user presentation exception: `tool-call-presentation.ts` maps them to
+  `Search email`, `Read email`, `Draft email`, or `Send email` (with `Use Gmail`
+  as the fallback) and withholds the command detail while leaving the result
+  preview expandable. The durable block still retains `argsFull.command`; the
+  exception changes presentation, not transcript or audit data.
 
 - The SSE endpoint is its own handler (`chatBlockStream` in
   `packages/runtime/src/http.ts`), not a reuse of the existing global `eventStream`.

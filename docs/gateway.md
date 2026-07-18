@@ -84,7 +84,7 @@ The `default` instance is pinned to memorable ports — web `7777`, runtime `777
 
 ## Auth
 
-Runtime auth is **owner-token-only**: the gateway uses a per-instance owner bearer token stored in the instance `config.json`, and a bearer authorizes iff it equals that singleton token — the resolved credential id is always `owner` (`resolveCredentialFromBearer` / `authorizedBearer` in `packages/runtime/src/http.ts`). The Next.js BFF reads the token server-side and does not expose it to client JavaScript. There are no per-device session tokens; revocation means rotating the config token. In the hosted deployment, Google OAuth runs at the edge and the edge injects the guest's own owner token upstream, so every proxied request resolves as owner. See [ADR: Owner-token-only authentication](adr/owner-token-auth.md).
+Runtime auth is **owner-token-only**: the gateway uses a per-instance owner bearer token stored in the instance `config.json`, and a bearer authorizes iff it equals that singleton token — the resolved credential id is always `owner` (`resolveCredentialFromBearer` / `authorizedBearer` in `packages/runtime/src/http.ts`). The Next.js BFF reads the token server-side and does not expose it to client JavaScript. There are no per-device session tokens; revocation means rotating the config token. See [ADR: Owner-token-only authentication](adr/owner-token-auth.md).
 
 The trust boundary lives at the **gateway front**. Every web-bound request (non-`/api` traffic and the `/api/runtime/*` BFF namespace) is validated by the gateway before it is reverse-proxied — both read-only GETs (which would otherwise leak RuntimeState contents under DNS rebinding) and mutating POST/PUT/PATCH/DELETEs — and the gateway then rewrites `Host`/`Origin` to loopback so the inner Next.js child is purely internal and relay-agnostic. The gateway accepts a web-bound request when its `Host`/`Origin` is one of:
 
@@ -97,7 +97,7 @@ A cross-site `Sec-Fetch-Site` value is rejected on every lane, and an unsafe met
 
 Closing the non-loopback fallback path blocks the DNS-rebinding shape where an attacker page sets `Origin` to a hostname they control but rebinds DNS to the gateway's loopback / tailnet IP — the rebound host equals itself, so a Host-comparison alone would pass. The allowlist (or the loopback restriction) takes that codepath off the table.
 
-The loopback lane is anchored to the **socket peer**, not the `Host` header: a `Host: localhost` request arriving from a non-loopback peer (possible on a non-loopback bind, e.g. a Docker published port) is refused — 401 for `/api/*`, 404 for pages — unless it is edge-trusted. A trusted non-loopback front gets the same access as loopback; there is no per-request cookie or pairing gate beyond the lanes above, so expose a front only to devices you fully trust. Remote multi-user access is the hosted edge's job. See [ADR: Owner-token-only authentication](adr/owner-token-auth.md).
+The loopback lane is anchored to the **socket peer**, not the `Host` header: a `Host: localhost` request arriving from a non-loopback peer (possible on a non-loopback bind, e.g. a Docker published port) is refused — 401 for `/api/*`, 404 for pages. A trusted non-loopback front gets the same access as loopback; there is no per-request cookie or pairing gate beyond the lanes above, so expose a front only to devices you fully trust or place your own authentication proxy in front of it. See [ADR: Owner-token-only authentication](adr/owner-token-auth.md).
 
 ## Lifecycle Commands
 

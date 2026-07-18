@@ -24,9 +24,13 @@ coveragePathIgnorePatterns = [
   # into the coverage table, where the 100% gate would otherwise reject files
   # this harness never fully covered.
   "src/components/chat/BlockSetupRequested.tsx",
+  # Large interactive surface (a live CDP screencast: mouse/keyboard/clipboard
+  # relay) with a targeted regression test for the reconnect + connecting-
+  # placeholder behavior, not full-handler coverage. Same precedent as
+  # BlockSetupRequested above.
+  "src/components/browser/ScreencastModal.tsx",
   "src/components/StatusPill.tsx",
-  # Same shape: Sidebar.test.tsx pins the managed-mode footer gating only
-  # (ADR managed-deployment-mode.md), not the whole sidebar surface.
+  # Sidebar has focused interaction tests rather than full-handler coverage.
   "src/components/Sidebar.tsx",
   "src/lib/**",
   "src/app/**",

@@ -94,6 +94,75 @@ export function credentialTemplateForProvider(module: ProviderModule): Credentia
 // `metadata.envMap` target must be one of these.
 const ENV_TOKEN = /^[A-Z][A-Z0-9_]*$/;
 
+// Mark the connector(s) for a provider unhealthy when a runtime auth failure
+// is observed (Section D bridge). Called fire-and-forget from agent.ts and
+// chat-task.ts after recording the ProviderAuthFailure record. Only touches
+// providers that actually have a connector (codex, claude-code in practice).
+export async function markConnectorUnhealthyForProvider(
+  instance: string,
+  provider: string,
+  detail: string
+): Promise<void> {
+  const state = readState(instance);
+  const targets = state.connectors.filter(
+    (c) => c.provider === provider && c.status === "configured"
+  );
+  if (targets.length === 0) return;
+  await mutateState(instance, (s) => {
+    const at = now();
+    for (const target of targets) {
+      const conn = s.connectors.find((c) => c.id === target.id);
+      if (!conn) continue;
+      const transition = conn.health !== "unhealthy";
+      conn.health = "unhealthy";
+      conn.message = detail;
+      conn.lastHealthAt = at;
+      conn.updatedAt = at;
+      if (transition) {
+        addAudit(
+          s,
+          {
+            actor: "runtime",
+            action: "connector.health.transition",
+            target: conn.id,
+            risk: "medium",
+            evidence: {
+              provider: conn.provider,
+              from: target.health,
+              to: "unhealthy",
+              message: detail,
+              source: "provider_auth_failure"
+            }
+          },
+          { system: true }
+        );
+      }
+    }
+  });
+}
+
+// Re-probe connectors for a provider after its auth failure has cleared.
+// Called fire-and-forget when a successful model call clears the needs-reauth
+// record, so recovery doesn't wait for the 30-min reprobe cadence.
+export async function reprobeConnectorsForProvider(
+  config: RuntimeConfig,
+  provider: string
+): Promise<void> {
+  const state = readState(config.instance);
+  const targets = state.connectors.filter(
+    (c) => c.provider === provider && c.status === "configured"
+  );
+  for (const target of targets) {
+    const module = getProvider(target.provider);
+    if (!module?.probe) continue;
+    try {
+      await checkConnector(config, target.id);
+    } catch {
+      // Best-effort: the probe failure already landed on the record.
+    }
+  }
+}
+
 export async function createConnector(config: RuntimeConfig, input: CreateConnectorInput): Promise<ConnectorRecord> {
   const provider = String(input.provider || "").trim();
   if (!provider) throw new Error("Invalid input: provider is required.");
@@ -188,7 +257,7 @@ export async function createConnector(config: RuntimeConfig, input: CreateConnec
   const finalType = type;
   const finalName = name;
   const finalMetadata = metadata;
-  return mutateState(config.instance, (state) => {
+  const result = await mutateState(config.instance, (state) => {
     const at = now();
     // Uniqueness check INSIDE the lock (LOCKED decision 3). A typed credential
     // name must be unique instance-wide INCLUDING disabled/tombstoned records —
@@ -247,6 +316,19 @@ export async function createConnector(config: RuntimeConfig, input: CreateConnec
     );
     return connector;
   });
+  // Probe immediately for probe-having providers so health is settled before
+  // returning. All paths (HTTP POST, CLI add, agent rotate_connector) inherit
+  // this probe. Best-effort: a probe failure lands on the record (health:
+  // "unhealthy" + message) rather than failing the create itself.
+  if (module?.probe) {
+    try {
+      return await checkConnector(config, connectorId);
+    } catch {
+      // checkConnector already persisted the failure; return the latest record.
+      return readState(config.instance).connectors.find((c) => c.id === connectorId)!;
+    }
+  }
+  return result;
 }
 
 export async function updateConnector(
@@ -260,7 +342,7 @@ export async function updateConnector(
     if (typeof value !== "string" || value.length === 0) continue;
     wroteRefs.push(writeSecret(config.instance, connectorId, purpose, value));
   }
-  return mutateState(config.instance, (state) => {
+  const result = await mutateState(config.instance, (state) => {
     const connector = state.connectors.find((candidate) => candidate.id === connectorId);
     if (!connector) throw new Error(`Connector not found: ${connectorId}`);
     if (typeof input.name === "string") {
@@ -306,6 +388,21 @@ export async function updateConnector(
     );
     return connector;
   });
+  // Re-probe after a secret rotation or status change for probe-having
+  // providers so health settles immediately. Best-effort: failures land on
+  // the record itself rather than failing the update.
+  const shouldProbe = wroteRefs.length > 0 || input.status === "configured";
+  if (shouldProbe) {
+    const module = getProvider(result.provider);
+    if (module?.probe) {
+      try {
+        return await checkConnector(config, connectorId);
+      } catch {
+        return readState(config.instance).connectors.find((c) => c.id === connectorId)!;
+      }
+    }
+  }
+  return result;
 }
 
 export async function deleteConnector(config: RuntimeConfig, connectorId: string): Promise<{ id: string; tombstoned?: boolean }> {
@@ -520,7 +617,7 @@ export async function checkConnector(config: RuntimeConfig, connectorId: string)
 // `health: "unknown"` counts only when the matching provider has no probe
 // (no failing signal); a probe-based provider that hasn't run yet stays
 // inactive so we don't surface skills before their first probe.
-function connectorIsUsable(connector: ConnectorRecord): boolean {
+export function connectorIsUsable(connector: ConnectorRecord): boolean {
   if (connector.status !== "configured") return false;
   if (connector.health === "healthy") return true;
   const hasProbe = Boolean(getProvider(connector.provider)?.probe);
@@ -540,8 +637,8 @@ function connectorIsUsable(connector: ConnectorRecord): boolean {
 //
 // When NO connector record with the required name exists at all, the provider
 // that owns the credential name gets a final say via its
-// `credentialExternallySatisfied` hook — e.g. a registered machine-global
-// Google account satisfies google-workspace-oauth with no connector record
+// `credentialExternallySatisfied` hook — e.g. a Google account attached to
+// this instance satisfies google-workspace-oauth with no connector record
 // (ADR google-multi-account.md). An existing record of ANY status keeps the
 // `connectorIsUsable`-only semantics: a `disabled` record is an explicit
 // operator off and must not be overridden by an external source.
@@ -554,7 +651,7 @@ export function isSkillActive(state: RuntimeState, skill: SkillRecord): boolean 
     if (named.length === 0) {
       const providerId = providerForCredentialName(name);
       const module = providerId ? getProvider(providerId) : undefined;
-      if (module?.credentialExternallySatisfied?.()) continue;
+      if (module?.credentialExternallySatisfied?.(state.instance)) continue;
     }
     return false;
   }

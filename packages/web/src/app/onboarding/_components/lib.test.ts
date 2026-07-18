@@ -1,7 +1,7 @@
 // Unit tests for the pure onboarding helpers: routines-step wizard-state
 // defaults, the capability-derived step sequence (provider step + scan
-// gating), suggested-task selection (scan-ready suggestions vs static
-// fallbacks), late scan-result adoption on the tasks step, timezone labels,
+// gating), inbox-derived suggested-task selection, late scan-result adoption
+// on the tasks step, timezone labels,
 // email linkification segments, and primary-account resolution and ordering.
 // Pure-JS tests
 // (no React/DOM) — they import the helper module directly.
@@ -13,7 +13,6 @@ import {
   adoptScanSuggestions,
   connectGoogleUrl,
   defaultRoutinesState,
-  FALLBACK_SUGGESTED_TASKS,
   initialOnboardingStep,
   needsProviderStep,
   onboardingSteps,
@@ -100,20 +99,16 @@ describe("profileCardView", () => {
 });
 
 describe("needsProviderStep", () => {
-  test("true only on a definite self-hosted-and-unconfigured answer", () => {
-    expect(needsProviderStep({ managed: false, providerConfigured: false })).toBe(true);
+  test("true only on a definite unconfigured answer", () => {
+    expect(needsProviderStep({ providerConfigured: false })).toBe(true);
   });
 
   test("an unresolved probe never blocks the funnel on a guess", () => {
     expect(needsProviderStep(undefined)).toBe(false);
   });
 
-  test("managed deployments never see the provider step (ADR managed-deployment-mode.md)", () => {
-    expect(needsProviderStep({ managed: true, providerConfigured: false })).toBe(false);
-  });
-
   test("a configured provider needs no step", () => {
-    expect(needsProviderStep({ managed: false, providerConfigured: true })).toBe(false);
+    expect(needsProviderStep({ providerConfigured: true })).toBe(false);
   });
 });
 
@@ -136,7 +131,7 @@ describe("onboardingSteps", () => {
 });
 
 describe("seedTaskBody", () => {
-  test("pins the POST /containers contract — drifting it strands seeded tasks off the task-first home or leaks them into sidebar Messages", () => {
+  test("pins the POST /containers contract — drifting it strands seeded tasks off the task-first home or leaks them into Home Chats", () => {
     const body = seedTaskBody("Draft a reply to Alice");
     expect(body).toEqual({
       content: "Draft a reply to Alice",
@@ -179,19 +174,19 @@ describe("suggestedTasksFrom", () => {
     expect(suggestedTasksFrom(scan)).toEqual(["Draft a reply to Alice", "Follow up on the invoice"]);
   });
 
-  test("ready scan WITHOUT suggestions falls back to the static list", () => {
-    expect(suggestedTasksFrom({ status: "ready" })).toEqual(FALLBACK_SUGGESTED_TASKS);
+  test("ready scan without suggestions returns no seed tasks", () => {
+    expect(suggestedTasksFrom({ status: "ready" })).toEqual([]);
   });
 
   test.each(["running", "failed", "no_account", "idle"] as const)(
-    "%s scan falls back to the static list",
+    "%s scan returns no seed tasks",
     (status) => {
-      expect(suggestedTasksFrom({ status })).toEqual(FALLBACK_SUGGESTED_TASKS);
+      expect(suggestedTasksFrom({ status })).toEqual([]);
     }
   );
 
-  test("undefined scan falls back to the static list", () => {
-    expect(suggestedTasksFrom(undefined)).toEqual(FALLBACK_SUGGESTED_TASKS);
+  test("undefined scan returns no seed tasks", () => {
+    expect(suggestedTasksFrom(undefined)).toEqual([]);
   });
 });
 
@@ -217,7 +212,7 @@ describe("adoptScanSuggestions", () => {
     expect(adoptScanSuggestions(undefined, false)).toBeUndefined();
   });
 
-  test("a ready scan without suggestions keeps the fallbacks", () => {
+  test("a ready scan without suggestions keeps the empty list", () => {
     expect(adoptScanSuggestions({ status: "ready" }, false)).toBeUndefined();
     expect(adoptScanSuggestions({ status: "ready", suggestedTasks: [] }, false)).toBeUndefined();
   });
@@ -283,24 +278,16 @@ describe("primaryAccountId", () => {
     expect(primaryAccountId([])).toBeUndefined();
   });
 
-  test("first account is primary when none is provisioned", () => {
+  test("first account is the fallback primary", () => {
     const accounts = [buildAccount({ id: "gacct_a" }), buildAccount({ id: "gacct_b" })];
     expect(primaryAccountId(accounts)).toBe("gacct_a");
   });
 
-  test("a provisioned account beats registry order", () => {
+  test("the server-resolved primary flag beats the first-account fallback", () => {
+    // The persisted primary (flipped by a sign-in-intent OAuth) is the
+    // server's resolution.
     const accounts = [
       buildAccount({ id: "gacct_a" }),
-      buildAccount({ id: "gacct_b", provisioned: true })
-    ];
-    expect(primaryAccountId(accounts)).toBe("gacct_b");
-  });
-
-  test("the server-resolved primary flag beats the provisioned/first heuristic", () => {
-    // The persisted primary (flipped by a sign-in-intent OAuth) wins even
-    // over a provisioned row — the flag IS the server's resolution.
-    const accounts = [
-      buildAccount({ id: "gacct_a", provisioned: true }),
       buildAccount({ id: "gacct_b", primary: true })
     ];
     expect(primaryAccountId(accounts)).toBe("gacct_b");
@@ -312,11 +299,11 @@ describe("accountsPrimaryFirst", () => {
     expect(accountsPrimaryFirst([])).toEqual([]);
   });
 
-  test("a provisioned primary moves to the front; the rest keep registry order", () => {
+  test("the resolved primary moves to the front; the rest keep registry order", () => {
     const accounts = [
       buildAccount({ id: "gacct_a" }),
       buildAccount({ id: "gacct_b" }),
-      buildAccount({ id: "gacct_c", provisioned: true })
+      buildAccount({ id: "gacct_c", primary: true })
     ];
     expect(accountsPrimaryFirst(accounts).map((a) => a.id)).toEqual(["gacct_c", "gacct_a", "gacct_b"]);
     // The input array is untouched (no in-place sort).
@@ -343,52 +330,26 @@ describe("initialOnboardingStep", () => {
 });
 
 describe("connectGoogleUrl", () => {
-  test("edge mode targets the edge add flow with the returnTo encoded", () => {
-    expect(connectGoogleUrl("edge", "/onboarding?step=accounts", "http://127.0.0.1:3059")).toBe(
-      "/auth/google/add?returnTo=%2Fonboarding%3Fstep%3Daccounts"
-    );
-  });
-
-  test("loopback mode targets the gateway start route with returnTo AND the browser origin encoded", () => {
-    expect(connectGoogleUrl("loopback", "/onboarding", "http://127.0.0.1:3059")).toBe(
+  test("targets the gateway start route with returnTo and browser origin encoded", () => {
+    expect(connectGoogleUrl("/onboarding", "http://127.0.0.1:3059")).toBe(
       "/api/runtime/google/login/start?returnTo=%2Fonboarding&origin=http%3A%2F%2F127.0.0.1%3A3059"
     );
   });
 
-  test("signin intent is appended in both modes; an explicit add intent keeps the bare URL", () => {
-    expect(connectGoogleUrl("edge", "/onboarding", "http://127.0.0.1:3059", "signin")).toBe(
-      "/auth/google/add?returnTo=%2Fonboarding&intent=signin"
-    );
-    expect(connectGoogleUrl("loopback", "/onboarding", "http://127.0.0.1:3059", "signin")).toBe(
+  test("signin intent is appended; an explicit add intent keeps the bare URL", () => {
+    expect(connectGoogleUrl("/onboarding", "http://127.0.0.1:3059", "signin")).toBe(
       "/api/runtime/google/login/start?returnTo=%2Fonboarding&origin=http%3A%2F%2F127.0.0.1%3A3059&intent=signin"
     );
-    expect(connectGoogleUrl("edge", "/onboarding", "http://127.0.0.1:3059", "add")).toBe(
-      "/auth/google/add?returnTo=%2Fonboarding"
+    expect(connectGoogleUrl("/onboarding", "http://127.0.0.1:3059", "add")).toBe(
+      "/api/runtime/google/login/start?returnTo=%2Fonboarding&origin=http%3A%2F%2F127.0.0.1%3A3059"
     );
   });
 });
 
 describe("reloginPrimaryUrl", () => {
-  test("edge mode routes to the add flow with signin intent — the edge upgrades an owner self-re-auth to a baked-dir heal", () => {
-    // NOT /auth/google: the owner sign-in flow heals only the baked dir, so a
-    // primary flipped to another account would loop on the reconnect CTA.
-    expect(reloginPrimaryUrl("edge", "/skills", "http://127.0.0.1:3059")).toBe(
-      "/auth/google/add?returnTo=%2Fskills&intent=signin"
-    );
-    expect(reloginPrimaryUrl("edge", "/onboarding")).toBe(
-      "/auth/google/add?returnTo=%2Fonboarding&intent=signin"
-    );
-  });
-
-  test("loopback mode builds the gateway PKCE start URL with returnTo, origin, and signin intent (the heal re-persists the primary)", () => {
-    expect(reloginPrimaryUrl("loopback", "/skills", "http://127.0.0.1:3059")).toBe(
+  test("builds the gateway PKCE start URL with returnTo, origin, and signin intent", () => {
+    expect(reloginPrimaryUrl("/skills", "http://127.0.0.1:3059")).toBe(
       "/api/runtime/google/login/start?returnTo=%2Fskills&origin=http%3A%2F%2F127.0.0.1%3A3059&intent=signin"
-    );
-  });
-
-  test("loopback mode with no origin encodes an empty origin", () => {
-    expect(reloginPrimaryUrl("loopback", "/onboarding")).toBe(
-      "/api/runtime/google/login/start?returnTo=%2Fonboarding&origin=&intent=signin"
     );
   });
 });
@@ -417,12 +378,12 @@ describe("signInCta", () => {
     ).toBe("connect");
   });
 
-  test("reconnect keys off the PRIMARY row: a revoked provisioned primary wins over a signed-in secondary", () => {
-    // The provisioned account is primary (see primaryAccountId); its revoked
-    // state drives the CTA even though another account is signed in.
+  test("reconnect keys off the resolved primary row, not a signed-in secondary", () => {
+    // The primary account's revoked state drives the CTA even though another
+    // account is signed in.
     const accounts = [
       buildAccount({ id: "gacct_secondary", signedIn: true }),
-      buildAccount({ id: "gacct_primary", provisioned: true, signedIn: false, tokenRevoked: true })
+      buildAccount({ id: "gacct_primary", primary: true, signedIn: false, tokenRevoked: true })
     ];
     expect(signInCta(accounts)).toBe("reconnect");
   });

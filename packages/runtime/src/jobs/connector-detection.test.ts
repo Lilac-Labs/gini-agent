@@ -74,7 +74,10 @@ describe("runConnectorDetection", () => {
         const config = buildConfig("detect-creates");
         const report = await runConnectorDetection(config);
         const created = report.created.find((c) => c.provider === "claude-code");
-        expect(created?.name).toBe("Claude Code");
+        // canonicalCredentialName("claude-code") resolves to "claude-code"
+        // (the credentialName field), which takes priority over the
+        // suggestedName so isSkillActive can look up the connector by name.
+        expect(created?.name).toBe("claude-code");
         const state = readState(config.instance);
         const record = state.connectors.find((c) => c.provider === "claude-code");
         expect(record?.source).toBe("auto");

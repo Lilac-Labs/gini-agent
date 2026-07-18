@@ -367,7 +367,7 @@ const CLIENT_SURFACE_VALUES: ReadonlySet<string> = new Set(["web", "mobile", "cl
 // CLI) tag each POST with `client`; an unrecognized or absent value is
 // treated as unknown — never a 400, so older clients keep working. Messaging
 // bridges don't send the field: their surface derives from the session's
-// `source.kind` ("telegram" | "discord" | "openclaw"). Per-MESSAGE, not
+// `source.kind` ("telegram" | "discord" | "slack" | "openclaw"). Per-MESSAGE, not
 // per-session, because the same session can be used from phone and desktop
 // alternately. See ADR client-surface-context.md.
 function resolveClientSurface(
@@ -1644,7 +1644,7 @@ async function generateChatTitleFromBlocks(
       schemaName: "ChatTitle",
       echoTag: "chat-title",
       system: [
-        "You write concise sidebar titles for chat conversations.",
+        "You write concise titles for chat conversations.",
         "Choose the title from the conversation's actual topic and intent.",
         "Return JSON with one field: title.",
         "Use 2 to 7 words. No quotes, emojis, markdown, punctuation padding, or prefixes like \"Chat about\"."

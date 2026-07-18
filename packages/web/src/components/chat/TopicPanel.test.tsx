@@ -55,7 +55,9 @@ function topicSession(extra: Partial<ChatSession> = {}): ChatSession {
 
 function renderPanel(closeTopic = () => {}) {
   return render(
-    <TopicPanelContext.Provider value={{ openTopicId: "topic-1", openTopic: () => {}, closeTopic }}>
+    <TopicPanelContext.Provider
+      value={{ openTopicId: "topic-1", openTopic: () => {}, openRoutineJobId: null, openRoutine: () => {}, closeTopic }}
+    >
       <TopicPanel topicId="topic-1" />
     </TopicPanelContext.Provider>
   );

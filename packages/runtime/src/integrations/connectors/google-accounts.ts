@@ -9,7 +9,7 @@
 // unit-tested without a real `gws` binary on PATH.
 
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 
 import type { GoogleAccount, GoogleAccountStatus, Instance } from "../../types";
 import {
@@ -24,10 +24,18 @@ import {
   retagGoogleAccount,
   setPrimaryGoogleAccountId
 } from "../../state/google-accounts";
+import {
+  attachGoogleAccountToInstance,
+  detachGoogleAccountFromInstance,
+  getGoogleAccountBindings,
+  readGoogleAccountBindings,
+  signOutGoogleAccountsForInstance,
+  writeGoogleAccountBindings
+} from "../../state/google-account-bindings";
 import { now } from "../../state/ids";
-import { appendLog } from "../../state/trace";
+import { readOnboarding } from "../../state/onboarding";
 import { gwsSessionStatusForDir, invalidateGwsSessionDir, type GwsSessionStatus } from "./gws-session";
-import { buildAuthorizedUserCredential } from "./relay-workspace-client";
+import { buildAuthorizedUserCredential } from "./google-oauth-client";
 
 type StatusFetcher = (configDir: string) => Promise<GwsSessionStatus>;
 
@@ -37,35 +45,50 @@ interface AccountDeps {
 
 // The effective primary account id: the persisted primaryAccountId when it
 // still names a registered row (a stale id — e.g. left by an older build or a
-// hand-edited registry — is ignored, not healed), else the pre-primary
-// heuristic every client used to apply: first provisioned row ?? first row.
+// hand-edited registry — is ignored, not healed), else the first registry row.
 // Resolved server-side so every surface agrees on which account is primary.
 export function effectivePrimaryAccountId(
   accounts: GoogleAccount[] = readGoogleAccounts()
 ): string | undefined {
   const persisted = readPrimaryGoogleAccountId();
   if (persisted && accounts.some((a) => a.id === persisted)) return persisted;
-  return (accounts.find((a) => a.provisioned) ?? accounts[0])?.id;
+  return accounts[0]?.id;
 }
 
-// List every registered account joined with its live `gws auth status` (one
-// spawn per config dir, in parallel). Best-effort: a status fetch that rejects
+// List registered accounts joined with live `gws auth status` (one spawn per
+// visible config dir, in parallel). Best-effort: a status fetch that rejects
 // degrades that account to signedIn:false rather than failing the whole list.
-// Exactly the effective primary row carries `primary: true`.
-export async function listAccountsWithStatus(deps: AccountDeps = {}): Promise<GoogleAccountStatus[]> {
+// When an instance is provided, only credentials attached to that instance are
+// returned. The machine-global registry remains an implementation detail that
+// lets a fresh OAuth login reuse an existing credential without exposing other
+// instances' accounts in product surfaces.
+export async function listAccountsWithStatus(
+  instanceOrDeps?: Instance | AccountDeps,
+  maybeDeps: AccountDeps = {}
+): Promise<GoogleAccountStatus[]> {
+  const instance = typeof instanceOrDeps === "string" ? instanceOrDeps : undefined;
+  const deps = typeof instanceOrDeps === "string" ? maybeDeps : (instanceOrDeps ?? {});
   const statusForDir = deps.statusForDir ?? gwsSessionStatusForDir;
   const accounts = readGoogleAccounts();
-  const primaryId = effectivePrimaryAccountId(accounts);
+  const bindings = instance ? effectiveInstanceBindings(instance, accounts) : undefined;
+  const attachedIds = new Set(bindings?.attachedAccountIds ?? []);
+  const primaryId = bindings?.primaryAccountId;
+  const visibleAccounts = instance
+    ? accounts.filter((account) => attachedIds.has(account.id))
+    : accounts;
   return Promise.all(
-    accounts.map(async (account) => {
-      const primary = account.id === primaryId ? { primary: true as const } : {};
+    visibleAccounts.map(async (account) => {
+      const instanceFlags = {
+        ...(account.id === primaryId ? { primary: true as const } : {}),
+        ...(attachedIds.has(account.id) ? { attached: true as const } : {})
+      };
       let status: GwsSessionStatus;
       try {
         status = await statusForDir(account.configDir);
       } catch (err) {
         return {
           ...account,
-          ...primary,
+          ...instanceFlags,
           signedIn: false,
           tokenRevoked: false,
           services: {},
@@ -74,7 +97,7 @@ export async function listAccountsWithStatus(deps: AccountDeps = {}): Promise<Go
       }
       return {
         ...account,
-        ...primary,
+        ...instanceFlags,
         // A freshly captured email can drift from what was stored (e.g. adopted
         // dir later re-authed as a different user); prefer the live one.
         email: status.email ?? account.email,
@@ -85,6 +108,64 @@ export async function listAccountsWithStatus(deps: AccountDeps = {}): Promise<Go
       };
     })
   );
+}
+
+// Synchronous instance view for hot paths that do not need a live gws status
+// probe (system-prompt assembly and credential activation). Legacy completed
+// instances still pass through the same one-time primary migration as the API.
+export function googleAccountsForInstance(
+  instance: Instance,
+  accounts: GoogleAccount[] = readGoogleAccounts()
+): GoogleAccount[] {
+  const attached = new Set(effectiveInstanceBindings(instance, accounts).attachedAccountIds);
+  return accounts.filter((account) => attached.has(account.id));
+}
+
+export async function useAccountForInstance(
+  instance: Instance,
+  accountId: string,
+  deps: AccountDeps = {}
+): Promise<GoogleAccountStatus> {
+  const account = getGoogleAccount(accountId);
+  if (!account) throw new Error(`Google account not found: ${accountId}`);
+  const statusForDir = deps.statusForDir ?? gwsSessionStatusForDir;
+  const status = await statusForDir(account.configDir);
+  if (!status.signedIn) {
+    throw new Error(status.message || `Google account ${account.tag} is not signed in`);
+  }
+  attachGoogleAccountToInstance(instance, { ...account, email: status.email ?? account.email }, { primary: true });
+  const [row] = (await listAccountsWithStatus(instance, deps)).filter((candidate) => candidate.id === account.id);
+  if (!row) throw new Error(`Google account not found: ${accountId}`);
+  return row;
+}
+
+export function signOutInstanceGoogleAccounts(instance: Instance): void {
+  signOutGoogleAccountsForInstance(instance);
+}
+
+export function detachInstanceGoogleAccount(instance: Instance, accountId: string): void {
+  detachGoogleAccountFromInstance(instance, accountId);
+}
+
+// Disconnect one reusable credential from this instance without deleting it
+// from the machine-global registry. The primary is intentionally protected:
+// the user must make another attached account primary before disconnecting it.
+export function disconnectInstanceGoogleAccount(instance: Instance, accountId: string): void {
+  const bindings = effectiveInstanceBindings(instance, readGoogleAccounts());
+  if (!bindings.attachedAccountIds.includes(accountId)) {
+    throw new Error(`Google account is not connected to this instance: ${accountId}`);
+  }
+  const primaryId = bindings.primaryAccountId ?? bindings.attachedAccountIds[0];
+  if (accountId === primaryId) {
+    throw new Error("Primary Google account cannot be disconnected. Make another account primary first.");
+  }
+  detachGoogleAccountFromInstance(instance, accountId);
+}
+
+export function primaryGoogleAccountForInstance(instance: Instance): GoogleAccount | undefined {
+  const accounts = readGoogleAccounts();
+  const bindings = effectiveInstanceBindings(instance, accounts);
+  return bindings.primaryAccountId ? accounts.find((account) => account.id === bindings.primaryAccountId) : undefined;
 }
 
 // Register (or refresh) a tagged account for an already-signed-in gws config
@@ -107,7 +188,7 @@ export async function listAccountsWithStatus(deps: AccountDeps = {}): Promise<Go
 // email to keep (fresh mint, or a reused row registered before its email was
 // known — listAccountsWithStatus back-fills live emails on reads but never
 // persists them) stores the caller's Google-verified email so later
-// email-based matching (provisionAccount) sees it. A non-empty stored email
+// email-based matching (saveGoogleAccountCredential) sees it. A non-empty stored email
 // always wins, and the probed path ignores the field (it captures the live
 // email itself).
 export async function registerAccount(
@@ -115,12 +196,9 @@ export async function registerAccount(
   deps: AccountDeps = {}
 ): Promise<GoogleAccount> {
   const statusForDir = deps.statusForDir ?? gwsSessionStatusForDir;
-  // A relay-provisioned credential is trustworthy by construction (the relay
-  // only issues a refresh token after a completed consent), and gws may not be
-  // installed yet at tunnel-connect time. trusted:true registers it without the
-  // live `gws auth status` probe; listAccountsWithStatus back-fills the live
-  // email/liveness on the next read. The probe stays mandatory for the
-  // adopt-an-arbitrary-dir callers, where liveness genuinely must be verified.
+  // The local OAuth callback has already verified the account with Google.
+  // trusted:true lets that path register without a second `gws auth status`
+  // probe. The probe stays mandatory for adopt-an-arbitrary-dir callers.
   let email = "";
   if (!input.trusted) {
     const status = await statusForDir(input.configDir);
@@ -133,19 +211,15 @@ export async function registerAccount(
   const tag =
     input.tag ?? existing?.tag ?? uniqueAccountTag(email.split("@")[0]?.trim() || "google");
   const managed = input.configDir.startsWith(googleAccountsRoot());
-  const provisioned = input.trusted || existing?.provisioned === true;
   const account: GoogleAccount = {
     id: managed ? basename(input.configDir) : existing?.id ?? newAccountId(),
     tag,
     email: input.trusted ? existing?.email || input.email || "" : email,
     configDir: input.configDir,
     addedAt: existing?.addedAt ?? now(),
-    // Relay-provisioned provenance is sticky: once set it stays set, so a later
-    // manual re-register of the same dir can't strip it. The grant path re-finds
-    // its account by these, not by the mutable tag. `principal` (the relay/Google
-    // subject id) keeps distinct identities in separate dirs.
-    ...(provisioned ? { provisioned: true } : {}),
-    ...(provisioned && (input.principal ?? existing?.principal)
+    // Google's immutable subject id keeps local OAuth refreshes idempotent even
+    // when the user retags an account or changes its email address.
+    ...(input.principal ?? existing?.principal
       ? { principal: input.principal ?? existing?.principal }
       : {})
   };
@@ -153,6 +227,20 @@ export async function registerAccount(
   // A fresh login just changed this dir's session; drop any cached status so the
   // next listAccountsWithStatus reads the new state instead of a stale entry.
   invalidateGwsSessionDir(input.configDir);
+  return account;
+}
+
+// Register a live credential through an instance-owned HTTP surface and attach
+// it to that instance. The first attached row becomes primary; later additions
+// preserve the user's existing primary choice.
+export async function registerAccountForInstance(
+  instance: Instance,
+  input: { tag?: string; configDir: string; adopt?: boolean; trusted?: boolean; principal?: string; email?: string },
+  deps: AccountDeps = {}
+): Promise<GoogleAccount> {
+  const account = await registerAccount(input, deps);
+  const hasPrimary = primaryGoogleAccountForInstance(instance) !== undefined;
+  attachGoogleAccountToInstance(instance, account, { primary: !hasPrimary });
   return account;
 }
 
@@ -177,83 +265,49 @@ export function retagAccount(accountId: string, tag: string): void {
   retagGoogleAccount(accountId, tag);
 }
 
-// Which add-a-Google-account flow this deployment supports. A hosted guest is
-// headless — the gws Desktop-client loopback OAuth can't complete there
-// (nothing opens the consent URL, and the localhost redirect resolves to the
-// visitor's machine) — so account adds must go through the edge's same-tab
-// web-client OAuth ("edge"). Keyed on GINI_HOSTED=1, which the hosted
-// provisioner bakes into every guest's env unconditionally (unlike
-// GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE, which is only present when the login
-// granted Workspace scopes — a guest without it still can't do loopback).
-export type GoogleAuthMode = "edge" | "loopback";
-
-export function googleAuthMode(): GoogleAuthMode {
-  return process.env.GINI_HOSTED === "1" ? "edge" : "loopback";
-}
-
-export interface ProvisionAccountInput {
+export interface SaveGoogleAccountCredentialInput {
   clientId: string;
   clientSecret: string;
   refreshToken: string;
   email?: string;
   principal?: string;
   tag?: string;
-  // The hosted edge sign-in re-auth of the guest's OWN primary (vs an
-  // add-account of some other mailbox). A hosted guest's gws reads only the
-  // baked credential file (GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE pins it
-  // regardless of config dir), so a re-auth must overwrite THAT file to heal —
-  // which means landing in the boot-registered primary's config dir. A revoked
-  // primary can't be matched by principal/email/probe (dead token, no stored
-  // identity), so this flag routes the write to the baked-file dir directly.
-  primary?: boolean;
-  // A sign-in-intent OAuth (vs an add-account): the provisioned/matched
+  // A sign-in-intent OAuth (vs an add-account): the saved/matched
   // account becomes the persisted primary once the provision succeeds.
-  // Distinct from `primary` above, which only routes WHERE the credential
-  // lands and never touches the persisted primaryAccountId.
   makePrimary?: boolean;
+  // Runtime instance whose local sign-in binding should be updated. The
+  // machine-global registry remains only the reusable credential catalog.
+  instance?: Instance;
 }
 
-// The config dir a hosted guest's baked gws credential lives in — the dir the
-// boot-registered primary account owns. undefined off a hosted guest (or when
-// the credentials env isn't set), so the primary-heal path is inert anywhere
-// the baked-file pinning doesn't apply.
-function hostedPrimaryConfigDir(): string | undefined {
-  const file = process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
-  return process.env.GINI_HOSTED === "1" && file ? dirname(file) : undefined;
-}
-
-// Persist an edge-provisioned Google account: write the standard
-// authorized_user credentials.json gws reads into a managed config dir, then
-// register it as a tagged account. The hosted edge exchanges the OAuth code
-// server-side (web-application client) and POSTs the refresh token here, so
-// the credential is trustworthy by construction — registration is trusted:true
-// (no gws probe; listAccountsWithStatus back-fills the live email/liveness).
-// Mirrors the relay grant path (defaultPersistWorkspaceGrant in
-// ../tunnel.ts), with the caller's OAuth client instead of the baked relay one.
+// Persist a Google account completed through the runtime's loopback OAuth
+// callback: write the standard authorized_user credentials.json gws reads into
+// a managed config dir, then register it as a tagged account. The callback has
+// already exchanged Google's authorization code and verified the account, so
+// registration is trusted:true (no second gws probe; listAccountsWithStatus
+// back-fills live email/liveness).
 //
 // IDEMPOTENT per identity: re-adding an account rewrites the credential of
 // the row it belongs to instead of minting a duplicate. Match order:
-//   1. a provisioned row with the same immutable `principal` (Google sub) —
-//      never the mutable tag;
+//   1. a row with the same immutable `principal` (Google sub), never the
+//      mutable tag;
 //   2. a row whose STORED email equals input.email case-insensitively;
 //   3. among rows with NO stored email, a best-effort live `gws auth status`
 //      probe per row matched on the live email (re-finds rows registered
-//      before their email was known — e.g. the hosted boot-registered
-//      primary; bounded to this rare provision path).
-// input.email is trustworthy for matching: both callers (the hosted edge's
-// add callback and the loopback web callback) take it from Google userinfo
-// fetched with the same exchange's access token, so the user just proved
-// ownership of that mailbox. On a match the credential lands in THAT row's
-// configDir, the principal is stamped, `provisioned` stays sticky, the
-// stored email is backfilled, and the row's tag and id are kept. A fresh
+//      before their email was known; bounded to this rare callback path).
+// input.email is trustworthy for matching because the loopback callback takes
+// it from Google userinfo fetched with the same exchange's access token. On a
+// match the credential lands in THAT row's
+// configDir, the principal and stored email are backfilled, and the row's tag
+// and id are kept. A fresh
 // identity mints a new dir and defaults its tag to the email local-part,
 // uniquified case-insensitively against the existing tags so registration
 // can never throw on a collision.
-export async function provisionAccount(
-  input: ProvisionAccountInput,
+export async function saveGoogleAccountCredential(
+  input: SaveGoogleAccountCredentialInput,
   deps: AccountDeps = {}
 ): Promise<GoogleAccount> {
-  const existing = await provisionTarget(input, deps.statusForDir ?? gwsSessionStatusForDir);
+  const existing = await credentialTarget(input, deps.statusForDir ?? gwsSessionStatusForDir);
   const configDir = existing?.configDir ?? configDirForAccount(newAccountId());
   const tag =
     existing?.tag ??
@@ -273,6 +327,10 @@ export async function provisionAccount(
     { mode: 0o600 }
   );
   renameSync(tmp, path);
+  // An encrypted `gws auth login` credential can outrank credentials.json, so
+  // a stale interactive login left in a reused dir would shadow the credential
+  // this flow just saved. The fresh consent is authoritative.
+  rmSync(join(configDir, "credentials.enc"), { force: true });
   const account = await registerAccount({
     tag,
     configDir,
@@ -282,29 +340,28 @@ export async function provisionAccount(
   });
   // Only after the credential landed and the row registered: a failed
   // provision must never flip the primary.
-  if (input.makePrimary) setPrimaryGoogleAccountId(account.id);
+  if (input.makePrimary && input.instance) {
+    attachGoogleAccountToInstance(input.instance, account, { primary: true });
+  } else if (input.makePrimary) {
+    // Legacy/test callers without an instance keep the old registry field. The
+    // runtime callback always passes an instance.
+    setPrimaryGoogleAccountId(account.id);
+  } else if (input.instance) {
+    attachGoogleAccountToInstance(input.instance, account, { primary: false });
+  }
   return account;
 }
 
-// The registry row a provision should land in (see provisionAccount's match
+// The registry row a saved credential should land in (see
+// saveGoogleAccountCredential's match
 // order), or undefined when the identity is genuinely new.
-async function provisionTarget(
-  input: ProvisionAccountInput,
+async function credentialTarget(
+  input: SaveGoogleAccountCredentialInput,
   statusForDir: StatusFetcher
 ): Promise<GoogleAccount | undefined> {
   const accounts = readGoogleAccounts();
-  // A primary re-auth heals the baked credential file, so it always lands in the
-  // boot-registered primary's config dir (matched by that dir, not by identity —
-  // a revoked primary has no live email and the boot registration stored none).
-  // Scoped to input.primary so an add-account of a different mailbox never
-  // overwrites the primary.
-  if (input.primary) {
-    const bakedDir = hostedPrimaryConfigDir();
-    const primary = bakedDir ? accounts.find((a) => a.configDir === bakedDir) : undefined;
-    if (primary) return primary;
-  }
   if (input.principal) {
-    const byPrincipal = accounts.find((a) => a.provisioned === true && a.principal === input.principal);
+    const byPrincipal = accounts.find((a) => a.principal === input.principal);
     if (byPrincipal) return byPrincipal;
   }
   const email = input.email?.trim().toLowerCase();
@@ -323,37 +380,44 @@ async function provisionTarget(
   return undefined;
 }
 
-// Register the credential a hosted guest boots with. The hosted provisioner
-// bakes the sign-in's Workspace grant as an authorized_user credentials file and
-// points GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE at it, but that file never
-// appears in the account registry on its own — so the web's sign-in/accounts
-// surfaces would show no account on a fresh guest. Called once at gateway
-// boot: registers the file's directory as the trusted "primary" account when
-// no registry row points at it yet, and persists it as the primaryAccountId
-// only when the field is unset (a user's later sign-in-intent choice must
-// survive reboots; a pre-primary-field guest gets the field backfilled on its
-// next boot — logged against `instance` when the caller passes one, since the
-// already-registered return gives the caller nothing to log). Requires BOTH
-// hosted markers (GINI_HOSTED plus the credentials env) so a local machine
-// that exports the gws env var for its own use never grows a surprise
-// registry row. Returns the account when one was registered, undefined on the
-// (normal) no-op paths.
-export async function ensureHostedPrimaryAccount(instance?: Instance): Promise<GoogleAccount | undefined> {
-  const credentialsFile = process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
-  if (process.env.GINI_HOSTED !== "1" || !credentialsFile) return undefined;
-  const configDir = dirname(credentialsFile);
-  const existing = readGoogleAccounts().find((a) => a.configDir === configDir);
-  const account =
-    existing ?? (await registerAccount({ tag: uniqueAccountTag("primary"), configDir, trusted: true }));
-  if (!readPrimaryGoogleAccountId()) {
-    setPrimaryGoogleAccountId(account.id);
-    // A fresh registration is logged by the boot caller; the field backfill on
-    // an already-registered row would otherwise be a silent registry write.
-    if (existing && instance) {
-      appendLog(instance, "google.hosted_primary.primary_backfilled", { id: account.id });
+function effectiveInstanceBindings(instance: Instance, accounts: GoogleAccount[]) {
+  const existing = readGoogleAccountBindings(instance);
+  if (existing) {
+    const accountIds = new Set(accounts.map((account) => account.id));
+    const attachedAccountIds = existing.attachedAccountIds.filter((id) => accountIds.has(id));
+    const primaryAccountId =
+      existing.primaryAccountId && accountIds.has(existing.primaryAccountId) && attachedAccountIds.includes(existing.primaryAccountId)
+        ? existing.primaryAccountId
+        : undefined;
+    if (
+      attachedAccountIds.length !== existing.attachedAccountIds.length ||
+      primaryAccountId !== existing.primaryAccountId
+    ) {
+      writeGoogleAccountBindings(instance, { ...existing, attachedAccountIds, ...(primaryAccountId ? { primaryAccountId } : {}) });
     }
+    return getGoogleAccountBindings(instance);
   }
-  return existing ? undefined : account;
+
+  const onboarding = readOnboarding(instance);
+  if (onboarding?.completed) {
+    const migratedAt = now();
+    const legacyPrimary = effectivePrimaryAccountId(accounts);
+    const account = legacyPrimary ? accounts.find((candidate) => candidate.id === legacyPrimary) : undefined;
+    if (account) {
+      const bindings = attachGoogleAccountToInstance(instance, account, { primary: true });
+      writeGoogleAccountBindings(instance, { ...bindings, legacyPrimaryMigratedAt: migratedAt });
+      return getGoogleAccountBindings(instance);
+    }
+    writeGoogleAccountBindings(instance, {
+      version: 1,
+      attachedAccountIds: [],
+      accounts: {},
+      legacyPrimaryMigratedAt: migratedAt
+    });
+    return getGoogleAccountBindings(instance);
+  }
+
+  return getGoogleAccountBindings(instance);
 }
 
 // First free variant of `base` among the existing tags, case-insensitively:

@@ -17,7 +17,7 @@
 // helpers are imported lazily (dynamic import) so this state module doesn't close
 // a static cycle with src/jobs (which imports src/state).
 
-import type { EmailWatcherRecord, EmailWatcherStatus, JobRoute, RuntimeConfig, RuntimeState } from "../types";
+import type { EmailWatcherRecord, EmailWatcherStatus, Instance, JobRoute, RuntimeConfig, RuntimeState } from "../types";
 import { id, now } from "./ids";
 import { addAudit } from "./audit";
 import { createChatSession, deleteChatSession, renameChatSession } from "./records";
@@ -160,15 +160,15 @@ export interface AccountResolution {
 }
 
 // Resolve a watcher's `accountEmail` to the gws account detection should target,
-// against the registered Google accounts (each `{ email, configDir, signedIn }`).
+// against the current instance's Google accounts (each `{ email, configDir, signedIn }`).
 // Rules:
-//   - zero registered accounts => default gws (no configDir, no warning), so a
+//   - zero attached accounts => default gws (no configDir, no warning), so a
 //     single-account install with no registry keeps working unchanged;
 //   - accountEmail UNSET => bind to the single registered+signed-in account (the
 //     common case: the user's one Google account), so existing watchers poll the
 //     real inbox. Ambiguous (multiple signed-in) or none signed-in => default gws
 //     with no warning — account selection is a later phase;
-//   - accountEmail SET and matches a registered account (case-insensitive) => use
+//   - accountEmail SET and matches an attached account (case-insensitive) => use
 //     that account's configDir + email;
 //   - accountEmail SET but NOT registered => default gws + a visible warning, so
 //     the watcher never silently watches the wrong inbox.
@@ -186,12 +186,12 @@ export function resolveWatchAccount(
   const match = accounts.find((a) => a.email.toLowerCase() === wanted);
   if (match) return { configDir: match.configDir, account: match.email };
   return {
-    warning: `Watched account "${accountEmail}" is not a registered Google account; detection is using the default gws session and may be watching the wrong inbox.`
+    warning: `Watched account "${accountEmail}" is not connected to this Gini instance; detection is using the default gws session and may be watching the wrong inbox.`
   };
 }
 
 // Decide whether `email_watch action:add` must ask the user which Google account
-// to watch, against the registered accounts. The belt-and-suspenders that keeps a
+// to watch, against the attached accounts. The belt-and-suspenders that keeps a
 // multi-account install from silently defaulting: when the caller passed NO
 // `accountEmail` AND 2+ accounts are signed in, return a hint string (listing the
 // signed-in account emails) instructing the model to ask the user via ask_user and
@@ -212,8 +212,11 @@ export function accountSelectionHint(
 
 // Read the live registry and decide whether the add must ask the user which
 // account (see accountSelectionHint). Returns the hint string or undefined.
-export async function accountSelectionNeeded(accountEmail: string | undefined): Promise<string | undefined> {
-  return accountSelectionHint(accountEmail, await readRegisteredAccounts());
+export async function accountSelectionNeeded(
+  accountEmail: string | undefined,
+  instance?: Instance
+): Promise<string | undefined> {
+  return accountSelectionHint(accountEmail, await readRegisteredAccounts(instance));
 }
 
 // The declarative watch entry for one enabled watcher inside the shared job's
@@ -676,11 +679,11 @@ async function rebuildSharedJobWatches(config: RuntimeConfig, agentId: string | 
   // snapshot — so a concurrent add's watcher isn't dropped across this yield.
   const triageChannelId = triageEnabled ? await ensureTriageChannel(config, agentId) : undefined;
   // Resolve each watcher's account → gws configDir once per rebuild, against the
-  // registered Google accounts (a cheap registry read + one `gws auth status`
+  // instance Google accounts (a cheap binding read + one `gws auth status`
   // per dir). resolveWatchAccount is a pure function of (accountEmail, accounts),
   // so it's applied per LIVE watcher inside the mutateState below from this
   // captured snapshot — no drift across the yield.
-  const accounts = await readRegisteredAccounts();
+  const accounts = await readRegisteredAccounts(config.instance);
   await mutateState(config.instance, (s) => {
     const job = s.jobs.find((j) => j.id === jobId);
     const sessionId = job?.chatSessionId;
@@ -711,7 +714,7 @@ async function rebuildSharedJobWatches(config: RuntimeConfig, agentId: string | 
       }
       const resolution = resolutions.get(w.id) ?? {};
       // Bind the resolved account onto the record (unset accountEmail defaults to
-      // the single registered account); leave a hand-set address untouched when
+      // the single attached account); leave a hand-set address untouched when
       // it didn't resolve, so the warning explains the mismatch.
       if (resolution.account && w.accountEmail !== resolution.account) {
         w.accountEmail = resolution.account;
@@ -726,15 +729,15 @@ async function rebuildSharedJobWatches(config: RuntimeConfig, agentId: string | 
   });
 }
 
-// The registered Google accounts (each `{ email, configDir, signedIn }`) for
+// The instance's Google accounts (each `{ email, configDir, signedIn }`) for
 // account→configDir resolution. Lazily imports the connector orchestration (the
 // same dynamic-import pattern used for src/jobs) to keep this state module free
 // of a static cycle, and degrades to "no accounts" (default-gws back-compat) if
 // the registry read faults, so a watcher rebuild never fails on it.
-async function readRegisteredAccounts(): Promise<{ email: string; configDir: string; signedIn: boolean }[]> {
+async function readRegisteredAccounts(instance?: Instance): Promise<{ email: string; configDir: string; signedIn: boolean }[]> {
   try {
     const { listAccountsWithStatus } = await import("../integrations/connectors/google-accounts");
-    return await listAccountsWithStatus();
+    return instance ? await listAccountsWithStatus(instance) : await listAccountsWithStatus();
   } catch {
     return [];
   }

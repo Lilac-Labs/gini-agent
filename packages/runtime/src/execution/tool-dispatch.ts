@@ -13,7 +13,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { extname, join, relative } from "node:path";
 import { isIP } from "node:net";
 import { lookup } from "node:dns/promises";
-import type { RuntimeConfig, RuntimeState, Task } from "../types";
+import type { GoogleAccountStatus, RuntimeConfig, RuntimeState, Task } from "../types";
 import {
   addAudit,
   appendTrace,
@@ -63,18 +63,20 @@ import { resolveEffectiveContext } from "./effective-context";
 import { importTableFromFile } from "../data/import-table";
 import { dbExecute, dbListTables, dbQuery } from "../state";
 import { uploadTagFor } from "../lib/upload-ref";
-import { resolveEmitContext, setToolCallRunningHint } from "./chat-task-emit";
+import { emitSystemNote, resolveEmitContext, setToolCallRunningHint } from "./chat-task-emit";
 import { searchSessions } from "./search";
 import { installSkillFromBody, setSkillStatus } from "../capabilities/skills";
 import { recordFeedbackOutcome } from "../learning/outcomes";
-import { credentialTemplateForProvider, firstUngrantedCredential, isSkillActive } from "../integrations/connectors";
+import { connectorIsUsable, credentialTemplateForProvider, firstUngrantedCredential, isSkillActive } from "../integrations/connectors";
 import { getProvider } from "../integrations/connectors/registry";
+import { listAccountsWithStatus } from "../integrations/connectors/google-accounts";
 import { resolveConnectorSecret } from "../integrations/connectors";
 import { invokeMcpTool } from "../integrations/mcp";
 import { braveWebSearch, exaWebSearch, formatWebSearchResults } from "../tools/web-search";
 import { findSkillScript, invokeSkillScript } from "../capabilities/skill-scripts";
 import { invokeVisionQuery } from "../capabilities/vision-query";
 import { checkMessagingBridge, listAllowedChats } from "../integrations/messaging";
+import { isBridgeSurfaceKind } from "../integrations/messaging-poller-helpers";
 import { riskForAction } from "./tool-risk";
 import {
   browserBack,
@@ -108,7 +110,14 @@ export type DispatchResult =
   // embedded IN `result` (`gini-upload://<id>`) that the model drops into its
   // reply where the picture belongs — there is no separate image channel. See
   // ADR outbound-chat-attachments.md.
-  | { kind: "sync"; result: string }
+  //
+  // `jobId` is set only by a create_job/update_job call that actually
+  // created or patched a job: a structured copy of the job's id so the
+  // chat-task loop can stamp it onto the tool_call block (the routine
+  // card's click target) without parsing it back out of `result`.
+  // delete_job deliberately never sets it — a card pointing at a deleted
+  // routine could only render its tombstone state.
+  | { kind: "sync"; result: string; jobId?: string }
   | { kind: "pending"; approvalId: string };
 
 // Universal ceiling on a single tool result, mirroring Codex's per-call
@@ -179,8 +188,10 @@ export async function dispatchToolCall(
   messageHistory?: readonly unknown[]
 ): Promise<DispatchResult> {
   const result = await dispatchToolCallInner(config, taskId, toolName, toolCallId, rawArgs, messageHistory);
+  // Spread so structured side-channel fields (create_job's `jobId`) survive
+  // the cap rewrap.
   return result.kind === "sync"
-    ? { kind: "sync", result: capToolResultText(result.result, toolName) }
+    ? { ...result, result: capToolResultText(result.result, toolName) }
     : result;
 }
 
@@ -236,12 +247,16 @@ async function dispatchToolCallInner(
       return { kind: "sync", result: await spawnSubagentTool(config, taskId, args) };
     case "spawn_task":
       return { kind: "sync", result: await spawnTaskTool(config, taskId, args) };
-    case "create_job":
-      return { kind: "sync", result: await createJobTool(config, taskId, args) };
+    case "create_job": {
+      const created = await createJobTool(config, taskId, args);
+      return { kind: "sync", result: created.result, jobId: created.jobId };
+    }
     case "list_jobs":
       return { kind: "sync", result: await listJobsTool(config, taskId, args) };
-    case "update_job":
-      return { kind: "sync", result: await updateJobTool(config, taskId, args) };
+    case "update_job": {
+      const updated = await updateJobTool(config, taskId, args);
+      return { kind: "sync", result: updated.result, jobId: updated.jobId };
+    }
     case "delete_job":
       return { kind: "sync", result: await deleteJobTool(config, taskId, args) };
     case "run_job":
@@ -282,6 +297,8 @@ async function dispatchToolCallInner(
       return { kind: "sync", result: await visionQueryTool(config, taskId, args) };
     case "request_connector":
       return await requestConnectorTool(config, taskId, toolCallId, args, messageHistory);
+    case "request_google_account":
+      return await requestGoogleAccountTool(config, taskId, args);
     case "ask_user":
       return await askUserTool(config, taskId, toolCallId, args);
     case "request_confirmation":
@@ -491,7 +508,7 @@ async function dispatchToolCallInner(
           })
         };
       }
-      if (connectSurfaceKind === "telegram" || connectSurfaceKind === "discord") {
+      if (isBridgeSurfaceKind(connectSurfaceKind)) {
         return {
           kind: "sync",
           result: JSON.stringify({
@@ -1047,7 +1064,7 @@ async function webSearchTool(config: RuntimeConfig, taskId: string, args: Record
   let providerId: WebSearchProvider | undefined;
   for (const id of candidates) {
     const found = state.connectors.find(
-      (c) => c.provider === id && c.status === "configured" && c.health === "healthy"
+      (c) => c.provider === id && connectorIsUsable(c)
     );
     if (found) {
       connector = found;
@@ -1785,8 +1802,9 @@ async function spawnTaskTool(
 }
 
 // Validate a create_job / update_job `deliveryTargets` payload against
-// the dispatchable messaging bridges — telegram / discord, the only
-// kinds the job finalizer (src/jobs/finalize.ts) can send to. A demo
+// the dispatchable messaging bridges — the isBridgeSurfaceKind set
+// (telegram / discord / slack), the only kinds the job finalizer
+// (src/jobs/finalize.ts) can send to. A demo
 // (or other non-dispatchable) bridge would validate and then fail on
 // every fire, so it is rejected here. Entries resolve by bridge id,
 // then case-insensitive name, then kind; an entry whose winning tier
@@ -1805,7 +1823,7 @@ function parseDeliveryTargets(config: RuntimeConfig, raw: unknown): string[] | u
     throw new Error("Invalid input: deliveryTargets must be an array of strings.");
   }
   const dispatchable = readState(config.instance).messagingBridges.filter(
-    (bridge) => bridge.kind === "telegram" || bridge.kind === "discord"
+    (bridge) => isBridgeSurfaceKind(bridge.kind)
   );
   const resolved: string[] = [];
   for (const entry of raw) {
@@ -1829,7 +1847,19 @@ function parseDeliveryTargets(config: RuntimeConfig, raw: unknown): string[] | u
         `Invalid input: deliveryTargets entry '${value}' is ambiguous — matches ${candidates}. Use the bridge name or id.`
       );
     }
-    resolved.push(matches[0]!.id);
+    const bridge = matches[0]!;
+    // A slack bridge with no configured channel is DM-only: inbound DM
+    // channels are discovered at event time and never persisted, so
+    // generic job dispatch would fall back to the literal "local"
+    // target and fail with channel_not_found on every fire. Reject at
+    // save time with the fix in hand. A slack bridge WITH a configured
+    // channel id passes — the text-only send works there.
+    if (bridge.kind === "slack" && bridge.deliveryTargets.length === 0) {
+      throw new Error(
+        `Invalid input: Slack bridge '${bridge.name}' has no delivery channel configured, so scheduled-job output has nowhere to post. Add a channel id to that bridge's deliveryTargets, or pick a different bridge.`
+      );
+    }
+    resolved.push(bridge.id);
   }
   return resolved;
 }
@@ -1839,11 +1869,14 @@ function parseDeliveryTargets(config: RuntimeConfig, raw: unknown): string[] | u
 // when it fires. Low-risk: no approval gate, since reminders should not
 // pop a modal — the user can pause/delete the job at any time via /jobs.
 // We discover the originating session by walking task → run → conversation.
+// Returns the model-facing confirmation string plus, when a job was actually
+// created, its id as a structured field (see DispatchResult.jobId). The
+// race-skip early returns below carry no jobId — nothing was created.
 async function createJobTool(
   config: RuntimeConfig,
   taskId: string,
   args: Record<string, unknown>
-): Promise<string> {
+): Promise<{ result: string; jobId?: string }> {
   const name = requireString(args, "name");
   const prompt = requireString(args, "prompt");
   // Exactly one of (intervalSeconds, cronExpression) must drive the
@@ -1988,7 +2021,7 @@ async function createJobTool(
   // `createScheduledJob`'s `mutateState` is the authoritative
   // guard; this early-exit just avoids touching the lock.
   if (task && isTerminalTaskStatus(task.status)) {
-    return `Error: create_job skipped because task is already ${task.status}.`;
+    return { result: `Error: create_job skipped because task is already ${task.status}.` };
   }
   // The agent's caller is "chat-bound" when its task is attached to a run
   // whose conversation still exists. That originating conversation is the
@@ -2056,10 +2089,10 @@ async function createJobTool(
     });
   } catch (err) {
     if (err instanceof Error && err.message.startsWith("Cannot create scheduled job: parent task ")) {
-      return `Error: create_job skipped because parent task was cancelled between pre-check and job creation.`;
+      return { result: `Error: create_job skipped because parent task was cancelled between pre-check and job creation.` };
     }
     if (err instanceof Error && err.message.startsWith("Cannot create scheduled job: chat session ")) {
-      return `Error: create_job skipped because the originating chat session was deleted between pre-check and job creation.`;
+      return { result: `Error: create_job skipped because the originating chat session was deleted between pre-check and job creation.` };
     }
     throw err;
   }
@@ -2138,7 +2171,10 @@ async function createJobTool(
   // job id and the conversation each fire delivers into. Imperative/CLI
   // invocations skip this suffix — there's no chat to point at.
   const sessionSuffix = chatSessionId ? ` into ${chatSessionId}` : "";
-  return `Created job ${job.id} (\"${name}\"): ${cadence}, fires at ${job.nextRunAt}${sessionSuffix}.`;
+  return {
+    result: `Created job ${job.id} (\"${name}\"): ${cadence}, fires at ${job.nextRunAt}${sessionSuffix}.`,
+    jobId: job.id
+  };
 }
 
 // Read-only listing of scheduled jobs. Cheap, low-risk: just walks
@@ -2216,11 +2252,15 @@ async function listJobsTool(
 // schedule/prompt/status changes — preserves job id, dedicated chat
 // thread, and run history. Validation lives in `updateJob` (typed
 // `Invalid input: …` errors surface back as tool-result errors).
+// Returns the model-facing confirmation string plus, when the patch was
+// actually applied, the job's id as a structured field (see
+// DispatchResult.jobId — the routine card renders for update turns too).
+// The error-string early returns carry no jobId — nothing was changed.
 async function updateJobTool(
   config: RuntimeConfig,
   taskId: string,
   args: Record<string, unknown>
-): Promise<string> {
+): Promise<{ result: string; jobId?: string }> {
   const jobId = requireString(args, "jobId");
 
   // Pre-side-effect terminal check. Mirrors the guard pattern in
@@ -2233,7 +2273,7 @@ async function updateJobTool(
     const state = readState(config.instance);
     const task = state.tasks.find((item) => item.id === taskId);
     if (task && isTerminalTaskStatus(task.status)) {
-      return `Error: update_job skipped because task is already ${task.status}.`;
+      return { result: `Error: update_job skipped because task is already ${task.status}.` };
     }
   }
 
@@ -2326,7 +2366,7 @@ async function updateJobTool(
     // Watcher / fan-out jobs (email-watch etc.) bind routing state to their
     // sessions — a rebind would orphan dedupe anchors and concern channels.
     if (before.preRunHook || (before.routes && Object.keys(before.routes).length > 0)) {
-      return `Error: update_job deliverTo is not supported for jobs with a preRunHook or fan-out routes — their sessions carry routing state.`;
+      return { result: `Error: update_job deliverTo is not supported for jobs with a preRunHook or fan-out routes — their sessions carry routing state.` };
     }
     if (deliverTo === "chat") {
       // Same task → run → conversation derivation as create_job: "chat"
@@ -2340,7 +2380,7 @@ async function updateJobTool(
         }
       }
       if (originatingSessionId === undefined) {
-        return `Error: update_job deliverTo "chat" requires invocation from a chat conversation, and this task has no originating chat session.`;
+        return { result: `Error: update_job deliverTo "chat" requires invocation from a chat conversation, and this task has no originating chat session.` };
       }
     }
   }
@@ -2462,7 +2502,10 @@ async function updateJobTool(
       : after.nextRunAt
         ? `next fires at ${after.nextRunAt}`
         : "next-fire moment pending";
-  return `Updated job ${after.id} (\"${after.name}\"): ${appliedFields.join(", ")}. Now ${after.status}, ${cadence}, ${firingClause}.${deliveryClause ? ` ${deliveryClause}` : ""}`;
+  return {
+    result: `Updated job ${after.id} (\"${after.name}\"): ${appliedFields.join(", ")}. Now ${after.status}, ${cadence}, ${firingClause}.${deliveryClause ? ` ${deliveryClause}` : ""}`,
+    jobId: after.id
+  };
 }
 
 // Delete a job and cascade-remove its run history. Low-risk for symmetry
@@ -2804,7 +2847,7 @@ async function emailWatchTool(
   // then re-add with the chosen `account`. One signed-in account auto-defaults
   // (Phase A); an explicit `account` resolves; so this fires only on a genuinely
   // ambiguous add. No watcher is created.
-  const selectionHint = await accountSelectionNeeded(account);
+  const selectionHint = await accountSelectionNeeded(account, config.instance);
   if (selectionHint) {
     appendTrace(config.instance, taskId, {
       type: "tool",
@@ -3593,7 +3636,7 @@ async function requestSkillConnectorGrant(
       })
     };
   }
-  if (surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({
@@ -4332,7 +4375,7 @@ async function requestConnectorTool(
       })
     };
   }
-  if (surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({
@@ -4514,6 +4557,91 @@ async function requestConnectorTool(
   return { kind: "pending", approvalId };
 }
 
+// Live per-account Google sign-in provider for request_google_account.
+// Defaults to the status-augmented machine-global registry (one `gws auth
+// status` spawn per account config dir, ~15s cached); a test swaps it via
+// setRequestGoogleAccountStatusProvider so the dispatch never spawns `gws`.
+// Same seam shape as self-registry's setGoogleAccountsStatusProvider.
+type RequestGoogleAccountStatusProvider = () => Promise<GoogleAccountStatus[]>;
+
+let activeRequestGoogleAccountStatusProvider: RequestGoogleAccountStatusProvider = listAccountsWithStatus;
+
+// Test seam for the Google accounts status provider. Production never calls this.
+export function setRequestGoogleAccountStatusProvider(provider: RequestGoogleAccountStatusProvider): () => void {
+  const previous = activeRequestGoogleAccountStatusProvider;
+  activeRequestGoogleAccountStatusProvider = provider;
+  return () => {
+    activeRequestGoogleAccountStatusProvider = previous;
+  };
+}
+
+// request_google_account tool. Google OAuth (connect and reconnect alike)
+// lives on the Integrations page — never in chat, never agent-driven (ADR
+// google-multi-account.md). This tool emits ONE system_note block whose
+// `cta` renders as an inline button to the Integrations page's Google
+// drill-down (/integrations?view=google), then returns a sync
+// result steering the model to hand off to the user and wait. Deliberately
+// fire-and-forget: no SetupRequest gate to resolve, because the user
+// completes OAuth on another page and reports back in their own words. No
+// surface hard-fail either — on a non-web surface the note still persists
+// to the session, and the result text covers the "open the web app" path.
+async function requestGoogleAccountTool(
+  config: RuntimeConfig,
+  taskId: string,
+  args: Record<string, unknown>
+): Promise<DispatchResult> {
+  const message = optionalString(args, "message", "").trim();
+  // Live status decides the label: any registered account whose grant was
+  // revoked/expired → the button reads as a reconnect; otherwise it offers
+  // a fresh connect. Best-effort — the button is still correct without
+  // status (the Integrations page shows the real per-account state).
+  let accounts: GoogleAccountStatus[] = [];
+  try {
+    accounts = await activeRequestGoogleAccountStatusProvider();
+  } catch {
+    /* degrade to the connect wording */
+  }
+  const revoked = accounts.filter((a) => a.tokenRevoked === true);
+  const label = revoked.length > 0 ? "Reconnect Google account" : "Connect Google account";
+  const revokedNames = revoked.map((a) => a.email || a.tag).join(", ");
+  const text =
+    message ||
+    (revoked.length > 0
+      ? `Google sign-in for ${revokedNames} needs to be reconnected.`
+      : "Connect a Google account to continue.");
+  emitSystemNote(resolveEmitContext(config, taskId), text, undefined, {
+    href: "/integrations?view=google",
+    label
+  });
+  appendTrace(config.instance, taskId, {
+    type: "tool",
+    message: "Surfaced Google account CTA",
+    data: { label, revokedCount: revoked.length }
+  });
+  await mutateState(config.instance, (state: RuntimeState) => {
+    const item = findTask(state, taskId);
+    addAudit(
+      state,
+      {
+        actor: "agent",
+        action: "google_account.requested",
+        target: "/integrations",
+        risk: "low",
+        taskId: item.id,
+        runId: item.runId,
+        evidence: { label, revoked: revoked.map((a) => a.tag) }
+      },
+      { taskId: item.id }
+    );
+    item.updatedAt = now();
+  });
+  return {
+    kind: "sync",
+    result:
+      `A "${label}" button linking to the Integrations page is now in the chat. Tell the user to click it (or, if they're not in the web app, to open the Integrations page there) and complete the Google sign-in in their browser, then STOP and wait for them to say it's done. Do not run \`gws auth login\` and do not drive a Google sign-in page with the browser tools.`
+  };
+}
+
 // ask_user tool. Mints a chat.choice SetupRequest whose payload carries the
 // question + options; the chat-task loop's pending handler emits a
 // setup_requested block and the web chat renders the question as the agent's
@@ -4603,7 +4731,7 @@ async function askUserTool(
     ? surfaceState.chatSessions.find((s) => s.id === surfaceTask.chatSessionId)
     : undefined;
   const surfaceKind = surfaceSession?.source?.kind ?? surfaceSession?.outboundMirror?.kind;
-  if (!surfaceSession || surfaceSession.headless === true || surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (!surfaceSession || surfaceSession.headless === true || isBridgeSurfaceKind(surfaceKind)) {
     // A subagent child has no chat surface of its own (it runs with no
     // chatSessionId), so the question can't be answered here. Bubble it up:
     // return a STRUCTURED marker the subagent loop carries to its terminal
@@ -4704,7 +4832,7 @@ async function requestConfirmationTool(
     ? surfaceState.chatSessions.find((s) => s.id === surfaceTask.chatSessionId)
     : undefined;
   const surfaceKind = surfaceSession?.source?.kind ?? surfaceSession?.outboundMirror?.kind;
-  if (!surfaceSession || surfaceSession.origin === "job" || surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (!surfaceSession || surfaceSession.origin === "job" || isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({
@@ -4765,7 +4893,8 @@ async function browserFillSecretsTool(
   args: Record<string, unknown>
 ): Promise<DispatchResult> {
   // Surface guard: the amber approval card is React UI on the BFF, and
-  // the messaging bridge mirrors (telegram-poller, discord-poller) only
+  // the messaging bridge mirrors (telegram-poller, discord-poller,
+  // slack-bridge) only
   // relay assistant_text after the task reaches a terminal status.
   // Minting a fill_secret approval would park the task in
   // awaiting_approval, the mirror would skip with
@@ -4813,7 +4942,7 @@ async function browserFillSecretsTool(
       })
     };
   }
-  if (surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({
@@ -4996,7 +5125,7 @@ async function requestMessagingBridgeTool(
       })
     };
   }
-  if (surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({
@@ -5022,6 +5151,18 @@ async function requestMessagingBridgeTool(
       result: JSON.stringify({
         ok: false,
         error: "request_messaging_bridge cannot add a Discord bridge from chat: the card does not collect the required channel-IDs list. Tell the user to open the settings page and click \"Add Discord\" there."
+      })
+    };
+  }
+  // Same shape for Slack: the card collects a single bot token, and
+  // Slack bridges need TWO credentials (bot token + app-level Socket
+  // Mode token), so a chat-created Slack bridge would be unactionable.
+  if (rawKind === "slack") {
+    return {
+      kind: "sync",
+      result: JSON.stringify({
+        ok: false,
+        error: "request_messaging_bridge cannot add a Slack bridge from chat: the card collects a single bot token, and Slack also needs an app-level (xapp-) Socket Mode token. Tell the user to open the settings page and click \"Add Slack\" there."
       })
     };
   }
@@ -5286,7 +5427,7 @@ async function requestMessagingPairingTool(
       })
     };
   }
-  if (surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({
@@ -5442,7 +5583,7 @@ async function waitForMessagingPairTool(
       })
     };
   }
-  if (surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({
@@ -5739,7 +5880,7 @@ async function requestRemoveMessagingBridgeTool(
       })
     };
   }
-  if (surfaceKind === "telegram" || surfaceKind === "discord") {
+  if (isBridgeSurfaceKind(surfaceKind)) {
     return {
       kind: "sync",
       result: JSON.stringify({

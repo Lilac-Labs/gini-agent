@@ -87,6 +87,17 @@ export interface AddConnectorDialogProps {
   // approval connect endpoint instead of the normal POST /api/connectors.
   // The caller still owns the actual API call via onSubmit.
   mode?: "create" | "rotate" | "request";
+  // Create-mode framing overrides so a caller can title the type-driven
+  // dialog after its entry point (e.g. the Integrations page's "Add MCP
+  // server" action) instead of the generic "Add connector" framing. Rotate
+  // and request modes render their own titles/copy and ignore `title`;
+  // `description` replaces the selected provider's description, and
+  // `namePlaceholder`/`secretPlaceholder` swap the api-key inputs' example
+  // placeholders.
+  title?: string;
+  description?: string;
+  namePlaceholder?: string;
+  secretPlaceholder?: string;
   // Optional inline error string the caller can pass back when a probe
   // fails on the connect endpoint. Surfaces under the secret inputs so
   // the user can correct the token without the dialog closing.
@@ -148,6 +159,10 @@ export function AddConnectorDialog({
   defaultName,
   lockProvider = false,
   mode = "create",
+  title,
+  description,
+  namePlaceholder,
+  secretPlaceholder,
   externalError = null,
   requestCredentialName,
   requestCredentialType,
@@ -431,14 +446,14 @@ export function AddConnectorDialog({
                 ? requestSkillName
                   ? `Grant ${selectedProvider?.label ?? requestCredentialName ?? "credential"} to ${requestSkillName}`
                   : `Connect ${selectedProvider?.label ?? requestCredentialName ?? "credential"}`
-                : "Add connector"}
+                : (title ?? "Add connector")}
           </DialogTitle>
           <DialogDescription>
             {mode === "rotate"
               ? "Replace the stored secret(s). The connector record, name, and scopes stay the same."
               : templatelessRequest
                 ? "Enter the secret below. It is stored encrypted server-side and never shown to the agent."
-                : linkify(selectedProvider?.description ?? "Connect a new external system.")}
+                : linkify(description ?? selectedProvider?.description ?? "Connect a new external system.")}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
@@ -480,7 +495,7 @@ export function AddConnectorDialog({
                       id="apikey-name"
                       value={apiKeyName}
                       onChange={(e) => { setApiKeyName(e.target.value); setError(null); }}
-                      placeholder="LINEAR_API_KEY"
+                      placeholder={namePlaceholder ?? "LINEAR_API_KEY"}
                       autoComplete="off"
                     />
                     {apiKeyName.trim() && !ENV_TOKEN.test(apiKeyName.trim()) ? (
@@ -498,7 +513,7 @@ export function AddConnectorDialog({
                       type="password"
                       value={apiKeySecret}
                       onChange={(e) => setApiKeySecret(e.target.value)}
-                      placeholder="lin_api_…"
+                      placeholder={secretPlaceholder ?? "lin_api_…"}
                       autoComplete="off"
                     />
                   </div>

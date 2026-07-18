@@ -4,6 +4,7 @@ import { webBoundRequestAllowed } from "./lib/origin-trust";
 import { resolveBindHost } from "./lib/container-env";
 import "./hooks/builtins"; // registers trusted hook handlers (skill-script) before the scheduler/backfill run
 import { runDueJobs } from "./jobs";
+import { reconcileCrmExtraction } from "./jobs/crm-extractor";
 import { runConnectorReprobe } from "./jobs/connector-reprobe";
 import { runSetupRequestSweep } from "./jobs/setup-request-sweep";
 import { runConnectorDetection } from "./jobs/connector-detection";
@@ -23,9 +24,9 @@ import { reconcileAutostartPlistOnStartup } from "./runtime/autostart-reconcile"
 import { installCrashHandlers } from "./runtime/crash-handlers";
 import { maybeAskAboutCrashes } from "./runtime/crash-recovery";
 import { closeAll as closeBrowserSessions, setBrowserInstance, setBrowserRecording } from "./tools/browser";
-import { ensureHostedPrimaryAccount } from "./integrations/connectors/google-accounts";
 import { createTelegramPollerSupervisor } from "./integrations/telegram-poller";
 import { createDiscordPollerSupervisor } from "./integrations/discord-poller";
+import { createSlackBridgeSupervisor } from "./integrations/slack-bridge";
 import { createApnsDispatcher } from "./integrations/apns/dispatcher";
 import { reconcileTunnelOnStartup, refreshProviderDetection, stopAllTunnels } from "./integrations/tunnel";
 import { shutdownPosthog } from "./integrations/posthog";
@@ -237,30 +238,6 @@ runConnectorDetection(config)
     });
   });
 
-// A hosted guest boots with an edge-provisioned Workspace credential baked at
-// the GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE path (ADR google-multi-account.md).
-// Register its directory as the trusted "primary" account once so the account
-// registry — and the web onboarding's sign-in/accounts steps — see the
-// signed-in account. Idempotent: an already-registered dir registers nothing,
-// though it may still backfill an unset primaryAccountId (the connector logs
-// that write against the instance passed here). A no-op without the hosted
-// markers, and best-effort: errors are absorbed so a registry problem can
-// never block startup.
-ensureHostedPrimaryAccount(config.instance)
-  .then((account) => {
-    if (account) {
-      appendLog(config.instance, "google.hosted_primary.registered", {
-        id: account.id,
-        configDir: account.configDir
-      });
-    }
-  })
-  .catch((error) => {
-    appendLog(config.instance, "google.hosted_primary.error", {
-      error: error instanceof Error ? error.message : String(error)
-    });
-  });
-
 // Back-fill MCP server registrations for any connectors that were already
 // healthy before the connector↔MCP bridge shipped. Idempotent and
 // best-effort: errors are absorbed so a malformed provider descriptor
@@ -296,6 +273,10 @@ backfillEmailWatcherJobs(config)
       error: error instanceof Error ? error.message : String(error)
     });
   });
+
+// A local restart pauses unfinished People extraction until the user explicitly
+// resumes it from the People page. See ADR people-crm-extraction-pipeline.md.
+reconcileCrmExtraction(config);
 
 // APNs push dispatcher. Subscribes to the instance-wide chat-blocks
 // stream and fans `approval_requested` events out to every registered
@@ -341,9 +322,8 @@ const server = Bun.serve({
       // The only WS that rides this bridge is non-privileged Next HMR; all live
       // application data (chat, events) flows over SSE through the bearer-gated
       // /api surface. The host/origin trust gate above (webBoundRequestAllowed)
-      // is the whole admission check — auth is owner-token-only (see ADR
-      // owner-token-auth.md), and hosted fronts arrive through the edge, which
-      // authenticates before proxying.
+      // is the whole admission check; auth is owner-token-only (see ADR
+      // owner-token-auth.md).
       return proxyWebSocketUpgrade(request, server, config);
     }
     // Pass the real socket peer address so the handler's loopback-operator
@@ -547,6 +527,26 @@ const discordDone: Promise<void> = (async function discordReconcileLoop(): Promi
   }
 })();
 
+// Slack inbound bridge. Same supervisor shape as Telegram / Discord,
+// different transport: each loop holds a Socket Mode WebSocket open
+// (no polling — Slack's rate limits make REST history unusable) and
+// routes pushed message.im events into per-thread chat sessions.
+const slackSupervisor = createSlackBridgeSupervisor(config);
+let slackStopped = false;
+const slackDone: Promise<void> = (async function slackReconcileLoop(): Promise<void> {
+  while (!slackStopped) {
+    try {
+      slackSupervisor.reconcile();
+    } catch (error) {
+      appendLog(config.instance, "messaging.slack.supervisor_error", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+    if (slackStopped) break;
+    await sleepUnlessStopping(MESSAGING_RECONCILE_INTERVAL_MS);
+  }
+})();
+
 // Skill-learning daily review loop (ADR skill-learning-from-outcomes.md).
 // Modeled on the connector-reprobe loop: a slow, abortable loop that runs the
 // offline review pass (reflect over recent outcomes, propose bounded skill
@@ -604,6 +604,7 @@ async function shutdown(signal: "SIGTERM" | "SIGINT"): Promise<void> {
   setupSweepStopped = true;
   telegramStopped = true;
   discordStopped = true;
+  slackStopped = true;
   skillReviewStopped = true;
   // Wake every loop out of its inter-tick sleep so it checks the flag and
   // unwinds now instead of sleeping out its full interval.
@@ -618,6 +619,9 @@ async function shutdown(signal: "SIGTERM" | "SIGINT"): Promise<void> {
   // .catch below swallows the abort rejection — it's expected.
   void telegramSupervisor.stopAll().catch(() => {});
   void discordSupervisor.stopAll().catch(() => {});
+  // Abort the Slack loops too so their Socket Mode connections close
+  // instead of holding the process open.
+  void slackSupervisor.stopAll().catch(() => {});
   // Drain in-flight HTTP responses BEFORE we start tearing the process
   // down. `server.stop(false)` only resolves once every connection has
   // closed, but idle keep-alive connections linger up to idleTimeout
@@ -661,6 +665,8 @@ async function shutdown(signal: "SIGTERM" | "SIGINT"): Promise<void> {
       telegramSupervisor.stopAll().catch(() => {}),
       discordDone.catch(() => {}),
       discordSupervisor.stopAll().catch(() => {}),
+      slackDone.catch(() => {}),
+      slackSupervisor.stopAll().catch(() => {}),
       // Close any live headless browser contexts so Chromium child
       // processes exit cleanly with the runtime instead of being reaped
       // by the OS at the very end. Errors are swallowed — a stuck

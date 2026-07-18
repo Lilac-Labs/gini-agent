@@ -51,7 +51,7 @@ cloudflared --config /dev/null tunnel --url http://127.0.0.1:<gateway-port>
 
 `--config /dev/null` is deliberate in **both** modes: when cloudflared loads ingress rules, it ignores the `--url` origin override (the named run would route your hostname at the config's own service instead of the gateway), and a present `config.yml` silently breaks quick tunnels (they register but the edge serves 404s). Your `config.yml` is never modified — while Gini's tunnel is connected, the hostname serves Gini; after disconnect, your own `cloudflared` runs serve it again as before.
 
-Either way the agent runs as a supervised child; the published URL's origin is trusted automatically for exactly as long as the tunnel is connected. A trusted front is **owner-equivalent** — any browser reaching the URL gets the same access as loopback, with no per-device pairing gate (see ADR [owner-token-auth.md](../adr/owner-token-auth.md)) — so share the URL only with devices you fully trust, or use the hosted edge for multi-user access.
+Either way the agent runs as a supervised child; the published URL's origin is trusted automatically for exactly as long as the tunnel is connected. A trusted front is **owner-equivalent** — any browser reaching the URL gets the same access as loopback, with no per-device pairing gate (see ADR [owner-token-auth.md](../adr/owner-token-auth.md)) — so share the URL only with devices you fully trust or put an authentication proxy in front of it.
 
 ## Confirm it's live
 

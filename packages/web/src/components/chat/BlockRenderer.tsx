@@ -6,7 +6,9 @@ import { BlockPhase } from "./BlockPhase";
 import { BlockSystemNote } from "./BlockSystemNote";
 import { BlockToolCall } from "./BlockToolCall";
 import { BlockUserText } from "./BlockUserText";
+import { RoutineCreatedCard } from "./RoutineCreatedCard";
 import { TopicForwardChip } from "./TopicForwardChip";
+import { rendersAsRoutineCard } from "@/lib/group-exchanges";
 import { assertNever } from "@/lib/utils";
 
 // Dispatcher for the typed ChatBlock union. The switch is exhaustive on
@@ -51,7 +53,14 @@ export function BlockRenderer({
         <BlockAssistantText block={block} agent={agent} />
       );
     case "tool_call":
-      return <BlockToolCall block={block} result={toolResult} />;
+      // A successful create_job renders as the standalone routine card (the
+      // grouping in lib/group-exchanges.ts already keeps it out of the
+      // collapsed tool group); every other call keeps the generic tool row.
+      return rendersAsRoutineCard(block) ? (
+        <RoutineCreatedCard block={block} />
+      ) : (
+        <BlockToolCall block={block} result={toolResult} />
+      );
     case "tool_result":
       return null;
     case "phase":

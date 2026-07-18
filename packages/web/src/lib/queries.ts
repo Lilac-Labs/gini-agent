@@ -9,6 +9,7 @@ import type {
   ConnectorRecord,
   EmailWatcherRecord,
   GoogleAccountStatus,
+  HomeDoneItem,
   HomeTaskItem,
   ImprovementProposal,
   JobRecord,
@@ -240,6 +241,26 @@ export function useJobRuns(jobId?: string) {
   });
 }
 
+// One row of GET /api/jobs/<id>/tools — the effective tool catalog the job's
+// runs dispatch with (listJobTools in packages/runtime/src/capabilities/
+// toolsets.ts). Labels and toolset-then-label ordering are server-owned; the
+// browser renders rows verbatim.
+export interface JobToolView {
+  name: string;
+  label: string;
+  toolset: string;
+  summary: string;
+}
+
+export function useJobTools(jobId?: string) {
+  return useQuery<{ tools: JobToolView[] }>({
+    queryKey: ["jobTools", jobId ?? null],
+    queryFn: () => api<{ tools: JobToolView[] }>(`/jobs/${jobId}/tools`),
+    refetchInterval: 60_000,
+    enabled: Boolean(jobId)
+  });
+}
+
 // Email watchers backing the fan-out concern UI. The list is read-only here;
 // edits go through the mutations below, never job.routes (the routes are
 // recomputed server-side from the watchers, so jobs is invalidated too).
@@ -294,11 +315,10 @@ export interface ProviderDescriptor {
   secrets?: { purposes: string[]; envBindings: Record<string, string> };
   hasProbe: boolean;
   hasDetect: boolean;
-  // Live result of the provider's credentialExternallySatisfied hook. For the
-  // hosted Google Workspace credential this is the boot-registered account
-  // (readGoogleAccounts non-empty) — the guest ships with its credential baked
-  // in, so no connector record is ever created and this bit is what keeps the
-  // Workspace skills active. deriveActivation mirrors the runtime gate with it:
+  // Live result of the provider's credentialExternallySatisfied hook. For
+  // Google Workspace this is an instance-bound account, so no connector record
+  // is required and this bit keeps the Workspace skills active.
+  // deriveActivation mirrors the runtime gate with it:
   // the fallthrough applies only when NO connector record with the credential
   // name exists — an existing record of any status (including disabled) keeps
   // the record-based gate.
@@ -328,8 +348,8 @@ export function useProviders() {
     queryKey: ["connector-providers"],
     queryFn: () => api<ProviderDescriptor[]>("/connectors/providers"),
     // The registry itself is built at runtime startup, but the payload also
-    // carries the live `externallySatisfied` bit (machine-global account
-    // registry), so poll at the same 60s cadence the connectors query idles
+    // carries the live `externallySatisfied` bit (instance-bound account), so
+    // poll at the same 60s cadence the connectors query idles
     // at. staleTime alone never refetches an idle page — without the
     // interval, accounts added/removed out-of-band (e.g. from a chat-driven
     // OAuth flow) would leave the activation pills stale indefinitely.
@@ -338,7 +358,7 @@ export function useProviders() {
   });
 }
 
-// Machine-global tagged Google accounts (GET /api/google/accounts), each
+// This instance's tagged Google accounts (GET /api/google/accounts), each
 // joined with live `gws auth status`. Exists independently of any
 // google-oauth-desktop connector record, so the Skills page can render the
 // accounts card on a registry-only machine. The GoogleAccountsCard
@@ -352,47 +372,15 @@ export function useGoogleAccounts(options?: Partial<UseQueryOptions<GoogleAccoun
   });
 }
 
-// Which add-a-Google-account flow this deployment supports (GET
-// /api/google/auth-mode): hosted guests are headless, so account adds go
-// through the edge's same-tab web OAuth ("edge"); everywhere else the
-// chat-driven gws loopback flow works ("loopback"). Fixed per deployment, so
-// the answer never goes stale.
-export function useGoogleAuthMode() {
-  return useQuery<{ mode: "edge" | "loopback" }>({
-    queryKey: ["google-auth-mode"],
-    queryFn: () => api<{ mode: "edge" | "loopback" }>("/google/auth-mode"),
-    staleTime: Infinity
-  });
-}
-
-// The deployment's setup status (GET /api/setup/status), the probe behind two
-// capability decisions:
-//   - `managed`: true when the runtime carries the hosted marker
-//     GINI_HOSTED=1. The platform provisions the model provider, updates, and
-//     ingress, so the web hides its self-serve surfaces when managed: the
-//     tunnel menu, the self-update row, the provider settings sections,
-//     /setup, and /settings/add-provider. See ADR managed-deployment-mode.md.
-//   - `providerConfigured`: whether turns can actually dispatch (a real
-//     provider is configured, directly or via fallback). The onboarding
-//     wizard derives its provider step from it (shown only when unmanaged AND
-//     unconfigured — ADR web-onboarding-flow.md) and gates the Gmail scan on
-//     it (the scan's synthesis needs the model).
-// Consumers treat a missing answer as unmanaged/configured, so a self-hosted
-// deployment renders identically even before (or without) a response. `managed`
-// is fixed per deployment and `providerConfigured` only changes through the
-// wizard's own save (which invalidates this key), so Infinity staleness holds.
+// The deployment's setup status (GET /api/setup/status). The onboarding
+// wizard uses providerConfigured to decide whether it needs a provider step
+// and whether its Gmail scan can synthesize a profile.
 export function useSetupStatus() {
-  return useQuery<{ managed: boolean; providerConfigured: boolean }>({
+  return useQuery<{ providerConfigured: boolean }>({
     queryKey: ["setup-status"],
-    queryFn: () => api<{ managed: boolean; providerConfigured: boolean }>("/setup/status"),
+    queryFn: () => api<{ providerConfigured: boolean }>("/setup/status"),
     staleTime: Infinity
   });
-}
-
-// The managed-mode view of the setup-status probe, kept for the surfaces that
-// only gate on `managed` (sidebar footer, provider settings, add-provider).
-export function useManagedMode() {
-  return useSetupStatus();
 }
 
 // First-run onboarding record (GET /api/onboarding). The deterministic profile
@@ -464,6 +452,119 @@ export function useApplyOnboardingRoutines() {
       }),
     onSuccess: ({ record }) => {
       qc.setQueryData(["onboarding"], record);
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+    }
+  });
+}
+
+// Routine-template gallery wire shapes — mirror RoutineTemplateView in
+// packages/runtime/src/runtime/routine-templates.ts (prompts/crons are
+// composed server-side; the browser only sends settings state).
+export interface RoutineLabelRule {
+  name: string;
+  // UI-only swatch hex — never pushed to Gmail label colors.
+  color: string;
+  rule: string;
+  autoArchive: boolean;
+  // Seed provenance: "existing" = discovered from the user's mailbox,
+  // "suggested" = the standard catalog; absent = hand-added or
+  // pre-provenance. Rendered as a read-only badge on the label card.
+  origin?: "existing" | "suggested";
+}
+
+// One editable field in a settings section, discriminated on `kind`.
+// `text` fields carry multiline textarea semantics.
+export type RoutineSettingField =
+  | { kind: "toggle"; key: string; label: string; description?: string; defaultValue: boolean }
+  | { kind: "text"; key: string; label: string; description?: string; placeholder?: string; defaultValue: string }
+  | { kind: "labelList"; key: string; label: string; description?: string; defaultValue: RoutineLabelRule[] };
+
+// A per-function settings group ("Label new mail"), one collapsible card on
+// the detail page. Field keys are flat across sections.
+export interface RoutineSettingsSection {
+  key: string;
+  title: string;
+  fields: RoutineSettingField[];
+}
+
+export type RoutineSettings = Record<string, boolean | string | RoutineLabelRule[]>;
+
+// One connected account's row in a per-account template's installed state.
+// Exactly the effective primary account carries `primary`, so the settings
+// tab's account switcher can default to it.
+export interface RoutineAccountSettingsView {
+  accountId: string;
+  email: string;
+  primary?: boolean;
+  settings: RoutineSettings;
+}
+
+export interface RoutineTemplateView {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  scheduleHint: string;
+  settings: RoutineSettingsSection[];
+  // `settings` is the resolved settings state the job was installed with
+  // (server-normalized, defaults filled — including legacy installs) —
+  // absent on templates without settings and on jobs predating provenance.
+  // Per-account templates (Auto-inbox) carry `accountSettings` instead —
+  // one server-joined row per registered Google account — falling back to
+  // the flat `settings` only when no account is registered.
+  // `chatSessionId` is the routine's dedicated conversation (absent only on
+  // jobs predating session provisioning) — the Open messages deep link.
+  installed: {
+    jobId: string;
+    status: JobRecord["status"];
+    settings?: RoutineSettings;
+    accountSettings?: RoutineAccountSettingsView[];
+    chatSessionId?: string;
+  } | null;
+}
+
+// GET /api/routines/templates — the catalog joined with installed state,
+// scoped to the active agent like useJobs.
+export function useRoutineTemplates() {
+  const agentId = useActiveAgentId();
+  return useQuery<{ templates: RoutineTemplateView[] }>({
+    queryKey: ["routine-templates", agentId ?? null],
+    queryFn: () => api<{ templates: RoutineTemplateView[] }>(scopedPath("/routines/templates", agentId)),
+    refetchInterval: 60_000,
+    enabled: Boolean(agentId)
+  });
+}
+
+// POST /api/routines/templates/<id>/install — idempotent per-template
+// replace server-side; returns the created JobRecord. For per-account
+// templates `settings` is the full email-keyed map (the server tells the
+// two shapes apart by the "@" in the keys).
+export function useInstallRoutineTemplate() {
+  const qc = useQueryClient();
+  return useMutation<
+    JobRecord,
+    Error,
+    { id: string; timezone?: string; settings?: RoutineSettings | Record<string, RoutineSettings> }
+  >({
+    mutationFn: ({ id, ...body }) =>
+      api<JobRecord>(`/routines/templates/${encodeURIComponent(id)}/install`, {
+        method: "POST",
+        body: JSON.stringify(body)
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["routine-templates"] });
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+    }
+  });
+}
+
+export function useUninstallRoutineTemplate() {
+  const qc = useQueryClient();
+  return useMutation<{ removed: string[] }, Error, string>({
+    mutationFn: (id: string) =>
+      api<{ removed: string[] }>(`/routines/templates/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["routine-templates"] });
       qc.invalidateQueries({ queryKey: ["jobs"] });
     }
   });
@@ -845,6 +946,7 @@ export function useChatBlocks(
 export interface HomeView {
   owner?: { firstName?: string };
   tasks: HomeTaskItem[];
+  done: HomeDoneItem[];
   recents: RecentItem[];
 }
 
@@ -864,7 +966,9 @@ export function useHome() {
 
 // Direct container start (POST /api/containers) — both home composer modes.
 // `startedAs` records the creation gesture ("task" stays a home work item;
-// "message" lists the conversation in the sidebar Messages section).
+// "message" lists the conversation in Home's Chats section).
+// An optional product-authored title lets flows such as suggested-routine
+// setup keep the Home row compact while sending a fuller first-turn brief.
 // Optimistically prepends a working row so the list responds instantly; on
 // success the optimistic id is swapped for the real container id so the row's
 // deep link works before the refetch lands. Error toasts live at call sites.
@@ -875,21 +979,22 @@ export function useStartTask() {
   return useMutation<
     { containerId: string; taskId: string; status: string },
     Error,
-    { content: string; images?: UploadRef[]; startedAs?: "task" | "message" },
+    { content: string; title?: string; images?: UploadRef[]; startedAs?: "task" | "message" },
     { previous?: HomeView; optimisticId: string }
   >({
-    mutationFn: ({ content, images, startedAs }) =>
+    mutationFn: ({ content, title, images, startedAs }) =>
       api<{ containerId: string; taskId: string; status: string }>("/containers", {
         method: "POST",
         body: JSON.stringify({
           content,
           client: "web",
           ...(agentId ? { agentId } : {}),
+          ...(title ? { title } : {}),
           ...(images && images.length > 0 ? { images } : {}),
           ...(startedAs ? { startedAs } : {})
         })
       }),
-    onMutate: async ({ content }) => {
+    onMutate: async ({ content, title }) => {
       await qc.cancelQueries({ queryKey: homeKey });
       const previous = qc.getQueryData<HomeView>(homeKey);
       const optimisticId = `optimistic-${crypto.randomUUID()}`;
@@ -898,14 +1003,14 @@ export function useStartTask() {
         // An attachment-only send has empty content; the server titles the
         // minted container "Untitled chat" (createChatSession fallback), so
         // the optimistic row matches what the refetch will serve.
-        title: content || "Untitled chat",
+        title: title || content || "Untitled chat",
         attention: "working",
         acknowledged: false,
         startedBy: "user",
         updatedAt: new Date().toISOString()
       };
       qc.setQueryData<HomeView>(homeKey, (prev) =>
-        prev ? { ...prev, tasks: [row, ...prev.tasks] } : { tasks: [row], recents: [] }
+        prev ? { ...prev, tasks: [row, ...prev.tasks] } : { tasks: [row], done: [], recents: [] }
       );
       return { previous, optimisticId };
     },

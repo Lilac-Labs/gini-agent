@@ -2,11 +2,10 @@
 
 // Sign-in step "Skip for now" (ADR web-onboarding-flow.md): the quiet skip —
 // the path that lets a user without a Google account reach the app — renders
-// exactly when the page provides `onSkip` (self-hosted; the page withholds it
-// when managed, so the managed funnel is unchanged), fires on click, and
+// exactly when the page provides `onSkip`, fires on click, and
 // locks while the completion PATCH is pending. fetch is stubbed to hang: the
-// account registry and auth mode stay unresolved, which is exactly the
-// fresh-instance state the skip must remain usable in.
+// account registry stays unresolved, which is exactly the fresh-instance
+// state the skip must remain usable in.
 //
 // LEAK SAFETY: mock.module is process-wide in `bun test`, so the next/image
 // mock is captured and restored in afterAll.
@@ -43,12 +42,25 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-async function renderStep(opts: { onSkip?: () => void; skipPending?: boolean } = {}) {
+async function renderStep(
+  opts: {
+    onSkip?: () => void;
+    skipPending?: boolean;
+    oauthConfigured?: boolean;
+    onSetupOAuth?: () => void;
+  } = {}
+) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   await act(async () => {
     rtlRender(
       <QueryClientProvider client={client}>
-        <StepSignIn onContinue={() => {}} onSkip={opts.onSkip} skipPending={opts.skipPending} />
+        <StepSignIn
+          onContinue={() => {}}
+          onSkip={opts.onSkip}
+          skipPending={opts.skipPending}
+          oauthConfigured={opts.oauthConfigured ?? true}
+          onSetupOAuth={opts.onSetupOAuth ?? (() => {})}
+        />
       </QueryClientProvider>
     );
   });
@@ -63,7 +75,7 @@ describe("StepSignIn skip path", () => {
     expect(onSkip).toHaveBeenCalledTimes(1);
   });
 
-  test("no skip without onSkip — the managed funnel is unchanged", async () => {
+  test("no skip without onSkip", async () => {
     await renderStep();
     expect(screen.queryByRole("button", { name: /skip for now/i })).toBeNull();
     // The step still renders its sign-in surface.
@@ -75,5 +87,12 @@ describe("StepSignIn skip path", () => {
     await renderStep({ onSkip, skipPending: true });
     const skip = screen.getByRole("button", { name: /skip for now/i }) as HTMLButtonElement;
     expect(skip.disabled).toBe(true);
+  });
+
+  test("an unconfigured runtime opens local OAuth setup instead of starting Google login", async () => {
+    const onSetupOAuth = mock(() => {});
+    await renderStep({ oauthConfigured: false, onSetupOAuth });
+    fireEvent.click(screen.getByRole("button", { name: /set up google oauth/i }));
+    expect(onSetupOAuth).toHaveBeenCalledTimes(1);
   });
 });

@@ -8,7 +8,7 @@ Gini's external-system integration surface uses the following vocabulary and con
 - **Provider** — the discriminator inside a connector (renamed from `kind`). Identifies which integration code handles this connector — `linear`, `demo`, `claude-code`, `codex`, `generic`, `brave-search`, `exa`, etc. Connectors back three consumers: skill env-bindings, auto-registered MCP servers, and built-in tools (the `web_search` tool resolves a search provider's key directly — see ADR web-search-connectors.md).
 - **Skill** — the package, as defined by the Anthropic Agent Skills specification. A folder containing `SKILL.md` plus optional `scripts/`, `references/`, `assets/`.
 
-A skill is active iff every connector it declares as required exists and is healthy. Activation is automatic, deactivation is automatic.
+A skill is active iff every credential it declares as required is satisfied by a **usable** connector — `connectorIsUsable` (exported from `packages/runtime/src/integrations/connectors/index.ts`): status `configured` and health `healthy`, or health `unknown` when the provider declares no probe. Activation is automatic, deactivation is automatic.
 
 SKILL.md files conform to the Anthropic spec. Gini-specific extensions (provider requirements, prerequisites, version, author, platforms) live under `metadata.gini.*` so skills are portable to Claude Code, OpenClaw, Hermes, and other spec-conforming agent runtimes.
 
@@ -88,12 +88,32 @@ The cost of fixing all three is small (mechanical renames + frontmatter migratio
 ### Probe contract
 
 - The probe function on a `ProviderModule` is **optional**. Providers without a probe (generic, presence-only providers without a remote system to query) keep `health: "unknown"` or `health: "healthy"` based on a configured static default.
+- Probes run **synchronously on secret mutation**: `createConnector` and `updateConnector` probe (when the provider declares one) before returning, so health is settled — not `unknown` — by the time the mutation response lands. Because this lives at the module level, it covers every mutation surface: HTTP `POST`/`PATCH /api/connectors*`, CLI add/rotate, and the agent's `rotate_connector` tool.
+- Probes run **opportunistically on read**: `GET /api/connectors` re-probes, in the background with in-flight dedup, any probe-declaring record whose `lastHealthAt` is older than a staleness threshold (default 5 minutes; `GINI_CONNECTOR_STALE_MS` override) — bounding how stale a rendered connectors list can be.
 - A scheduled background job re-probes every connector whose provider declares a probe, with a configurable per-provider interval (default 30 minutes). Probes that time out (>10s) fail closed. Probes that succeed flip health to `healthy`; failures flip to `unhealthy` with the surfaced message.
 - The activation gate treats `health === "unknown"` as active if the provider has no probe (the connector exists, no failing signal). Treats `health === "unknown"` as inactive if the provider *does* have a probe but hasn't run yet — to avoid surfacing skills before their first probe.
+
+### Usability as the client contract
+
+- `connectorIsUsable(record)` — exported from `packages/runtime/src/integrations/connectors/index.ts` — is the single source of truth for "can the agent use this connector": status `configured` AND (health `healthy`, or health `unknown` when the provider declares no probe).
+- `GET /api/connectors` carries a computed, **non-persisted** `usable` boolean per record. For `google-oauth-desktop` rows it additionally requires at least one signed-in account attached to this instance (sign-in liveness folded in at read time — see "Health vs. session liveness").
+- Clients read the bit instead of re-deriving the predicate: the Integrations page tiles (three states — connected / needs-attention / available), the Skills page activation display, MCP server sync (`mcp-sync.ts`), and the `web_search` dispatch gate all share the same definition of usable.
+
+### Provider auth failure feedback
+
+- A runtime model-call auth failure (`ProviderAuthError`) on a provider that is also a connector (codex, claude-code) marks that provider's configured connectors unhealthy via `markConnectorUnhealthyForProvider`, emitting a `connector.health.transition` audit on the transition; clearing the recorded auth failure triggers a best-effort re-probe (`reprobeConnectorsForProvider`).
+- This feeds live failures into connector state faster than the reprobe cadence and catches server-side revocation that the local presence probes cannot observe.
+
+### Canonical record naming
+
+- Skill activation matches credentials **by name** (`isSkillActive` against `requiredCredentials`), so connector records are named by `canonicalCredentialName(providerId)` — the provider's explicit `credentialName`, else its single env-var binding. `codex` and `claude-code` declare `credentialName` equal to their provider id.
+- Auto-detection names new records via `canonicalCredentialName`, and the marker-gated `connectorsCanonicalNames` migration in `packages/runtime/src/state/store.ts` renames pre-existing records whose provider's canonical name differs from the stored name (on collision the existing claimer keeps the canonical name and the renamed record takes the first free `<name>_N`, audited).
 
 ### Health vs. session liveness
 
 Connector `health` answers "are the credentials provisioned and usable," not "is the user's session currently live." The two diverge when a provider holds a long-lived credential *and* a separately-expiring session — e.g. `google-oauth-desktop` stores the OAuth *client* id/secret (presence-only, never expire) while `gws auth login` mints a *user* token that does expire. Such session liveness is a **derived, non-persisted** signal computed on read (see `gwsSessionStatus`, parsed from `gws auth status`), surfaced on the connector payload as a transient `session` field and to the model via `list_connectors`. It is deliberately **not** folded into `health` and **not** a probe: the connector.request `/complete` path drops any connector that isn't `healthy` at creation (see [Chat Credential Provisioning](chat-credential-provisioning.md)), and a session signal reads "signed out" before the first `gws auth login` runs — so gating `health` on it would delete the connector the instant its client creds are saved. Probes validate provisioning; liveness is queried lazily and cached.
+
+Two read-time surfaces fold liveness in without touching `health`: the transient `usable` bit on `GET /api/connectors` requires at least one signed-in account attached to this instance for `google-oauth-desktop` rows, and the `list_connectors` tool returns a top-level `googleAccounts` array (tag, email, `signedIn`, `tokenRevoked`, primary, message) built from the same instance binding — present whenever that binding is non-empty, whether or not a google connector record exists. The system-prompt Google accounts block asserts **registration only** for those attached rows: it carries no sign-in state and instructs the model to check `list_connectors` before asserting any account's sign-in status.
 
 ### Skill installation flow
 

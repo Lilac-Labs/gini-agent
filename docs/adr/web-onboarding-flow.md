@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-02
-- **See also:** [Multiple Tagged Google Accounts](./google-multi-account.md), [Chat Topics, Tasks, Subagents](./chat-topics-tasks-subagents.md), [Job Skill Attachments](./job-skill-attachments.md), [Managed Deployment Mode](./managed-deployment-mode.md)
+- **See also:** [Multiple Tagged Google Accounts](./google-multi-account.md), [Chat Topics, Tasks, Subagents](./chat-topics-tasks-subagents.md), [Job Skill Attachments](./job-skill-attachments.md), [Routine-Template Catalog And Gallery](./routine-templates-gallery.md)
 
 ## Decision
 
@@ -14,9 +14,8 @@ renderer over the `/api/onboarding` contract — it never composes prompts or
 cron expressions.
 
 The funnel opens with **prerequisite steps** ahead of the five dotted wizard
-steps (which are the same for every deployment): always a **sign-in step**,
-and — on a self-hosted deployment with no model provider configured — a
-**capability-derived provider step** (see "Capability-derived steps and the
+steps: always a **sign-in step**, and — when no model provider is configured —
+a **capability-derived provider step** (see "Capability-derived steps and the
 skip paths" below). Prerequisite steps carry no progress dots. Google access
 is the app's top-level prerequisite, so an incomplete funnel always shows
 sign-in first. The step adapts to the account registry
@@ -42,44 +41,24 @@ instance whose provider is missing (the proxy's setup gate still bounces that
 state there; an incomplete funnel instead passes through the proxy and gets
 the wizard's own provider step — see below).
 
-## Auth-mode switch and step re-entry
+## Google connection and step re-entry
 
-How "connect a Google account" works depends on the deployment, so the
-sign-in step's connect buttons and the accounts step's "Add account" switch
-on `GET /api/google/auth-mode` (ADR google-multi-account.md). Both modes are
-the same **same-tab OAuth round trip** — the tab leaves for Google's consent
-screen and returns to `returnTo`, with `?googleAddError=1` appended on
-failure (toasted once at the /onboarding page level):
+Google connection is a **same-tab loopback OAuth round trip**. The browser
+navigates to `/api/runtime/google/login/start?returnTo=…&origin=…`; the BFF
+injects the gateway bearer and the runtime runs a Desktop-client PKCE flow.
+Its redirect URI is the web app's loopback origin
+(`<origin>/api/runtime/google/login/callback`), so Google sends the tab back
+into the app. The callback exchanges the code, writes the gws credential, and
+registers the account idempotently by Google subject before redirecting to
+`returnTo`.
 
-- **`loopback`** (local/desktop): the browser navigates to
-  `/api/runtime/google/login/start?returnTo=…&origin=…` — the BFF injects the
-  gateway bearer and the gateway runs a Desktop-client PKCE
-  authorization-code flow whose redirect URI is the web app's own loopback
-  origin (`<origin>/api/runtime/google/login/callback`), so Google sends the
-  tab straight back into the app; the gateway's callback exchanges the code,
-  writes the gws credential, and registers the account (idempotent by Google
-  sub) before 302ing to `returnTo`. The gateway only ever sees the BFF's
-  loopback hop, so the page passes its own origin along; a non-loopback
-  origin gets a clear 400 (Google Desktop clients can only redirect to
-  localhost/127.0.0.1, so LAN access can't complete this flow). See ADR
-  google-multi-account.md ("Web login" under the login path).
-- **`edge`** (hosted): the guest is headless, so the browser navigates
-  same-tab to the edge's `/auth/google/add?returnTo=…` — a web-application
-  OAuth round trip whose code exchange and provisioning
-  (`POST /api/google/accounts/provision`) happen server-side on the edge.
-  The reconnect-revoked-primary relogin uses this SAME add flow with
-  `intent=signin` — not the owner sign-in flow `/auth/google`, which heals
-  only the baked credential dir and could never heal a primary that was
-  flipped to another account. The add flow identity-matches whichever account
-  the user re-authorizes, and when that account is the session owner's own
-  (matched by Google sub), the edge upgrades the provision to a baked-dir
-  heal server-side — see ADR google-multi-account.md.
+The runtime only sees the BFF's loopback hop, so the page passes its own origin
+along. A non-loopback origin gets a clear 400 because Google Desktop clients
+redirect to localhost/127.0.0.1. See ADR google-multi-account.md.
 
 `returnTo` is `/onboarding?step=accounts` from the accounts step and plain
 `/onboarding` from the sign-in step (the fresh account should surface as
-"Continue as …", not skip the funnel). While the auth mode is still loading,
-the buttons stay disabled so a click can never fall through to the wrong
-flow.
+"Continue as …", not skip the funnel).
 
 The same-tab round trip means the wizard fully remounts on return, so
 `/onboarding?step=…` names the step to resume: a pure param→step mapping
@@ -102,17 +81,16 @@ is also how the page renders them dotless — the five product dots are stable
 for every deployment.
 
 - **Provider step** (`StepProvider`): shown only when `GET /api/setup/status`
-  answers a definite "self-hosted and no provider configured"
-  (`needsProviderStep`: `managed: false` AND `providerConfigured: false`; an
-  unresolved or failed probe never blocks the funnel on a guess). It renders
+  answers a definite "no provider configured" (`needsProviderStep` checks
+  `providerConfigured: false`; an unresolved or failed probe never blocks the
+  funnel on a guess). It renders
   the shared `ProviderPicker` — the exact surface `/setup` renders — inside
   the wizard frame, so the catalog, per-provider config forms, and
   `POST /api/setup/provider` are all inherited. It sits between sign-in and
   the wizard proper because the Gmail profile scan needs the model. A save
   advances, invalidates the cached probe, and kicks the scan; "Skip for now"
   (rendered by the step itself, so it survives a loading or failed catalog)
-  advances without one. Managed deployments never see the step — the platform
-  provisions the provider (ADR managed-deployment-mode.md).
+  advances without one.
 - **Scan gating:** the same `needsProviderStep` predicate gates the scan
   kickoff — the scan's synthesis calls need the model, so without a provider
   it could only fail. When the provider step is shown, sign-in's continue
@@ -124,14 +102,12 @@ for every deployment.
   completes onboarding minimally — `PATCH /api/onboarding` with
   `completed: true` plus the browser-resolved timezone (theme keeps the app
   default) — so a user without a Google account still reaches the app and can
-  connect one later via settings or skills. The page withholds the skip when
-  managed (the edge's Google sign-in IS the session, so the managed funnel is
-  unchanged). Skipping sign-in skips the whole funnel, provider step
-  included; a provider-less instance then falls under the `/setup` bounce
-  below, the standing surface for that state.
+  connect one later via Integrations. Skipping sign-in skips the whole funnel,
+  provider step included; a provider-less instance then falls under the
+  `/setup` bounce below, the standing surface for that state.
 - **Proxy interplay** (`packages/web/src/proxy.ts`): the setup gate's
-  "unconfigured self-hosted → 307 `/setup`" bounce yields to an incomplete
-  funnel. When the status probe reports unconfigured+unmanaged, the proxy
+  "unconfigured → 307 `/setup`" bounce yields to an incomplete funnel. When
+  the status probe reports unconfigured, the proxy
   probes `GET /api/onboarding`; only an explicit `completed: false` passes
   the request through (OnboardingGate then routes it to `/onboarding`, whose
   provider step replaces the `/setup` detour). Completed, an unexpected
@@ -162,13 +138,15 @@ for every deployment.
   canonical zones browsers report, e.g. `Asia/Kolkata`); theme must be
   `"light" | "dark"`; `completed: true` stamps `completedAt` once. Violations
   throw `Invalid input: …` → 400.
+- `gini onboarding skip --instance <name>` is the explicit local-development
+  bypass for coding agents testing unrelated gated surfaces. It sends the same
+  authenticated `PATCH { completed: true }` to the selected running instance;
+  it does not introduce a second persistence path.
 - `POST /api/onboarding/scan` → `OnboardingRecord`. Starts the deterministic
   Gmail profile scan in the background and returns the `running` record
   immediately; idempotent while a scan is `running` or `ready`. With no
-  detectable Google access — empty account registry (ADR
-  google-multi-account.md), no `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` (the
-  hosted-provisioning credential), no default
-  `~/.config/gws` dir — the scan lands in `no_account` without running the
+  Google account attached to the instance (ADR google-multi-account.md), the
+  scan lands in `no_account` without running the
   pipeline. `idle`/`failed`/`no_account` (re)submit, so a retry after
   connecting an account just works.
 - `POST /api/onboarding/routines` body
@@ -207,27 +185,30 @@ model only where it authors prose:
    with the no-signed-in-session error. The exported credentials and minted
    token live in scan-local variables only — never logged, never persisted,
    never interpolated into events or error text (Gmail/token faults map to
-   short generic messages). A single message get failing drops just that
-   message; profile/list/token faults fail the scan. The account's gws config
-   dir is resolved from the Google-accounts registry (the persisted primary,
-   else first provisioned, else first row; `~/.config/gws` / the hosted baked
-   credential when there is no registered account), the same account the
-   scheduled google jobs target.
-2. **Synthesize** — TWO parallel `generateStructured` calls turn the fetched
-   bundle into `{ profile: { displayName, sections[] } }` and
-   `{ suggestedTasks[] }`; generation is output-token-bound, so splitting the
-   deliverables roughly halves synthesis wall clock. The content rules are
-   server-owned and carried verbatim, split by deliverable (person-centric
-   durable-fact sections in a fixed order, forbidden transactional content, and
-   the displayName legal-name form on the profile call; the suggestedTasks
-   shapes/ranking on the tasks call); both calls read the SAME rendered mailbox
-   (as untrusted quoted evidence — the tasks call needs who-wrote-last
-   evidence, the profile call needs sent mail for voice). Outputs are
-   shape-checked and clamped by `validateScanProfile` / `validateScanTasks`
-   before they land. The profile call is load-bearing: its failure fails the
-   scan. A failed tasks call degrades to a `ready` scan with no
-   `suggestedTasks` — the web's tasks step then falls back to its static
-   suggestions.
+   short generic messages). A failed thread read falls back to the prior
+   per-message best-effort path; profile/list/token faults fail the scan. The
+   account is the instance-bound persisted primary from the Google-accounts
+   registry — machine-global credentials alone are never scanned.
+2. **Synthesize** — THREE initially parallel `generateStructured` calls turn the fetched
+   bundle into `{ profile: { displayName, sections[] } }`,
+   `{ suggestedTasks[] }`, and
+   `{ suggestedRoutines: [{ name, description, usesEmail }] }`; generation is
+   output-token-bound, so splitting the deliverables keeps their work
+   concurrent. The content rules are server-owned and carried verbatim, split
+   by deliverable (person-centric durable-fact sections in a fixed order,
+   forbidden transactional content, and the displayName legal-name form on the
+   profile call; up to ten concrete one-off task titles on the tasks call,
+   each naming the deliverable, real person, organization when known, and
+   subject (generic selectors such as "the most important email" are forbidden);
+   evidence-backed recurring work on the routines call). All three calls read
+   the SAME rendered mailbox as untrusted quoted evidence. Outputs are
+   shape-checked and clamped by `validateScanProfile`, `validateScanTasks`, and
+   `validateScanRoutines` before they land. The profile and tasks calls are
+   load-bearing. A rejected tasks call gets one serial retry after the initial
+   batch settles, which covers transient provider-queue contention without
+   slowing the normal path; if that retry also fails, the scan lands `failed`
+   and remains retryable. The routines call is optional and a failure there
+   simply omits personalized routine suggestions.
 
 The runtime must own the model call regardless: skill scripts receive only
 Google OAuth connector secrets, never model API keys — so keeping the fetch in
@@ -245,7 +226,10 @@ profile step's "Try again" after a failure: `POST /api/onboarding/scan` resubmit
 and refusing entirely on a completed record. Should the scan still be running
 when the user reaches the tasks step, that step shows a hint and adopts the
 scan's suggestions when they arrive — unless the user has already edited the
-list, in which case their state wins.
+list, in which case their state wins. Only concrete inbox-derived suggestions
+become checked starter tasks. A terminal scan with no task suggestions renders
+an empty state where the user can add a task or skip; it never substitutes a
+generic task whose eventual target is hidden from the title.
 
 `POST /api/onboarding/scan` flips the record to `running` and returns
 immediately; the pipeline runs in the **background** (fire-and-forget) and,
@@ -274,6 +258,12 @@ provisioning are inherited, and the jobs are ordinary `active` records the
 user can edit or remove in /jobs afterwards. The new ids land back in
 `routineJobIds`.
 
+The specs themselves live in the shared routine-template catalog
+(`src/runtime/routine-templates.ts`) — `routineJobSpecs` maps the POST body's
+toggle state onto the catalog's `buildSpec` calls, and each created job is
+stamped with its `templateId`, so the /routines gallery reflects
+onboarding-created installs. See ADR routine-templates-gallery.md.
+
 | Routine | Cron (record tz) | Skills | Delivery |
 | --- | --- | --- | --- |
 | Auto-inbox | `*/30 * * * *` | `google-gmail` (+ `google-calendar` when scheduling assist is on) | own Topic |
@@ -297,4 +287,5 @@ chat-topics-tasks-subagents.md).
   task-containers-and-runs.md).
 - The scan's quality is bounded by the model + the mailbox evidence; the
   contract only guarantees the transport (deterministic Gmail HTTP fetch in,
-  two parallel structured synthesis calls, shape-checked + clamped out).
+  an initially parallel structured synthesis batch with one serial task retry,
+  shape-checked + clamped out).

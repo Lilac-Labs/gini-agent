@@ -20,6 +20,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { EmptyState } from "@/components/PageHeader";
 import { StatusPill } from "@/components/StatusPill";
+import { SlackConnectDialog } from "@/components/SlackConnectDialog";
 import { api } from "@/lib/api";
 import { useInvalidate } from "@/lib/queries";
 import type { ChatAllowlistView } from "@runtime/integrations/messaging";
@@ -27,6 +28,8 @@ import type { MessagingBridgeRecord } from "@runtime/types";
 
 export interface MessagingRow { id: string; name: string; status: string; kind: string }
 
+// Telegram / Discord share the multi-kind create dialog below; Slack has its own
+// focused SlackConnectDialog (two credentials, no delivery targets).
 type AddBridgeKind = "telegram" | "discord";
 
 export function MessagingCard({
@@ -55,7 +58,7 @@ export function MessagingCard({
       </CardHeader>
       <CardContent>
         {bridges.length === 0 ? (
-          <EmptyState title="No bridges — add a Telegram or Discord bot above to get started." />
+          <EmptyState title="No bridges — add a Telegram, Discord, or Slack bot above to get started." />
         ) : (
           <ul className="divide-y divide-border">
             {bridges.map((item) => (
@@ -231,6 +234,10 @@ function TelegramPendingRequests({ bridgeId }: { bridgeId: string }) {
 function AddMessagingBridgeButtons() {
   const invalidate = useInvalidate();
   const [open, setOpen] = useState(false);
+  // The BYO Socket-Mode Slack create flow lives in the shared SlackConnectDialog
+  // (its own open state) — the multi-kind dialog below only handles
+  // Telegram / Discord.
+  const [slackOpen, setSlackOpen] = useState(false);
   const [kind, setKind] = useState<AddBridgeKind>("telegram");
   const [name, setName] = useState("");
   const [botToken, setBotToken] = useState("");
@@ -328,7 +335,12 @@ function AddMessagingBridgeButtons() {
     submittingRef.current = true;
     const submittingSession = sessionRef.current;
     add.mutate(
-      { name: trimmedName, kind, botToken: trimmedToken, deliveryTargets: parsedTargets },
+      {
+        name: trimmedName,
+        kind,
+        botToken: trimmedToken,
+        deliveryTargets: parsedTargets
+      },
       {
         onSuccess: (record) => {
           if (sessionRef.current !== submittingSession) return;
@@ -366,7 +378,11 @@ function AddMessagingBridgeButtons() {
         <Button size="sm" variant="outline" onClick={() => openFor("discord")}>
           Add Discord
         </Button>
+        <Button size="sm" variant="outline" onClick={() => setSlackOpen(true)}>
+          Add Slack
+        </Button>
       </div>
+      <SlackConnectDialog open={slackOpen} onOpenChange={setSlackOpen} />
       <Dialog
         open={open}
         onOpenChange={(value) => {
@@ -414,7 +430,7 @@ function AddMessagingBridgeButtons() {
                     id="bridge-name"
                     value={name}
                     onChange={(event) => setName(event.target.value)}
-                    placeholder={kind === "telegram" ? "my-telegram-bot" : "my-discord-bot"}
+                    placeholder={`my-${kind}-bot`}
                     autoComplete="off"
                     autoFocus
                   />
@@ -547,6 +563,7 @@ function BridgeAddedSummary({
 function labelFor(kind: string): string {
   if (kind === "telegram") return "Telegram";
   if (kind === "discord") return "Discord";
+  if (kind === "slack") return "Slack";
   return kind;
 }
 

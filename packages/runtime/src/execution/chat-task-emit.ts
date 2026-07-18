@@ -45,6 +45,7 @@ import type {
   RuntimeConfig,
   SetupRequestAction,
   SystemNoteAuthError,
+  SystemNoteCta,
   Task,
   ToolCallStatus
 } from "../types";
@@ -168,16 +169,20 @@ export function emitPhase(
 // tool ran) — anything that's runtime-level rather than user- or
 // assistant-authored. Pass `authError` for a provider-credential failure
 // so the client can name the provider and offer a re-auth CTA (issue #205).
+// Pass `cta` for a generic inline navigation button (e.g.
+// request_google_account's "Reconnect Google account" → /integrations).
 export function emitSystemNote(
   ctx: ChatEmitContext | undefined,
   text: string,
-  authError?: SystemNoteAuthError
+  authError?: SystemNoteAuthError,
+  cta?: SystemNoteCta
 ): ChatBlock | undefined {
   if (!ctx) return undefined;
   const block = insertChatBlock(ctx.instance, {
     kind: "system_note",
     text,
     ...(authError ? { authError } : {}),
+    ...(cta ? { cta } : {}),
     ...bookkeepingFor(ctx)
   });
   mirrorInsert(ctx, (forward) => ({
@@ -185,6 +190,7 @@ export function emitSystemNote(
     sessionId: forward.sessionId,
     text,
     ...(authError ? { authError } : {}),
+    ...(cta ? { cta } : {}),
     taskId: ctx.taskId,
     runId: ctx.runId,
     agentId: ctx.agentId,
@@ -377,18 +383,24 @@ export function emitToolCallStatus(
     status: ToolCallStatus;
     errorMessage?: string;
     errorSeverity?: "info" | "error";
+    // Structured id of the job a successful create_job call created
+    // (DispatchResult.jobId) — stamped onto the block so the routine card
+    // never has to parse the truncated tool_result preview.
+    jobId?: string;
   }
 ): ChatBlock | undefined {
   if (!ctx) return undefined;
   const updated = updateToolCallBlock(ctx.instance, params.callId, ctx.sessionId, {
     status: params.status,
     errorMessage: params.errorMessage,
-    errorSeverity: params.errorSeverity
+    errorSeverity: params.errorSeverity,
+    jobId: params.jobId
   }, ctx.taskId);
   mirrorToolCallUpdate(ctx, params.callId, {
     status: params.status,
     errorMessage: params.errorMessage,
-    errorSeverity: params.errorSeverity
+    errorSeverity: params.errorSeverity,
+    jobId: params.jobId
   });
   return updated ?? undefined;
 }
@@ -516,6 +528,7 @@ function mirrorToolCallUpdate(
     errorMessage?: string;
     errorSeverity?: "info" | "error";
     runningHint?: string;
+    jobId?: string;
   }
 ): void {
   if (!ctx.forward) return;

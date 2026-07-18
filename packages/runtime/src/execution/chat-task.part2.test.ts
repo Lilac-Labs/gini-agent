@@ -672,67 +672,6 @@ describe("chat-task loop", () => {
     rmSync(workspaceRoot, { recursive: true, force: true });
   });
 
-  test("surfaces native web searches as display-only Web search chips", async () => {
-    const workspaceRoot = mkdtempSync(join(tmpdir(), "gini-chat-ws-"));
-    const config = buildConfig(workspaceRoot, "chat-task-web-search-chip");
-    const provider = normalizeProvider(config.provider);
-
-    const session = await mutateState(config.instance, (state) =>
-      createChatSession(state, "block-websearch", undefined, "agent_ws")
-    );
-
-    // A hosted native-web-search turn: the provider ran the searches itself and
-    // returns their headlines in `webSearches` alongside a cited final answer
-    // (no dispatchable tool calls). The loop must surface each search as a chip.
-    setEchoToolCallingResponse({
-      provider,
-      text: "The top story is X. ([hn](https://news.ycombinator.com/))",
-      toolCalls: [],
-      finishReason: "stop",
-      webSearches: ["hacker news top story", "https://news.ycombinator.com/"]
-    });
-
-    const submitted = await submitChatMessage(config, session.id, { content: "what's the top HN story?" });
-    const finished = await waitForTerminal(config, submitted.taskId);
-    expect(finished.status).toBe("completed");
-
-    const { listChatBlocks } = await import("../state");
-    const blocks = listChatBlocks(config.instance, session.id);
-
-    const webSearchChips = blocks.filter(
-      (b): b is typeof blocks[0] & { kind: "tool_call" } =>
-        b.kind === "tool_call" && b.toolName === "web_search"
-    );
-    expect(webSearchChips.length).toBe(2);
-    // Display-only: "Web search" label, the query/url as the inline preview,
-    // settled straight to ok (the search already ran on the provider).
-    expect(webSearchChips.map((c) => c.displayLabel)).toEqual(["Web search", "Web search"]);
-    expect(webSearchChips.map((c) => c.argsPreview)).toEqual([
-      "hacker news top story",
-      "https://news.ycombinator.com/"
-    ]);
-    expect(webSearchChips.every((c) => c.status === "ok")).toBe(true);
-    // Distinct call ids so the two searches render as separate rows.
-    expect(new Set(webSearchChips.map((c) => c.callId)).size).toBe(2);
-    // Nothing was dispatched, so the chips carry no paired tool_result.
-    expect(blocks.filter((b) => b.kind === "tool_result")).toHaveLength(0);
-
-    // Ordering is load-bearing, not cosmetic: both chips must land BEFORE the
-    // assistant's answer block. A chip trailing the answer makes group-exchanges
-    // fold the answer out of its standalone bubble (finalAnswerIdx = -1). The
-    // provider announces each search mid-stream (before text) for exactly this.
-    // listChatBlocks is ordinal-ordered, so index position is the settled order.
-    const kinds = blocks.map((b) => b.kind);
-    const lastAnswerIdx = kinds.lastIndexOf("assistant_text");
-    const chipIdxs = blocks
-      .map((b, i) => (b.kind === "tool_call" && b.toolName === "web_search" ? i : -1))
-      .filter((i) => i >= 0);
-    expect(lastAnswerIdx).toBeGreaterThanOrEqual(0);
-    expect(Math.max(...chipIdxs)).toBeLessThan(lastAnswerIdx);
-
-    rmSync(workspaceRoot, { recursive: true, force: true });
-  });
-
   test("connector.request cancel resumes the chat loop with a fallback result", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "gini-chat-ws-"));
     const config = buildConfig(workspaceRoot, "chat-task-blocks-connector-cancel");

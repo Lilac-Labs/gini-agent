@@ -6,11 +6,11 @@
 // EnableResult.rollbackState contract.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { enable } from "./autostart";
 import { defaultRuntimePort, defaultWebPort } from "../../paths";
-import type { LaunchctlResult, PlistKind } from "../autostart";
+import { plistPathFor, readPlistWorkingDirectory, type LaunchctlResult, type PlistKind } from "../autostart";
 
 function tag(): string {
   return `${process.pid}-${Math.floor(Math.random() * 1_000_000)}`;
@@ -353,5 +353,89 @@ const isDarwin = process.platform === "darwin";
     });
     expect(result.ok).toBe(true);
     expect(waitCalls).toBe(0);
+  });
+});
+
+// Home stickiness at the enable() level: the plists an enable writes must
+// preserve the home recorded in the existing gateway plist, and only an
+// explicit homeDir may move it. Only the launchctl shellouts are mocked;
+// the plist writes (and the preserved-home read) run against the scratch
+// HOME, so this pins the on-disk contract end to end.
+(isDarwin ? describe : describe.skip)("autostart enable (DI) — sticky home", () => {
+  let scratch: { stateRoot: string; logRoot: string; home: string };
+  let envHome: string | undefined;
+  const instance = `enable-home-${tag()}`;
+
+  // A usable gini-agent checkout: package.json with name "gini-agent" AND
+  // the runtime entry the gateway plist execs.
+  function makeUsableCheckout(root: string): string {
+    mkdirSync(join(root, "packages", "runtime", "src"), { recursive: true });
+    writeFileSync(join(root, "package.json"), '{"name":"gini-agent"}');
+    writeFileSync(join(root, "packages", "runtime", "src", "server.ts"), "// stub\n");
+    return root;
+  }
+
+  function launchctlOk() {
+    return {
+      isLoaded: () => false,
+      bootout: () => ok(),
+      bootstrap: () => ok(),
+      kickstart: () => ok(),
+      waitForPortFree: async () => true
+    };
+  }
+
+  beforeEach(() => {
+    scratch = makeScratch("home");
+    envHome = process.env.HOME;
+    process.env.HOME = scratch.home;
+  });
+
+  afterEach(() => {
+    if (envHome === undefined) delete process.env.HOME;
+    else process.env.HOME = envHome;
+    rmSync(scratch.stateRoot, { recursive: true, force: true });
+    rmSync(scratch.logRoot, { recursive: true, force: true });
+    rmSync(join(scratch.home, "Library"), { recursive: true, force: true });
+  });
+
+  test("homeDir homes all plists there; a later plain enable preserves it despite a source-checkout cwd", async () => {
+    const checkout = makeUsableCheckout(join(scratch.home, "checkout-a"));
+    const first = await enable({
+      instance,
+      testRoot: { stateRoot: scratch.stateRoot, logRoot: scratch.logRoot },
+      kinds: ["gateway", "web", "watchdog"],
+      launchctl: launchctlOk(),
+      homeDir: checkout
+    });
+    expect(first.ok).toBe(true);
+    for (const kind of ["gateway", "web", "watchdog"] as const) {
+      expect(readPlistWorkingDirectory(plistPathFor(instance, kind))).toBe(checkout);
+    }
+
+    // Re-enable with NO homeDir. The test process's cwd is the repo — a
+    // gini-agent source checkout — which the old cwd-preference would have
+    // homed the instance onto. The recorded home must win instead.
+    const second = await enable({
+      instance,
+      testRoot: { stateRoot: scratch.stateRoot, logRoot: scratch.logRoot },
+      kinds: ["gateway", "web", "watchdog"],
+      launchctl: launchctlOk()
+    });
+    expect(second.ok).toBe(true);
+    for (const kind of ["gateway", "web", "watchdog"] as const) {
+      expect(readPlistWorkingDirectory(plistPathFor(instance, kind))).toBe(checkout);
+    }
+  });
+
+  test("an invalid homeDir rejects before any plist is written", async () => {
+    await expect(enable({
+      instance,
+      testRoot: { stateRoot: scratch.stateRoot, logRoot: scratch.logRoot },
+      kinds: ["gateway", "web", "watchdog"],
+      launchctl: launchctlOk(),
+      homeDir: join(scratch.home, "not-a-checkout")
+    })).rejects.toThrow(/not a usable gini-agent checkout/);
+    expect(existsSync(plistPathFor(instance, "gateway"))).toBe(false);
   });
 });

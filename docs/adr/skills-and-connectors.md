@@ -16,7 +16,7 @@ Gini has two top-level user-facing primitives for integrating with the outside w
 - **Skill** — the package. A folder under `skills/` (bundled) or `~/.gini/instances/<inst>/skills/` (user-installed) containing `SKILL.md` (markdown for the agent), optional helper scripts, and Anthropic Agent Skills frontmatter declaring requirements. This is the unit a user thinks of as "the Linear thing my agent can do." Already present in Gini.
 - **Connector** — the managed credential record. Stores secrets, scopes, and health for an external account (e.g. Linear API key, Google OAuth tokens) or local permission grant (e.g. macOS TCC for Notes). Renamed from "Identity" per ADR connector-provider-spec-compliance.md.
 
-A skill is **active** if and only if every connector it declares as required exists and is healthy. Activation is automatic; deactivation is automatic when a connector becomes unhealthy. The agent loop never sees inactive skills.
+A skill is **active** if and only if every connector it declares as required exists and is usable (`connectorIsUsable`: configured and healthy, or unknown health when the provider declares no probe — see ADR connector-provider-spec-compliance.md). Activation is automatic; deactivation is automatic when a connector stops being usable. The agent loop never sees inactive skills.
 
 There is no separate "Integration" or layer above either of these. The Skill *is* the package; the Connector *is* the credential plane. This matches the Hermes and OpenClaw conventions for skill-as-package, with Gini's addition being a managed credential plane that those projects punt to environment variables for.
 
@@ -50,7 +50,7 @@ Cardinality forces this separation. A single Google connector powers Gmail, Cale
 
 ### Activation by dependency
 
-- When the agent loop lists available skills, it filters out any skill whose `requiredConnectors` are not all satisfied by a healthy connector.
+- When the agent loop lists available skills, it filters out any skill whose `requiredConnectors` are not all satisfied by a usable connector.
 - Skill execution paths (subprocess spawn, tool dispatch) re-check at call time as a defensive guard.
 - When a skill spawns a subprocess that declares `prerequisites.env`, the runtime resolves those env vars from matching connectors and injects them into the subprocess environment. Plaintext secrets never appear in skill records, state, audit, or trace evidence.
 - The Skills UI surface marks dependent skills as "needs setup: \<provider>" when their connectors are missing or unhealthy and exposes inline `[Set up <Label>]` to add the missing connector without leaving the page.

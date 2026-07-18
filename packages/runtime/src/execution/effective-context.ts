@@ -41,6 +41,11 @@ export interface EffectiveContext {
   providerFallback?: { selected: ProviderName; using: ProviderName };
   toolsetFilter?: Set<string>;
   messagingTargetFilter?: Set<string>;
+  // Whether the ambient memory pipeline (auto-recall before the model
+  // call, auto-retain after completion) runs for this agent's turns.
+  // Only an explicit `autoMemory: false` on the agent record turns it
+  // off; absent agent or absent field ⇒ true.
+  autoMemory: boolean;
   warnings: string[];
 }
 
@@ -66,14 +71,27 @@ function applyDispatchFallback(provider: ProviderConfig, config: RuntimeConfig):
   };
 }
 
-export function resolveEffectiveContext(state: RuntimeState, config: RuntimeConfig): EffectiveContext {
-  const agent = state.agents.find((candidate) => candidate.id === state.activeAgentId);
+// `agentIdOverride` pins resolution to a specific agent — used by the chat
+// loop to honor Task.agentId (the owning agent stamped at submission) so a
+// background task keeps its originating agent's toolsets, memory namespace,
+// and database even when the user switches the active agent mid-flight. An
+// override naming a deleted agent falls back to the active agent rather
+// than the no-agent branch.
+export function resolveEffectiveContext(
+  state: RuntimeState,
+  config: RuntimeConfig,
+  agentIdOverride?: string
+): EffectiveContext {
+  const agent =
+    (agentIdOverride ? state.agents.find((candidate) => candidate.id === agentIdOverride) : undefined) ??
+    state.agents.find((candidate) => candidate.id === state.activeAgentId);
   if (!agent) {
     const dispatch = applyDispatchFallback(config.provider, config);
     return {
       provider: dispatch.provider,
       providerSource: "instance",
       ...(dispatch.providerFallback ? { providerFallback: dispatch.providerFallback } : {}),
+      autoMemory: true,
       warnings: []
     };
   }
@@ -169,6 +187,7 @@ export function resolveEffectiveContext(state: RuntimeState, config: RuntimeConf
     ...(dispatch.providerFallback ? { providerFallback: dispatch.providerFallback } : {}),
     toolsetFilter,
     messagingTargetFilter,
+    autoMemory: agent.autoMemory !== false,
     warnings
   };
 }

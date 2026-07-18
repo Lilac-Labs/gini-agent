@@ -2,7 +2,7 @@
 //
 // The Google HTTP boundary is stubbed via setGoogleLoginWebFetchForTests so
 // no test ever touches the network; HOME points at a scratch dir so the
-// provisioned registry/credentials land in a throwaway ~/.gini.
+// saved registry/credentials land in a throwaway ~/.gini.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -11,8 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { RuntimeConfig } from "../../types";
+import { getGoogleAccountBindings } from "../../state/google-account-bindings";
 import { readGoogleAccounts, readPrimaryGoogleAccountId } from "../../state/google-accounts";
-import { RELAY_WORKSPACE_CLIENT } from "./relay-workspace-client";
 import {
   DEFAULT_LOGIN_RETURN_TO,
   LOGIN_SCOPES,
@@ -22,17 +22,18 @@ import {
   parseLoopbackOrigin,
   resetGoogleLoginWebState,
   sanitizeReturnTo,
+  setGoogleLoginWebClientForTests,
   setGoogleLoginWebFetchForTests,
   startGoogleLoginWeb
 } from "./google-login-web";
 
 const config = { instance: "google-login-web-test" } as RuntimeConfig;
 const ORIGIN = "http://127.0.0.1:3059";
+const TEST_OAUTH_CLIENT = { clientId: "test-client-id", clientSecret: "test-client-secret" };
 
 let scratchHome: string;
 let prevHome: string | undefined;
 let prevStateRoot: string | undefined;
-let prevHosted: string | undefined;
 
 beforeEach(() => {
   scratchHome = mkdtempSync(join(tmpdir(), "gini-glw-"));
@@ -40,9 +41,8 @@ beforeEach(() => {
   process.env.HOME = scratchHome;
   prevStateRoot = process.env.GINI_STATE_ROOT;
   process.env.GINI_STATE_ROOT = join(scratchHome, ".gini");
-  prevHosted = process.env.GINI_HOSTED;
-  delete process.env.GINI_HOSTED;
   resetGoogleLoginWebState();
+  setGoogleLoginWebClientForTests(TEST_OAUTH_CLIENT);
 });
 
 afterEach(() => {
@@ -50,8 +50,6 @@ afterEach(() => {
   else process.env.HOME = prevHome;
   if (prevStateRoot === undefined) delete process.env.GINI_STATE_ROOT;
   else process.env.GINI_STATE_ROOT = prevStateRoot;
-  if (prevHosted === undefined) delete process.env.GINI_HOSTED;
-  else process.env.GINI_HOSTED = prevHosted;
   setGoogleLoginWebFetchForTests(undefined);
   resetGoogleLoginWebState();
   rmSync(scratchHome, { recursive: true, force: true });
@@ -138,11 +136,15 @@ describe("parseLoopbackOrigin", () => {
 });
 
 describe("startGoogleLoginWeb", () => {
-  test("rejects edge auth mode", async () => {
-    process.env.GINI_HOSTED = "1";
+  test("requires a locally configured Desktop OAuth client", async () => {
+    setGoogleLoginWebClientForTests(undefined);
     const result = await startGoogleLoginWeb(config, { returnTo: "/onboarding", origin: ORIGIN });
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("edge sign-in flow");
+    expect(result).toEqual({
+      ok: false,
+      error:
+        "Google OAuth is not configured. Add your own Desktop OAuth client " +
+        "in Integrations before connecting an account."
+    });
   });
 
   test("rejects a missing or non-loopback origin with a clear error", async () => {
@@ -169,8 +171,7 @@ describe("startGoogleLoginWeb", () => {
     expect(location.origin).toBe("https://accounts.google.com");
     expect(location.pathname).toBe("/o/oauth2/v2/auth");
     const params = location.searchParams;
-    // No connector in the scratch state — the baked relay Desktop client.
-    expect(params.get("client_id")).toBe(RELAY_WORKSPACE_CLIENT.clientId);
+    expect(params.get("client_id")).toBe(TEST_OAUTH_CLIENT.clientId);
     expect(params.get("redirect_uri")).toBe(`${ORIGIN}/api/runtime/google/login/callback`);
     expect(params.get("response_type")).toBe("code");
     expect(params.get("access_type")).toBe("offline");
@@ -180,6 +181,20 @@ describe("startGoogleLoginWeb", () => {
     expect(params.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(params.get("state")).toMatch(/^[A-Za-z0-9_-]+$/);
     expect((params.get("scope") ?? "").split(" ").sort()).toEqual([...LOGIN_SCOPES].sort());
+  });
+
+  test("a signin start re-authing a known primary hints the chooser; fresh connect and add stay hint-less", async () => {
+    const fresh = await startedLocation("/onboarding", ORIGIN, "signin");
+    expect(fresh.searchParams.has("login_hint")).toBe(false);
+
+    stubGoogle({});
+    await handleGoogleLoginWebCallback(config, { code: "c1", state: fresh.searchParams.get("state") });
+
+    const relogin = await startedLocation("/onboarding", ORIGIN, "signin");
+    expect(relogin.searchParams.get("login_hint")).toBe("ada@example.com");
+
+    const add = await startedLocation("/onboarding", ORIGIN, "add");
+    expect(add.searchParams.has("login_hint")).toBe(false);
   });
 });
 
@@ -243,17 +258,16 @@ describe("handleGoogleLoginWebCallback", () => {
     const body = google.exchangeBodies[0]!;
     expect(body.get("grant_type")).toBe("authorization_code");
     expect(body.get("code")).toBe("auth-code-1");
-    expect(body.get("client_id")).toBe(RELAY_WORKSPACE_CLIENT.clientId);
-    expect(body.get("client_secret")).toBe(RELAY_WORKSPACE_CLIENT.clientSecret);
+    expect(body.get("client_id")).toBe(TEST_OAUTH_CLIENT.clientId);
+    expect(body.get("client_secret")).toBe(TEST_OAUTH_CLIENT.clientSecret);
     expect(body.get("redirect_uri")).toBe(consent.searchParams.get("redirect_uri") ?? "");
     const digest = createHash("sha256").update(body.get("code_verifier") ?? "").digest("base64url");
     expect(digest).toBe(consent.searchParams.get("code_challenge") ?? "");
 
-    // Registered like the edge-provisioned path: trusted, principal-keyed,
-    // tag from the email local-part, 0600 authorized_user credential.
+    // Registered as verified and principal-keyed, with a tag from the email
+    // local-part and a 0600 authorized_user credential.
     const accounts = readGoogleAccounts();
     expect(accounts).toHaveLength(1);
-    expect(accounts[0]!.provisioned).toBe(true);
     expect(accounts[0]!.principal).toBe("sub-1");
     expect(accounts[0]!.tag).toBe("ada");
     const credPath = join(accounts[0]!.configDir, "credentials.json");
@@ -261,8 +275,8 @@ describe("handleGoogleLoginWebCallback", () => {
     const cred = JSON.parse(readFileSync(credPath, "utf8"));
     expect(cred).toEqual({
       type: "authorized_user",
-      client_id: RELAY_WORKSPACE_CLIENT.clientId,
-      client_secret: RELAY_WORKSPACE_CLIENT.clientSecret,
+      client_id: TEST_OAUTH_CLIENT.clientId,
+      client_secret: TEST_OAUTH_CLIENT.clientSecret,
       refresh_token: "rt-1"
     });
 
@@ -294,12 +308,12 @@ describe("handleGoogleLoginWebCallback", () => {
     expect(cred.refresh_token).toBe("rt-2");
   });
 
-  test("signin intent makes the provisioned account the persisted primary; add/default never does", async () => {
+  test("signin intent makes the connected account the instance primary; add/default never does", async () => {
     // Default (add) intent: no primary persisted.
     const addConsent = await startedLocation("/onboarding");
     stubGoogle({});
     await handleGoogleLoginWebCallback(config, { code: "c1", state: addConsent.searchParams.get("state") });
-    expect(readPrimaryGoogleAccountId()).toBeUndefined();
+    expect(getGoogleAccountBindings(config.instance).primaryAccountId).toBeUndefined();
 
     // Signin intent as a second identity: that account becomes the primary.
     const signinConsent = await startedLocation("/onboarding", ORIGIN, "signin");
@@ -312,13 +326,14 @@ describe("handleGoogleLoginWebCallback", () => {
     const accounts = readGoogleAccounts();
     expect(accounts).toHaveLength(2);
     const bob = accounts.find((a) => a.principal === "sub-2");
-    expect(readPrimaryGoogleAccountId()).toBe(bob!.id);
+    expect(getGoogleAccountBindings(config.instance).primaryAccountId).toBe(bob!.id);
+    expect(readPrimaryGoogleAccountId()).toBeUndefined();
 
     // A later explicit add leaves the signin-chosen primary alone.
     const laterAdd = await startedLocation("/onboarding", ORIGIN, "add");
     stubGoogle({ sub: "sub-3", email: "carol@example.com" });
     await handleGoogleLoginWebCallback(config, { code: "c3", state: laterAdd.searchParams.get("state") });
-    expect(readPrimaryGoogleAccountId()).toBe(bob!.id);
+    expect(getGoogleAccountBindings(config.instance).primaryAccountId).toBe(bob!.id);
   });
 
   test("a failed signin-intent exchange never flips the primary", async () => {
@@ -329,7 +344,7 @@ describe("handleGoogleLoginWebCallback", () => {
       state: consent.searchParams.get("state")
     });
     expect(location).toBe("/onboarding?googleAddError=1");
-    expect(readPrimaryGoogleAccountId()).toBeUndefined();
+    expect(getGoogleAccountBindings(config.instance).primaryAccountId).toBeUndefined();
   });
 
   test("a failed token exchange redirects with the error and registers nothing", async () => {

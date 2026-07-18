@@ -141,6 +141,7 @@ Usage:
   bun run gini uninstall [--instance <name>] [--yes] [--purge]
   bun run gini update
   bun run gini setup [--force] [--yes]
+  bun run gini onboarding skip [--instance <name>]
   bun run gini autostart enable|disable|status|kick [--instance dev]
   bun run gini task submit <prompt>
   bun run gini task list

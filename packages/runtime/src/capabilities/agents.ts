@@ -85,7 +85,11 @@ export async function createAgent(config: RuntimeConfig, input: Record<string, u
         : fallbackToolsets,
       messagingTargets: Array.isArray(input.messagingTargets)
         ? input.messagingTargets.map(String)
-        : (defaultAgent?.messagingTargets ?? [])
+        : (defaultAgent?.messagingTargets ?? []),
+      // Ambient-memory switch: only an explicit false is stored (absent ⇒
+      // on). Deliberately NOT inherited from the default agent — opting a
+      // purpose-built agent out of memory says nothing about siblings.
+      ...(input.autoMemory === false ? { autoMemory: false } : {})
     });
   });
   // Phase C — eagerly create the per-agent bank so the new agent starts
@@ -234,6 +238,55 @@ export async function setAgentProvider(
         target: agent.id,
         risk: "low",
         evidence: { from, to: { providerName: nextProvider, model: nextModel }, agentId: agent.id }
+      },
+      { agentId: agent.id }
+    );
+    return agent;
+  });
+}
+
+// Set (or clear) an agent's ambient-memory switch. `autoMemory: false` makes
+// chat turns for this agent skip auto-recall and auto-retain (see the
+// AgentRecord field comment); `autoMemory: true` restores the default. The
+// record stores only the explicit `false` — restoring deletes the field so
+// state.json doesn't accumulate redundant `autoMemory: true` rows. Memory
+// TOOLS are untouched: they're governed by the agent's toolsets. A no-op
+// (already in the requested mode) skips the state write, audit, and
+// updatedAt bump — same hygiene as renameAgent/setAgentProvider.
+export async function setAgentMemory(
+  config: RuntimeConfig,
+  idOrName: string,
+  input: Record<string, unknown>
+): Promise<AgentRecord> {
+  if (typeof input.autoMemory !== "boolean") {
+    throw new Error("Invalid input: autoMemory must be a boolean.");
+  }
+  const autoMemory = input.autoMemory;
+  // Resolve id-first, then name, so an agent whose NAME happens to equal
+  // another agent's id can't shadow the intended target (same rule as
+  // renameAgent).
+  const agents = readState(config.instance).agents;
+  const target = agents.find((a) => a.id === idOrName) ?? agents.find((a) => a.name === idOrName);
+  if (!target) throw new Error(`Agent not found: ${idOrName}`);
+  return mutateState(config.instance, (state) => {
+    const agent = state.agents.find((a) => a.id === target.id);
+    if (!agent) throw new Error(`Agent not found: ${idOrName}`);
+    const current = agent.autoMemory !== false;
+    if (current === autoMemory) return agent;
+    if (autoMemory) {
+      delete agent.autoMemory;
+    } else {
+      agent.autoMemory = false;
+    }
+    agent.updatedAt = now();
+    addAudit(
+      state,
+      {
+        actor: "user",
+        action: "agent.memory_set",
+        target: agent.id,
+        risk: "low",
+        evidence: { autoMemory, agentId: agent.id }
       },
       { agentId: agent.id }
     );

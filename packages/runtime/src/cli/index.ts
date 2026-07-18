@@ -45,6 +45,7 @@ import { setup } from "./commands/setup";
 import { autostart } from "./commands/autostart";
 import { identity } from "./commands/identity";
 import { watchdog } from "./commands/watchdog";
+import { onboarding } from "./commands/onboarding";
 
 export async function run(): Promise<void> {
   const args = Bun.argv.slice(2);
@@ -165,6 +166,7 @@ export async function run(): Promise<void> {
     case "smoke": await smoke(ctx); break;
     case "identity": await identity(ctx); break;
     case "watchdog": await watchdog(ctx); break;
+    case "onboarding": await onboarding(ctx); break;
     default: help();
   }
 }

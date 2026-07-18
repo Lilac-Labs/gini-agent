@@ -6,8 +6,8 @@
 // persistence of the registry — the orchestration (live status, register,
 // remove) lives in src/integrations/connectors/google-accounts.ts.
 //
-// Storage is machine-global (NOT per-instance state): log in once, the account
-// is available in every instance. The registry file is
+// Storage is machine-global (NOT per-instance state), while product reads are
+// filtered by per-instance bindings. The registry file is
 // ~/.gini/google-accounts/accounts.json, gini-managed config dirs live under
 // ~/.gini/google-accounts/<id>/. The pre-existing ~/.config/gws session is
 // adopted in place (its account's configDir points at ~/.config/gws), so no
@@ -17,7 +17,7 @@
 // so tests can override the env var; os.homedir() caches getpwuid on macOS and
 // won't pick up a runtime HOME change. Writes are atomic (temp + rename) and
 // land at mode 0600. readGoogleAccounts never throws (missing/corrupt → []) —
-// it's on the hot system-prompt path.
+// instance-filtered reads build on it in hot paths.
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -57,7 +57,10 @@ export function readGoogleAccounts(): GoogleAccount[] {
     if (!parsed || typeof parsed !== "object") return [];
     const accounts = (parsed as { accounts?: unknown }).accounts;
     if (!Array.isArray(accounts)) return [];
-    return accounts.filter(isGoogleAccount);
+    return accounts.flatMap((value) => {
+      const account = normalizeGoogleAccount(value);
+      return account ? [account] : [];
+    });
   } catch {
     return [];
   }
@@ -88,16 +91,24 @@ export function setPrimaryGoogleAccountId(accountId: string | undefined): void {
   writeRegistry(readGoogleAccounts(), accountId);
 }
 
-function isGoogleAccount(value: unknown): value is GoogleAccount {
-  if (!value || typeof value !== "object") return false;
+function normalizeGoogleAccount(value: unknown): GoogleAccount | undefined {
+  if (!value || typeof value !== "object") return undefined;
   const o = value as Record<string, unknown>;
-  return (
-    typeof o.id === "string" &&
-    typeof o.tag === "string" &&
-    typeof o.email === "string" &&
-    typeof o.configDir === "string" &&
-    typeof o.addedAt === "string"
-  );
+  if (
+    typeof o.id !== "string" ||
+    typeof o.tag !== "string" ||
+    typeof o.email !== "string" ||
+    typeof o.configDir !== "string" ||
+    typeof o.addedAt !== "string"
+  ) return undefined;
+  return {
+    id: o.id,
+    tag: o.tag,
+    email: o.email,
+    configDir: o.configDir,
+    addedAt: o.addedAt,
+    ...(typeof o.principal === "string" ? { principal: o.principal } : {})
+  };
 }
 
 // Atomic registry write: mkdir -p root, write a temp file in the same dir, then

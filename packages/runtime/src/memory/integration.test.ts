@@ -15,7 +15,8 @@ import {
   setEchoToolCallingResponse
 } from "../provider";
 import { submitTask } from "../agent";
-import { readState } from "../state";
+import { readState, readTrace } from "../state";
+import { createAgent, useAgent } from "../capabilities/agents";
 import type { RuntimeConfig } from "../types";
 
 const ROOT = "/tmp/gini-integration-phase5-test";
@@ -150,6 +151,48 @@ describe("phase 5 — auto-retain on chat-mode task completion", () => {
     await waitForMemory(() => countMemoryUnits(instance) > before, "chat-mode auto-retain to grow the memory unit count");
     const after = countMemoryUnits(instance);
     expect(after).toBeGreaterThan(before);
+  });
+});
+
+describe("autoMemory:false — the ambient pipeline is skipped end-to-end", () => {
+  // An agent opted out of ambient memory must neither query the bank before
+  // the model call (auto-recall) nor distill the turn into it afterwards
+  // (auto-retain). Both skips leave explicit trace rows, so the test waits on
+  // the retain-skip trace (the later of the two) instead of sleeping, then
+  // asserts the bank never grew.
+  test("chat turn for an opted-out agent traces both skips and adds no units", async () => {
+    const instance = "phase5-auto-memory-off";
+    ensureDefaultBank(instance);
+    const config = makeConfig(instance);
+    const provider = normalizeProvider(config.provider);
+    const curator = await createAgent(config, { name: "curator", autoMemory: false });
+    await useAgent(config, curator.id);
+    setEchoToolCallingResponse({
+      provider,
+      text: "Noted.",
+      toolCalls: [],
+      finishReason: "stop"
+    });
+    // A fact-rich extractor response is armed on purpose: if a regression
+    // re-enables retain for this agent, the bank WOULD grow and the count
+    // assertion below catches it.
+    setEchoStructuredResponse("fact-extraction", {
+      facts: [
+        { what: "user's name is Shelden", when: "", where: "", who: "user", why: "personal disclosure", fact_type: "world" }
+      ]
+    });
+    const before = countMemoryUnits(instance);
+    const task = await submitTask(config, "my name is Shelden", { mode: "chat" });
+    await waitForCompletion(config, task.id);
+    await waitForMemory(
+      () => readTrace(instance, task.id).some((row) => row.message === "auto-retain skipped: agent autoMemory off"),
+      "the auto-retain skip trace for the opted-out agent"
+    );
+    const trace = readTrace(instance, task.id);
+    expect(trace.some((row) => row.message === "auto-recall skipped: agent autoMemory off")).toBe(true);
+    expect(trace.some((row) => row.message === "recall completed")).toBe(false);
+    expect(countMemoryUnits(instance)).toBe(before);
+    await useAgent(config, "agent_default");
   });
 });
 

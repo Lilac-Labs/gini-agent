@@ -6,9 +6,9 @@ import type { PendingChatMessage } from "@runtime/types";
 import { cn } from "@/lib/utils";
 
 // The "N Queued" pill above the composer. While a turn is in flight, follow-up
-// messages are queued server-side and rendered from the session's
+// follow-up chat entries are queued server-side and rendered from the session's
 // `pendingMessages` (ADR chat-message-queue.md). Collapsed by default; expands
-// to list each queued message with a × to remove it. The list is server truth
+// to list each queued entry with a × to remove it. The list is server truth
 // (kept live via the chat_session SSE frame), so removal here just fires the
 // DELETE — the frame drains the row.
 export function QueuedMessages({
@@ -67,7 +67,7 @@ export function QueuedMessages({
               <button
                 type="button"
                 onClick={() => onRemove(message.id)}
-                aria-label="Remove queued message"
+                aria-label="Remove queued chat"
                 className="inline-flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               >
                 <X className="size-3.5" />

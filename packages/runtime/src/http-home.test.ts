@@ -1,13 +1,14 @@
 // Pins the phase-1 container/home HTTP surface:
-//   - GET /api/home returns { owner?, tasks, recents } over the lean derived-
-//     attention read path: the inclusion predicate (startedBy === "user" OR
-//     attention ∈ {needs_input, review} OR surfaced), server-side acknowledged
-//     filtering (attention "none" never appears), headless/archived/Chat
+//   - GET /api/home returns { owner?, tasks, done, recents } over the lean
+//     derived-attention read path: the inclusion predicate (startedBy ===
+//     "user" OR attention ∈ {needs_input, review} OR surfaced), server-side
+//     acknowledged filtering (attention "none" never appears as a task row;
+//     acknowledged completions land in `done`), headless/archived/Chat
 //     exclusion, attention-precedence ordering, and the needsInput/review
 //     affordance payloads. `owner` appears only when config.ownerFirstName is
 //     set — never derived from anything else.
-//   - POST /api/containers/:id/acknowledge stamps acknowledgedAt and drops the
-//     done row from home on the next read.
+//   - POST /api/containers/:id/acknowledge stamps acknowledgedAt and moves the
+//     row from tasks to done on the next read.
 //   - PATCH /api/containers/:id updates pinned/title/archived.
 //   - DELETE /api/containers/:id guards (404 unknown, 400 agent-kind/headless,
 //     409 live run) and cascades per deleteChatSession (session + transcript
@@ -29,7 +30,7 @@ import {
   mutateState,
   readState
 } from "./state";
-import type { HomeTaskItem, RecentItem, RuntimeConfig, RuntimeState, Task } from "./types";
+import type { HomeDoneItem, HomeTaskItem, RecentItem, RuntimeConfig, RuntimeState, Task } from "./types";
 
 const ROOT = "/tmp/gini-http-home-tests";
 
@@ -77,7 +78,12 @@ async function call(
   }));
 }
 
-type HomeResponse = { owner?: { firstName?: string }; tasks: HomeTaskItem[]; recents: RecentItem[] };
+type HomeResponse = {
+  owner?: { firstName?: string };
+  tasks: HomeTaskItem[];
+  done: HomeDoneItem[];
+  recents: RecentItem[];
+};
 
 async function getHome(
   handler: ReturnType<typeof createHandler>,
@@ -264,6 +270,49 @@ describe("GET /api/home", () => {
     });
   });
 
+  test("surfaces a draft-producing child task from a headless watcher with the draft icon", async () => {
+    const config = buildConfig("home-headless-parent-child");
+    const handler = createHandler(config);
+
+    const ids = await mutateState(config.instance, (state) => {
+      const parent = createTopic(state, { title: "Auto-inbox", headless: true });
+      seedTask(state, parent.id, "completed", "2026-07-01T10:00:00.000Z");
+
+      const child = createTopic(state, {
+        title: "Draft reply to Alex about renewal",
+        parentChatSessionId: parent.id,
+        spawnedByTaskId: "task_auto_inbox",
+        surfaced: true
+      });
+      const childTask = seedTask(state, child.id, "completed", "2026-07-01T10:05:00.000Z", {
+        summary:
+          "Draft ready for review.\n\n```email-draft\nTo: alex@example.com\nSubject: Re: Renewal\nDraftId: draft_123\nAccount: me@example.com\n\nHi Alex,\n\nLet's renew.\n```"
+      });
+      return { parent: parent.id, child: child.id, childTask: childTask.id };
+    });
+
+    const home = await getHome(handler, config);
+
+    expect(home.tasks.map((task) => task.id)).toEqual([ids.child]);
+    expect(home.tasks[0]).toMatchObject({
+      id: ids.child,
+      title: "Draft reply to Alex about renewal",
+      startedBy: "agent",
+      attention: "done_unacknowledged",
+      outcomeLine: "Draft ready for review."
+    });
+    expect(home.recents).toEqual([
+      {
+        id: ids.childTask,
+        containerId: ids.child,
+        icon: "draft",
+        title: "Draft reply to Alex about renewal",
+        timestamp: "2026-07-01T10:05:00.000Z"
+      }
+    ]);
+    expect(home.tasks.some((task) => task.id === ids.parent)).toBe(false);
+  });
+
   test("recents dedupe to one entry per container: newest completed run wins", async () => {
     const config = buildConfig("home-recents-dedupe");
     const handler = createHandler(config);
@@ -290,6 +339,31 @@ describe("GET /api/home", () => {
         icon: "document",
         title: "Write a two-line haiku",
         timestamp: "2026-07-01T11:00:00.000Z"
+      }
+    ]);
+  });
+
+  test("a message-mode container's recents entry carries the chat icon", async () => {
+    const config = buildConfig("home-recents-chat-icon");
+    const handler = createHandler(config);
+    const ids = await mutateState(config.instance, (state) => {
+      // A user-started conversation (Message mode) with a completed run. It
+      // skips the tasks list (it lives in Home's Chats section) but
+      // still feeds Recents, where it renders with the chat icon.
+      const convo = createTopic(state, { title: "Chat with Gini", startedAs: "message" });
+      const run = seedTask(state, convo.id, "completed", "2026-07-01T10:00:00.000Z", { summary: "Answered." });
+      return { convo: convo.id, runId: run.id };
+    });
+
+    const home = await getHome(handler, config);
+    expect(home.tasks).toEqual([]);
+    expect(home.recents).toEqual([
+      {
+        id: ids.runId,
+        containerId: ids.convo,
+        icon: "chat",
+        title: "Chat with Gini",
+        timestamp: "2026-07-01T10:00:00.000Z"
       }
     ]);
   });
@@ -399,7 +473,7 @@ describe("GET /api/home", () => {
 });
 
 describe("POST /api/containers/:id/acknowledge", () => {
-  test("stamps acknowledgedAt and the row leaves home on the next read", async () => {
+  test("stamps acknowledgedAt and the row moves from tasks to done on the next read", async () => {
     const config = buildConfig("home-ack");
     const handler = createHandler(config);
     const containerId = await mutateState(config.instance, (state) => {
@@ -408,7 +482,9 @@ describe("POST /api/containers/:id/acknowledge", () => {
       return done.id;
     });
 
-    expect((await getHome(handler, config)).tasks.map((t) => t.id)).toEqual([containerId]);
+    const before = await getHome(handler, config);
+    expect(before.tasks.map((t) => t.id)).toEqual([containerId]);
+    expect(before.done).toEqual([]);
 
     const response = await call(handler, config, `/api/containers/${containerId}/acknowledge`, { method: "POST" });
     expect(response.status).toBe(200);
@@ -416,7 +492,16 @@ describe("POST /api/containers/:id/acknowledge", () => {
     expect(payload.ok).toBe(true);
     expect(payload.acknowledgedAt).toBeString();
 
-    expect((await getHome(handler, config)).tasks).toEqual([]);
+    const after = await getHome(handler, config);
+    expect(after.tasks).toEqual([]);
+    expect(after.done).toEqual([
+      {
+        id: containerId,
+        title: "Finished",
+        outcomeLine: "Done.",
+        completedAt: "2026-07-01T09:00:00.000Z"
+      }
+    ]);
     const session = readState(config.instance).chatSessions.find((s) => s.id === containerId);
     expect(session?.acknowledgedAt).toBe(payload.acknowledgedAt);
   });

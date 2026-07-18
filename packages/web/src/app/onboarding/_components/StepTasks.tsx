@@ -16,12 +16,12 @@ interface TaskItem {
   checked: boolean;
 }
 
-// Step 5 — seed starter tasks. Suggestions come from the Gmail scan when it
-// finished (static fallbacks otherwise), snapshotted on mount. A scan that
-// turns ready while this step is up (useOnboarding keeps polling while it
-// runs) replaces the snapshot with the real inbox-derived suggestions — but
-// only until the user touches the list (toggle, custom add, or seeding);
-// after that their state wins. "Add N tasks" POSTs each checked row to
+// Step 5 — seed starter tasks. Only concrete Gmail-scan suggestions become
+// checked rows; a missing, failed, or empty scan never becomes generic work.
+// A scan that turns ready while this step is up (useOnboarding keeps polling
+// while it runs) replaces the empty snapshot with inbox-derived suggestions —
+// but only until the user touches the list (custom add or seeding); after that
+// their state wins. "Add N tasks" POSTs each checked row to
 // /containers (startedAs "task"), so each seeded task is a task container
 // that surfaces on the task-first home; then marks onboarding completed and
 // leaves the funnel. "Skip" completes without seeding.
@@ -50,7 +50,7 @@ export function StepTasks() {
   const scan = data?.scan;
   // Once per step visit: if the snapshot was taken from a ready scan the
   // suggestions are already inbox-derived, otherwise the first ready poll
-  // result replaces the fallbacks (unless the user got there first).
+  // result fills the list (unless the user got there first).
   const adopted = useRef(scan?.status === "ready");
   useEffect(() => {
     if (adopted.current) return;
@@ -161,6 +161,10 @@ export function StepTasks() {
           {scan?.status === "running" ? (
             <p className="text-[13px] italic text-[#9A9A94]">
               Gini is still reading your inbox — suggestions will update when it finishes.
+            </p>
+          ) : scan && items.length === 0 ? (
+            <p className="text-[13px] text-[#9A9A94]">
+              Gini couldn&rsquo;t find a concrete starter task from your inbox. Add one above or skip for now.
             </p>
           ) : null}
           <ul className="flex flex-col">

@@ -29,6 +29,11 @@ mock.module("./BlockPhase", () => ({ BlockPhase: () => <div data-testid="phase" 
 mock.module("./BlockSystemNote", () => ({ BlockSystemNote: () => <div data-testid="system-note" /> }));
 mock.module("./BlockToolCall", () => ({ BlockToolCall: () => <div data-testid="tool-call" /> }));
 mock.module("./BlockUserText", () => ({ BlockUserText: () => <div data-testid="user-text" /> }));
+mock.module("./RoutineCreatedCard", () => ({
+  RoutineCreatedCard: ({ block }: { block: { jobId: string } }) => (
+    <div data-testid="routine-card" data-job-id={block.jobId} />
+  )
+}));
 mock.module("./TopicForwardChip", () => ({
   TopicForwardChip: ({ topicId, topicTitle }: { topicId: string; topicTitle?: string }) => (
     <div data-testid="forward-chip" data-topic-id={topicId} data-topic-title={topicTitle ?? ""} />
@@ -191,6 +196,38 @@ describe("BlockRenderer", () => {
 
     rerender(<BlockRenderer block={{ ...base, kind: "system_note", text: "note" }} />);
     expect(screen.getByTestId("system-note")).not.toBeNull();
+  });
+
+  test("a jobId-stamped create_job routes to the routine card; without a jobId it keeps the tool row", () => {
+    const createJob = {
+      ...base,
+      kind: "tool_call" as const,
+      updatedAt: base.createdAt,
+      toolName: "create_job",
+      displayLabel: "Create scheduled job",
+      argsPreview: "hn-mentions",
+      argsFull: { name: "hn-mentions" },
+      status: "ok" as const,
+      callId: "c-job"
+    };
+    const { rerender } = render(<BlockRenderer block={{ ...createJob, jobId: "job_1" }} />);
+    const card = screen.getByTestId("routine-card");
+    expect(card.getAttribute("data-job-id")).toBe("job_1");
+    expect(screen.queryByTestId("tool-call")).toBeNull();
+
+    // No jobId (failed call / legacy block): generic tool row.
+    rerender(<BlockRenderer block={createJob} />);
+    expect(screen.getByTestId("tool-call")).not.toBeNull();
+    expect(screen.queryByTestId("routine-card")).toBeNull();
+
+    // update_job cards the same way — the runtime stamps the patched job's id.
+    rerender(
+      <BlockRenderer
+        block={{ ...createJob, toolName: "update_job", displayLabel: "Update scheduled job", jobId: "job_2" }}
+      />
+    );
+    expect(screen.getByTestId("routine-card").getAttribute("data-job-id")).toBe("job_2");
+    expect(screen.queryByTestId("tool-call")).toBeNull();
   });
 
   test("an unknown kind throws via the exhaustive guard", () => {

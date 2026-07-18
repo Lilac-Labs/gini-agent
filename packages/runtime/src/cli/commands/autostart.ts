@@ -11,7 +11,7 @@
 // `gini autostart ...` on Linux prints a clear platform message rather
 // than failing silently.
 
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { CliContext } from "../context";
 import { defaultRuntimePort, defaultWebPort, parseInstance } from "../../paths";
@@ -24,6 +24,7 @@ import {
   bootstrap,
   isLoaded,
   isLoadedTarget,
+  isUsableGiniCheckout,
   kickstart,
   labelFor,
   legacyHandlesFor,
@@ -186,7 +187,28 @@ export async function autostart(ctx: CliContext): Promise<void> {
       return;
     }
     const kinds: PlistKind[] = isPlistKind(kindFlag) ? [kindFlag] : KINDS;
-    const result = await enable({ instance, testRoot, kinds });
+    // `--home <dir>` pins the services' WorkingDirectory to an explicit
+    // checkout — the only way to move an already-homed instance between
+    // checkouts, since plist regeneration otherwise PRESERVES the existing
+    // home (see resolveLaunchSpecPair). Validate up front so a typo'd path
+    // fails with a clear error before anything touches launchd, and resolve
+    // to a realpath so the plist (and the stamp folded over
+    // WorkingDirectory) doesn't flap between symlinked spellings of the
+    // same directory.
+    const homeFlag = flagValue(ctx.rawArgs, "--home");
+    let homeDir: string | undefined;
+    if (homeFlag !== undefined) {
+      if (!isUsableGiniCheckout(homeFlag)) {
+        print({
+          ok: false,
+          error: `--home '${homeFlag}' is not a usable gini-agent checkout (needs a package.json with name "gini-agent" and packages/runtime/src/server.ts).`
+        });
+        process.exitCode = 1;
+        return;
+      }
+      homeDir = realpathSync(homeFlag);
+    }
+    const result = await enable({ instance, testRoot, kinds, homeDir });
     print(result);
     // When rollback itself failed, emit a clear stderr warning so the
     // operator sees the honest state at a glance instead of having to
@@ -249,7 +271,7 @@ export async function autostart(ctx: CliContext): Promise<void> {
 function usage(): Record<string, unknown> {
   return {
     usage: [
-      "gini autostart enable  [--instance <name>] [--test-root <dir>]",
+      "gini autostart enable  [--instance <name>] [--home <dir>] [--test-root <dir>]",
       "gini autostart disable [--instance <name>]",
       "gini autostart status  [--instance <name>]",
       "gini autostart kick    [--instance <name>] [--kind gateway|web|watchdog]  # force respawn (see notes)"
@@ -261,6 +283,7 @@ function usage(): Record<string, unknown> {
       "`gini stop` runs `launchctl bootout` to unload the service (KeepAlive is `true` — launchd always respawns on exit, so a clean exit alone won't keep it down). The web service is torn down the same way.",
       "macOS 26 (Tahoe): launchd often defers auto-respawn after SIGKILL indefinitely (`pended nondemand spawn = inefficient`). Use `gini autostart kick` to force a respawn when this happens; RunAtLoad still fires at login.",
       "Secrets in ~/.gini/secrets.env are merged into the gateway plist's EnvironmentVariables only (the web plist is the BFF and never talks to providers directly). If you change a key (e.g. `gini provider set`), re-run `autostart enable` to refresh the plist for future respawns.",
+      "The instance's home (plist WorkingDirectory) is sticky: re-running `enable` preserves the home already recorded in the gateway plist, regardless of the directory you run it from. `--home <dir>` pins the services onto an explicit gini-agent checkout; `gini update` re-homes a wrongly-homed instance onto ~/.gini/runtime.",
       "`--test-root <dir>` is an E2E-test escape hatch: scoped state/log roots are embedded in the plist. Plain GINI_STATE_ROOT in your shell does NOT leak into a permanent plist."
     ]
   };
@@ -369,6 +392,13 @@ export interface EnableOptions {
   // rollback-failure branch can be exercised without holding real
   // launchd hostage. Omitted in production.
   launchctl?: EnableLaunchctlDeps;
+  // Explicit home (plist WorkingDirectory) for the regenerated plists.
+  // Threaded to resolveLaunchSpecPair, which validates it as a usable
+  // gini-agent checkout (throws otherwise) and — when omitted — PRESERVES
+  // the home already recorded in the instance's gateway plist. Set by
+  // `gini autostart enable --home <dir>` and by `gini update`'s re-home
+  // onto the installed runtime.
+  homeDir?: string;
 }
 
 // Exported so tests can drive the rollback-failure path via injected
@@ -383,7 +413,7 @@ export async function enable(options: EnableOptions): Promise<EnableResult> {
   // (further down this file) don't pass mergeShellPath, so they keep
   // returning the base launchd PATH without paying the shell-spawn
   // cost or risking a hung rc file.
-  const services = supervisedServices({ instance, testRoot, kinds, mergeShellPath: true });
+  const services = supervisedServices({ instance, testRoot, kinds, mergeShellPath: true, homeDir: options.homeDir });
   const resolution = services[0]?.resolution ?? "installed";
   const logRoot = resolveLogRoot(instance, testRoot);
   const results: PerKindEnableResult[] = [];

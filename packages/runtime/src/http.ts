@@ -59,12 +59,12 @@ import { runMessagingPairingConnect } from "./execution/messaging-pairing-connec
 import { runMessagingRemoveConnect } from "./execution/messaging-remove-connect";
 import { buildNotificationPreview, type PreviewEvent } from "./integrations/apns/preview";
 import { dailyUsage, homeView, mobileBootstrap, publicState } from "./runtime/views";
-import { checkConnector, createConnector, credentialTemplateForProvider, deleteConnector, firstUngrantedCredential, isSkillActive, updateConnector } from "./integrations/connectors";
+import { checkConnector, connectorIsUsable, createConnector, credentialTemplateForProvider, deleteConnector, firstUngrantedCredential, isSkillActive, updateConnector } from "./integrations/connectors";
 import { gwsSessionStatus } from "./integrations/connectors/gws-session";
-import { googleAuthMode, listAccountsWithStatus, provisionAccount, registerAccount, removeAccount, retagAccount } from "./integrations/connectors/google-accounts";
+import { detachInstanceGoogleAccount, disconnectInstanceGoogleAccount, listAccountsWithStatus, registerAccountForInstance, removeAccount, retagAccount, signOutInstanceGoogleAccounts, useAccountForInstance } from "./integrations/connectors/google-accounts";
 import { handleGoogleLoginWebCallback, startGoogleLoginWeb } from "./integrations/connectors/google-login-web";
 import { getGoogleAccount, googleAccountsRoot } from "./state/google-accounts";
-import { listProviders } from "./integrations/connectors/registry";
+import { getProvider, listProviders } from "./integrations/connectors/registry";
 import { runConnectorDetection } from "./jobs/connector-detection";
 import { createScheduledJob, listJobRuns, removeJob, replayJobRun, runJobNow, updateJob, updateJobStatus } from "./jobs";
 import { addEmailWatcher, clearEmailWatcherObjective, getEmailWatcher, listEmailWatchers, removeEmailWatcher, setEmailTriageEnabled, setEmailWatcherEnabled, setEmailWatcherObjective } from "./state/email-watchers";
@@ -79,7 +79,7 @@ import { computeSkillScores } from "./learning/score";
 import { proposePromotion, reviewPromotion } from "./governance/promotions";
 import { status, updateAutoApproveSettings } from "./runtime";
 import { searchSessions } from "./execution/search";
-import { listToolsets, setToolsetStatus } from "./capabilities/toolsets";
+import { listJobTools, listToolsets, setToolsetStatus } from "./capabilities/toolsets";
 import { cancelSubagent, listSubagents, spawnSubagent } from "./capabilities/subagents";
 import { addMcpServer, checkMcpServer, invokeMcpTool, removeMcpServer } from "./integrations/mcp";
 import { addMessagingBridge, allowChat, checkMessagingBridge, denyChat, disableMessagingBridge, listAllowedChats, listMessagingMessages, receiveMessagingInput, rejectPendingChat, removeMessagingBridge, sendMessagingOutput } from "./integrations/messaging";
@@ -87,7 +87,9 @@ import { inspectImportSource } from "./integrations/importers";
 import { providerCatalogWithStatus, withProviderAuthStatus } from "./provider";
 import { buildModelCatalog } from "./model-routes";
 import { setDefaultModel } from "./runtime/default-model";
-import { archiveAgent, createAgent, deleteAgent, listAgents, renameAgent, setAgentProvider, unarchiveAgent, useAgent } from "./capabilities/agents";
+import { archiveAgent, createAgent, deleteAgent, listAgents, renameAgent, setAgentMemory, setAgentProvider, unarchiveAgent, useAgent } from "./capabilities/agents";
+import { crmExtractionStatus, disableCrmExtraction, enableCrmExtraction, pauseCrmExtraction, startCrmExtraction } from "./jobs/crm-extractor";
+import { createCrmContact, getCrmContact, listCrmContacts } from "./capabilities/crm-contacts";
 import {
   approveSoul,
   approveUserProfile,
@@ -111,12 +113,13 @@ import { hermesParityChecks } from "./runtime/parity";
 import { acknowledgeNotification, checkRelay, configureRelay, listRelays, queueNotification, sendQueuedNotifications } from "./integrations/relay";
 import { cancelTunnel, connectTunnel, disconnectTunnel, getTunnel, PROVIDER_UNAVAILABLE, refreshProviderDetection, selectProvider } from "./integrations/tunnel";
 import { isLoopbackHost, isLoopbackPeer, isRelayHost, isRuntimeTunnelHost, webBoundRequestAllowed } from "./lib/origin-trust";
-import { resolveEdgeSecret } from "./lib/container-env";
 import { cookieValue, serializeCookie } from "./lib/cookies";
 import { RateLimiter } from "./lib/rate-limit";
 import { signUploadParams, verifyUploadSignature } from "./lib/upload-signing";
 import { getSetupStatus, removeSetupProvider, setSetupProvider } from "./runtime/setup-api";
+import { ensureLabelProfile } from "./runtime/label-discovery";
 import { applyOnboardingRoutines, getOnboarding, patchOnboarding, startOnboardingScan } from "./runtime/onboarding";
+import { installRoutineTemplate, listRoutineTemplates, uninstallRoutineTemplate } from "./runtime/routine-templates";
 import { createSkillFromInput, getSkill, grantConnectorToSkill, installSkillFromBody, listSkills, reloadSkills, rollbackSkill, searchSkills, setSkillStatus, testSkill, updateSkill, validateSkills } from "./capabilities/skills";
 import { createChat, deleteChat, getChatSession, getOrCreateAgentChat, listChatSessions, removePendingChatMessageById, renameChat, retryFailedContainerRun, startTaskContainer, submitChatMessage, submitThreadReply, syncChatTaskResult } from "./execution/chat";
 import { sttStatus } from "./stt";
@@ -127,7 +130,6 @@ import { v1Readiness } from "./runtime/readiness";
 import { getRun, listRuns } from "./execution/runs";
 import { assertCurrentRuntimeUpdateSupported, currentVersionInfo, isUpdateInFlight, refreshVersionInfo, scheduleRuntimeRestart, updateRuntime } from "./runtime/update";
 import { projectRoot } from "./paths";
-import { currentOwnerToken } from "./lib/owner-token";
 import { readDocSection } from "./docs";
 import { isLogStream, readLogTail } from "./state/logs";
 import { redactLogTail } from "./runtime/log-redaction";
@@ -262,6 +264,10 @@ async function emitConnectorRequestAudit(
     );
   });
 }
+
+// In-flight guard for the on-view revalidation (Section E). Prevents
+// overlapping GETs from stacking background probes for the same connector.
+const connectorRevalidationInFlight = new Set<string>();
 
 export function createHandler(config: RuntimeConfig): (request: Request, peerAddress?: string | null) => Response | Promise<Response> {
   // Ensure a spawned Chrome is live for a browser.connect sign-in, relaunching
@@ -575,7 +581,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       if (!uploadStat(config.instance, id)) return json({ error: "Upload not found" }, 404);
       const ttlSeconds = uploadSignTtlSeconds(new URL(request.url).searchParams.get("ttl"));
       const expUnixSeconds = Math.floor(Date.now() / 1000) + ttlSeconds;
-      const { exp, sig } = signUploadParams(currentOwnerToken(config.instance, config.token), id, expUnixSeconds);
+      const { exp, sig } = signUploadParams(config.token, id, expUnixSeconds);
       const path = `/api/uploads/${encodeURIComponent(id)}?inline=1&exp=${exp}&sig=${sig}`;
       return json({ path, exp });
     }],
@@ -834,7 +840,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       // null here means the bearer is valid for `authorizedBearer`
       // but not for credential resolution — treat as unauthenticated
       // rather than falling through anonymously.
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       // X-Device-Token is optional — mobile clients send it after
       // they've registered their APNs token via POST /push/devices, so
@@ -1910,6 +1916,9 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       const runs = listJobRuns(config, params[0]);
       return json(agentId ? runs.filter((run) => run.agentId === agentId) : runs);
     }],
+    // Effective tool catalog for a job's runs (routine detail Tools section).
+    // "Job not found:" maps to 404 via statusFromErrorMessage.
+    ["GET", /^\/api\/jobs\/([^/]+)\/tools$/, (_request, params) => json(listJobTools(config, params[0]))],
     ["POST", /^\/api\/jobs\/([^/]+)\/run$/, async (_request, params) => json(await runJobNow(config, params[0]))],
     ["POST", /^\/api\/job-runs\/([^/]+)\/replay$/, async (_request, params) => json(await replayJobRun(config, params[0]))],
     ["POST", /^\/api\/jobs\/([^/]+)\/pause$/, async (_request, params) => json(await updateJobStatus(config, params[0], "paused"))],
@@ -1989,7 +1998,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       // Resolve the sending account → its gws config dir against the registered
       // Google accounts (same resolution the email watchers use). An unresolved
       // / unset account falls back to the default gws session.
-      const configDir = await resolveDraftSendConfigDir(account);
+      const configDir = await resolveDraftSendConfigDir(account, config.instance);
       const result = await sendGmailDraft({ draftId, ...(configDir ? { configDir } : {}) });
       if (!result.ok) {
         return json({ ok: false, message: result.message ?? "Failed to send the draft." }, 502);
@@ -2035,16 +2044,41 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       // returned untouched.
       const hasGoogle = connectors.some((c) => c.provider === "google-oauth-desktop");
       const session = hasGoogle ? await gwsSessionStatus() : undefined;
-      // The tagged accounts registry is machine-global, so resolve it once and
-      // attach to every google-oauth-desktop record alongside `session`.
-      const accounts = hasGoogle ? await listAccountsWithStatus() : undefined;
-      return json(
-        connectors.map((c) =>
-          c.provider === "google-oauth-desktop" && session
-            ? { ...c, session, accounts }
-            : c
-        )
-      );
+      // Resolve only this instance's attached accounts and add them to every
+      // google-oauth-desktop record alongside `session`.
+      const accounts = hasGoogle ? await listAccountsWithStatus(config.instance) : undefined;
+      // On-view revalidation: trigger background re-probe for stale,
+      // probe-having connectors so the page picks up the flip on the next
+      // refetch. Never blocks the response.
+      const staleThreshold = Number(process.env.GINI_CONNECTOR_STALE_MS ?? 5 * 60_000);
+      const nowMs = Date.now();
+      for (const c of connectors) {
+        if (c.status === "disabled") continue;
+        const module = getProvider(c.provider);
+        if (!module?.probe) continue;
+        const lastMs = c.lastHealthAt ? Date.parse(c.lastHealthAt) : 0;
+        if (Number.isFinite(lastMs) && nowMs - lastMs < staleThreshold) continue;
+        if (connectorRevalidationInFlight.has(c.id)) continue;
+        connectorRevalidationInFlight.add(c.id);
+        void checkConnector(config, c.id)
+          .catch(() => {})
+          .finally(() => connectorRevalidationInFlight.delete(c.id));
+      }
+      // Compute `usable` per record. For google-oauth-desktop records,
+      // usable also requires at least one signed-in account.
+      const enriched = connectors.map((c) => {
+        const base = c.provider === "google-oauth-desktop" && session
+          ? { ...c, session, accounts }
+          : c;
+        let usable: boolean;
+        if (c.provider === "google-oauth-desktop") {
+          usable = connectorIsUsable(c) && Boolean(accounts?.some((a) => a.signedIn));
+        } else {
+          usable = connectorIsUsable(c);
+        }
+        return { ...base, usable };
+      });
+      return json(enriched);
     }],
     ["GET", /^\/api\/connectors\/providers$/, () => json(listProviders().map((p) => ({
       id: p.id,
@@ -2063,16 +2097,15 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       hasSetupSkill: Boolean(p.setupSkill),
       // The setup skill NAME, if a provider declares one, so the Skills page
       // can match a service skill's required-credential connector back to its
-      // setup skill and defer the activation pill to it. On hosted no provider
-      // declares one — a Google account is connected at sign-in through the
-      // host, not via an in-chat setup skill — so this is generally undefined.
+      // setup skill and defer the activation pill to it. Google account
+      // connection is owned by the Integrations page, not an in-chat skill.
       setupSkill: p.setupSkill,
       // Live result of the provider's credentialExternallySatisfied hook
-      // (e.g. registered machine-global Google accounts). Lets the Skills
+      // (e.g. an instance-bound Google account). Lets the Skills
       // page mirror isSkillActive's absent-record fallthrough — the hook
       // only applies when no connector record with the credential name
       // exists; the page enforces that record check itself.
-      externallySatisfied: Boolean(p.credentialExternallySatisfied?.()),
+      externallySatisfied: Boolean(p.credentialExternallySatisfied?.(config.instance)),
       probeIntervalMs: p.probeIntervalMs,
       // Optional credential-template the Add Connector dialog prefills when a
       // provider is picked as a template. Derived from the module's secret
@@ -2123,14 +2156,14 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // On-demand auto-detection — Skills page "Refresh detection" button
     // calls this. Same job that runs at gateway startup; idempotent.
     ["POST", /^\/api\/connectors\/detect$/, async () => json(await runConnectorDetection(config))],
-    // Machine-global tagged Google accounts (multi-account support). The
-    // registry + per-account gws config dirs live under ~/.gini/google-accounts;
-    // these routes are NOT instance-scoped. registerAccount throws
-    // "No signed-in Google session in <dir>" when the dir has no live session.
-    ["GET", /^\/api\/google\/accounts$/, async () => json(await listAccountsWithStatus())],
+    // This instance's tagged Google credentials (multi-account support), joined
+    // with live sign-in status. Reusable credential dirs live under
+    // ~/.gini/google-accounts; primary/attached state lives under
+    // ~/.gini/instances/<instance>/google-account-bindings.json.
+    ["GET", /^\/api\/google\/accounts$/, async () => json(await listAccountsWithStatus(config.instance))],
     ["POST", /^\/api\/google\/accounts$/, async (request) => {
       const payload = await body(request);
-      // tag is optional: registerAccount defaults a missing one from the live
+      // tag is optional: registration defaults a missing one from the live
       // session's email local-part (uniquified via uniqueAccountTag).
       const tag = typeof payload.tag === "string" && payload.tag.trim() ? payload.tag.trim() : undefined;
       const configDir = typeof payload.configDir === "string" ? payload.configDir.trim() : "";
@@ -2148,49 +2181,31 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       }
       const adopt = payload.adopt === true;
       try {
-        return json(await registerAccount({ tag, configDir, adopt }), 201);
+        const account = await registerAccountForInstance(config.instance, { tag, configDir, adopt });
+        // A fresh sign-in is also the moment to digest the account's existing
+        // Gmail labels into per-account Auto-inbox defaults (fire-and-forget;
+        // see src/runtime/label-discovery.ts).
+        ensureLabelProfile(config, account);
+        return json(account, 201);
       } catch (err) {
         return json({ error: err instanceof Error ? err.message : "Failed to register account" }, 400);
       }
     }],
-    // Hosted-edge account provisioning (ADR google-multi-account.md): the edge
-    // exchanges the OAuth code server-side (web-application client) and POSTs
-    // the refresh token here with the guest bearer token. Registers trusted
-    // like the relay grant path — Google only issues the refresh token after a
-    // completed consent — and is idempotent per identity: principal, else
-    // verified email (a re-add rewrites the matching account's credential
-    // instead of minting a duplicate).
-    ["POST", /^\/api\/google\/accounts\/provision$/, async (request) => {
-      const payload = await body(request);
-      const required = (value: unknown) => (typeof value === "string" ? value.trim() : "");
-      const optional = (value: unknown) =>
-        typeof value === "string" && value.trim() ? value.trim() : undefined;
-      const clientId = required(payload.clientId);
-      const clientSecret = required(payload.clientSecret);
-      const refreshToken = required(payload.refreshToken);
-      if (!clientId || !clientSecret || !refreshToken) {
-        return json({ error: "Invalid input: clientId, clientSecret, and refreshToken are required" }, 400);
+    ["POST", /^\/api\/google\/accounts\/([^/]+)\/use$/, async (_request, params) => {
+      try {
+        const account = await useAccountForInstance(config.instance, params[0]);
+        return json(account);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to use account";
+        const status = message.includes("not found") ? 404 : 400;
+        return json({ error: message }, status);
       }
-      return json(
-        await provisionAccount({
-          clientId,
-          clientSecret,
-          refreshToken,
-          email: optional(payload.email),
-          principal: optional(payload.principal),
-          tag: optional(payload.tag),
-          // A returning-primary sign-in re-auth (vs an add-account): heals the
-          // guest's baked credential rather than minting a duplicate.
-          primary: payload.primary === true,
-          // A sign-in-intent OAuth: the provisioned account becomes the
-          // persisted primary (distinct from `primary`, which only routes
-          // where the credential lands).
-          makePrimary: payload.makePrimary === true
-        }),
-        201
-      );
     }],
-    // Runtime-owned same-tab Google login (loopback deployments; ADR
+    ["POST", /^\/api\/google\/session\/signout$/, () => {
+      signOutInstanceGoogleAccounts(config.instance);
+      return json({ ok: true });
+    }],
+    // Runtime-owned same-tab Google login (ADR
     // google-multi-account.md). Both routes are browser top-level navigations
     // proxied through the web BFF: /start 302s to Google's consent screen
     // (Desktop-client PKCE flow whose redirect URI is the WEB app's own
@@ -2198,8 +2213,8 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // the BFF's loopback hop) and /callback exchanges the code, registers the
     // account, and 302s back into the app. Callback failures redirect with
     // ?googleAddError=1 rather than erroring — the browser is mid-navigation.
-    // /start's 400s (edge mode, non-loopback origin) stay JSON: those are
-    // deployment errors a redirect would hide.
+    // /start's non-loopback-origin 400 stays JSON because a redirect would
+    // hide the configuration error.
     ["GET", /^\/api\/google\/login\/start$/, async (request) => {
       const params = new URL(request.url).searchParams;
       const result = await startGoogleLoginWeb(config, {
@@ -2220,10 +2235,6 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       });
       return new Response(null, { status: 302, headers: { location } });
     }],
-    // Which add-account flow the web should offer: hosted guests are headless
-    // ("edge" — same-tab edge OAuth), everywhere else the gws Desktop-client
-    // loopback flow works ("loopback"). Fixed per deployment.
-    ["GET", /^\/api\/google\/auth-mode$/, () => json({ mode: googleAuthMode() })],
     ["PATCH", /^\/api\/google\/accounts\/([^/]+)$/, async (request, params) => {
       const payload = await body(request);
       const tag = typeof payload.tag === "string" ? payload.tag.trim() : "";
@@ -2238,8 +2249,18 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       }
       return json(getGoogleAccount(params[0]));
     }],
+    ["DELETE", /^\/api\/google\/accounts\/([^/]+)\/instance$/, (_request, params) => {
+      try {
+        disconnectInstanceGoogleAccount(config.instance, params[0]);
+        return json({ id: params[0] });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to disconnect Google account";
+        return json({ error: message }, message.startsWith("Primary Google account") ? 409 : 404);
+      }
+    }],
     ["DELETE", /^\/api\/google\/accounts\/([^/]+)$/, (_request, params) => {
       removeAccount(params[0]);
+      detachInstanceGoogleAccount(config.instance, params[0]);
       return json({ id: params[0] });
     }],
     ["GET", /^\/api\/improvements$/, () => json(readState(config.instance).improvements)],
@@ -2262,7 +2283,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // always the literal "owner" now (owner-token-only auth). The CHECK
     // constraint on the devices table pins platform to "ios" for now.
     ["POST", /^\/api\/push\/devices$/, async (request) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       const payload = await body(request);
       const token = typeof payload.token === "string" ? payload.token.trim() : "";
@@ -2280,7 +2301,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       return json({ ok: true, device });
     }],
     ["DELETE", /^\/api\/push\/devices\/([^/]+)$/, async (request, params) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       const removed = removeDeviceForCredential(config.instance, params[0], credential);
       // 404 distinguishes "token does not exist OR belongs to a
@@ -2299,7 +2320,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // Bearer-gated like every other /api route; the NSE reads the bearer
     // from the App Group shared container the main app writes on auth.
     ["GET", /^\/api\/push\/preview$/, async (request) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       const params = new URL(request.url).searchParams;
       const sessionId = (params.get("sessionId") ?? "").trim();
@@ -2350,7 +2371,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     //     for the device.
     // Best-effort and idempotent; device-scoped like /read and /badge.
     ["POST", /^\/api\/push\/unwatch$/, async (request) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       const dev = requireDeviceToken(config, request, credential);
       if (!dev.ok) return json({ error: dev.reason }, dev.status);
@@ -2374,7 +2395,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // Credential scoping happens on every read/write so a paired
     // device can never see or mutate another credential's cursor.
     ["POST", /^\/api\/chat\/([^/]+)\/read$/, async (request, params) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       // Read state is keyed per device, not per credential — two
       // iPhones owned by the same human each track their own cursor.
@@ -2420,7 +2441,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // start". Sessions with no assistant_text fall back to clearing
     // the cursor entirely so the action still surfaces them as unread.
     ["DELETE", /^\/api\/chat\/([^/]+)\/read$/, async (request, params) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       const dev = requireDeviceToken(config, request, credential);
       if (!dev.ok) return json({ error: dev.reason }, dev.status);
@@ -2432,7 +2453,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       return json({ ok: true });
     }],
     ["GET", /^\/api\/badge$/, async (request) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       // Badge totals are per-device (see /read endpoint comment).
       const dev = requireDeviceToken(config, request, credential);
@@ -2446,7 +2467,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // the list can mark each row independently. Sessions with zero
     // unread blocks are omitted; callers default to 0.
     ["GET", /^\/api\/unread$/, async (request) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       const dev = requireDeviceToken(config, request, credential);
       if (!dev.ok) return json({ error: dev.reason }, dev.status);
@@ -2554,6 +2575,30 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     ["PATCH", /^\/api\/onboarding$/, async (request) => json(patchOnboarding(config, await body(request)))],
     ["POST", /^\/api\/onboarding\/scan$/, async () => json(await startOnboardingScan(config))],
     ["POST", /^\/api\/onboarding\/routines$/, async (request) => json(await applyOnboardingRoutines(config, await body(request)))],
+    // Routine-template gallery (ADR routine-templates-gallery.md). Thin
+    // handlers over the shared catalog in src/runtime/routine-templates.ts;
+    // installed state is agent-scoped like GET /api/jobs. Validation errors
+    // throw "Invalid input: …" → 400; an unknown template id → 404.
+    ["GET", /^\/api\/routines\/templates$/, (request) => json(listRoutineTemplates(config, agentIdFilter(request)))],
+    ["POST", /^\/api\/routines\/templates\/([^/]+)\/install$/, async (request, params) => json(await installRoutineTemplate(config, params[0], await body(request)), 201)],
+    ["DELETE", /^\/api\/routines\/templates\/([^/]+)$/, async (_request, params) => json(await uninstallRoutineTemplate(config, params[0]))],
+    // CRM extraction pipeline (ADR people-crm-extraction-pipeline.md):
+    // status, start/resume, pause, and the enable/disable master switch.
+    // Start maps a missing mail source (no Google account, no fixture) and
+    // a disabled pipeline to the standard error → 400 path.
+    ["GET", /^\/api\/crm\/extraction$/, () => json(crmExtractionStatus(config))],
+    ["POST", /^\/api\/crm\/extraction\/start$/, async () => json(await startCrmExtraction(config))],
+    ["POST", /^\/api\/crm\/extraction\/pause$/, async () => json(await pauseCrmExtraction(config))],
+    ["POST", /^\/api\/crm\/extraction\/enable$/, async () => json(await enableCrmExtraction(config))],
+    ["POST", /^\/api\/crm\/extraction\/disable$/, async () => json(await disableCrmExtraction(config))],
+    // People directory: list is profile-less (the dossier is multi-KB), the
+    // detail fetch carries it for the panel.
+    ["GET", /^\/api\/crm\/contacts$/, () => json(listCrmContacts(config))],
+    ["POST", /^\/api\/crm\/contacts$/, async (request) => json(createCrmContact(config, await body(request)), 201)],
+    ["GET", /^\/api\/crm\/contacts\/([^/]+)$/, (_request, params) => {
+      const contact = getCrmContact(config, params[0]);
+      return contact ? json(contact) : json({ error: "Contact not found" }, 404);
+    }],
     ["GET", /^\/api\/agents$/, () => json(listAgents(config))],
     ["POST", /^\/api\/agents$/, async (request) => json(await createAgent(config, await body(request)), 201)],
     ["POST", /^\/api\/agents\/([^/]+)\/use$/, async (_request, params) => json(await useAgent(config, params[0]))],
@@ -2561,6 +2606,9 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // to set, or both blank/omitted to clear and fall back to the instance
     // default. Credential setup stays on the instance-level setup/provider route.
     ["POST", /^\/api\/agents\/([^/]+)\/provider$/, async (request, params) => json(await setAgentProvider(config, decodeURIComponent(params[0]), await body(request)))],
+    // Toggle the agent's ambient-memory pipeline. Body: { autoMemory: boolean }
+    // — false skips auto-recall + auto-retain for this agent's turns.
+    ["POST", /^\/api\/agents\/([^/]+)\/memory$/, async (request, params) => json(await setAgentMemory(config, decodeURIComponent(params[0]), await body(request)))],
     // Archive (soft-delete) / restore an agent. Body-less POSTs, mirroring /use.
     ["POST", /^\/api\/agents\/([^/]+)\/archive$/, async (_request, params) => json(await archiveAgent(config, decodeURIComponent(params[0])))],
     ["POST", /^\/api\/agents\/([^/]+)\/unarchive$/, async (_request, params) => json(await unarchiveAgent(config, decodeURIComponent(params[0])))],
@@ -2657,20 +2705,19 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // non-loopback bind (GINI_BIND_HOST=0.0.0.0, the container case) a remote
     // peer can forge `Host: localhost`; the host/origin gate alone would admit
     // it to the token-injecting BFF lane. The real peer address is
-    // kernel-reported and unforgeable. Non-loopback fronts (edge, relay,
+    // kernel-reported and unforgeable. Non-loopback fronts (relay,
     // tunnel, GINI_TRUSTED_ORIGINS) carry their own non-loopback Host and are
     // unaffected. See ADR docker-xvfb-deployment.md.
     const webHost = request.headers.get("host") ?? url.host;
-    if (isLoopbackHost(webHost) && !peerIsLoopback && !edgeTrustedRequest(request)) {
+    if (isLoopbackHost(webHost) && !peerIsLoopback) {
       return url.pathname.startsWith("/api/")
         ? withCors(request, json({ error: "Unauthorized" }, 401))
         : withCors(request, new Response("Not found", { status: 404 }));
     }
-    // A trusted non-loopback web front (edge, allowlisted origin, tunnel) gets
+    // A trusted non-loopback web front (allowlisted origin or tunnel) gets
     // the same access as loopback: the gates above are the whole admission
     // check. Auth is owner-token-only (see ADR owner-token-auth.md) — the
-    // browser never holds the bearer (the BFF injects it server-side), and
-    // hosted fronts authenticate at the edge before proxying.
+    // browser never holds the bearer because the BFF injects it server-side.
     return proxyWeb(request, url, config, peerIsLoopback);
   };
 
@@ -3345,7 +3392,7 @@ function signedUploadAccess(request: Request, config: RuntimeConfig): boolean {
   const match = url.pathname.match(UPLOAD_GET_PATH);
   if (!match) return false;
   return verifyUploadSignature(
-    currentOwnerToken(config.instance, config.token),
+    config.token,
     match[1]!,
     url.searchParams.get("exp"),
     url.searchParams.get("sig"),
@@ -3353,32 +3400,17 @@ function signedUploadAccess(request: Request, config: RuntimeConfig): boolean {
   );
 }
 
-// True when the request arrived through a trusted hosted edge: the operator has
-// configured a non-empty GINI_EDGE_SECRET AND the request carries an X-Gini-Edge
-// header whose value equals it exactly. An unset/empty secret can never match
-// (resolveEdgeSecret returns "" and the empty short-circuit fails closed), so a
-// request with no header — or an empty header — is never trusted. The secret is
-// only ever compared, never logged. Default off: with the env unset this always
-// returns false and the loopback-peer trust model is byte-for-byte unchanged.
-export function edgeTrustedRequest(request: Request): boolean {
-  const secret = resolveEdgeSecret();
-  if (secret === "") return false;
-  return request.headers.get("x-gini-edge") === secret;
-}
-
 // Owner-token-only credential resolution (see ADR owner-token-auth.md): the
 // runtime is single-user, so the singleton config.token is the ONLY bearer and
-// every authenticated caller is the literal "owner" credential. Hosted requests
-// arrive through the edge, which authenticates the user's session and presents
-// this guest's own config.token upstream — so they resolve identically. The
-// credential id keys per-credential state (push devices, read state, unread
+// every authenticated caller is the literal "owner" credential. The credential
+// id keys per-credential state (push devices, read state, unread
 // counters); "owner" being a constant means all of the operator's devices share
 // one pool, which is exactly the single-user model.
 function resolveCredentialFromBearer(
   config: RuntimeConfig,
   bearer: string | undefined
 ): "owner" | null {
-  return bearer && bearer === currentOwnerToken(config.instance, config.token) ? "owner" : null;
+  return bearer && bearer === config.token ? "owner" : null;
 }
 
 function authorizedBearer(config: RuntimeConfig, bearer: string | undefined): boolean {
@@ -3386,9 +3418,6 @@ function authorizedBearer(config: RuntimeConfig, bearer: string | undefined): bo
 }
 
 async function authorized(request: Request, config: RuntimeConfig): Promise<boolean> {
-  // A trusted edge is owner-equivalent — the same lane a valid config.token
-  // bearer takes — so admit it before parsing the bearer at all.
-  if (edgeTrustedRequest(request)) return true;
   const header = request.headers.get("authorization") ?? "";
   const queryToken = new URL(request.url).searchParams.get("token");
   const bearer = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : queryToken;
@@ -3398,16 +3427,12 @@ async function authorized(request: Request, config: RuntimeConfig): Promise<bool
 }
 
 // Pull the bearer off a request the same way `authorized` does so
-// per-route credential lookups stay consistent with the gate above. A trusted
-// edge resolves as the owner: substitute config.token so the downstream
-// resolveCredentialFromBearer maps it to "owner", identical to a real
-// config.token bearer. A real bearer on the request still wins when present.
-function bearerFromRequest(request: Request, config: RuntimeConfig): string | undefined {
+// per-route credential lookups stay consistent with the gate above.
+function bearerFromRequest(request: Request): string | undefined {
   const header = request.headers.get("authorization") ?? "";
   const queryToken = new URL(request.url).searchParams.get("token");
   const bearer = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : queryToken;
-  if (bearer) return bearer;
-  return edgeTrustedRequest(request) ? currentOwnerToken(config.instance, config.token) : undefined;
+  return bearer ?? undefined;
 }
 
 // Resolve and validate the optional X-Device-Token header. Returns the
@@ -3570,6 +3595,7 @@ function agentIdFilter(request: Request): string | undefined {
 function statusFromErrorMessage(message: string): number {
   if (message.startsWith("Job not found") || message.startsWith("Job run not found")) return 404;
   if (message.startsWith("Agent not found")) return 404;
+  if (message.startsWith("Routine template not found")) return 404;
   // Chat-session and thread submit paths (submitChatMessage,
   // submitThreadReply) throw these when the target was deleted or never
   // existed. Map to 404 so a stale link surfaces a clean not-found rather

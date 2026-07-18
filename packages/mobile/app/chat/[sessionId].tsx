@@ -125,12 +125,12 @@ function itemJobName(item: ChatRenderItem, runIdToJobName: Map<string, string>):
   return undefined;
 }
 
-// Single-agent chat: an agent header, a Messages / Jobs tab bar, and the
-// active tab's content. Messages renders every block of the session linearly
+// Single-agent chat: an agent header, a Chat / Routines tab bar, and the
+// active tab's content. Chat renders every block of the session linearly
 // in ordinal order (side-conversations now live in their own Topic sessions,
-// not threads). Jobs lists the agent's recurring jobs. The composer stays
+// not threads). Routines lists the agent's recurring jobs. The composer stays
 // mounted under every tab. A `kind:"topic"` session reads as `#<title>` in the
-// header and hides the Jobs tab.
+// header and hides the Routines tab.
 export default function ChatDetailScreen() {
   const { sessionId } = useLocalSearchParams<{ sessionId: string }>();
   const stream = useChatStream(sessionId ?? null);
@@ -183,14 +183,14 @@ export default function ChatDetailScreen() {
   const agentOnline = agent?.status === "ready" || agent?.status === "active";
 
   // A `kind:"topic"` session is a subject-scoped side-conversation: it carries
-  // its own title and reads as `#<title>` in the header. Its Jobs tab is hidden
+  // its own title and reads as `#<title>` in the header. Its Routines tab is hidden
   // (topics don't own recurring jobs) and it shows no agent online status.
   const isTopic = stream.session?.kind === "topic";
   const headerName = isTopic
     ? `#${stream.session?.title?.trim() || "topic"}`
     : agentName;
 
-  // The Jobs tab is per-agent; gate the fetch on the resolved agent id so
+  // The Routines tab is per-agent; gate the fetch on the resolved agent id so
   // it doesn't run before the session record loads.
   const jobs = useJobs(agent?.id ?? null);
 
@@ -319,7 +319,7 @@ export default function ChatDetailScreen() {
     return "";
   }, [list]);
 
-  // Auto-scroll only on the Messages tab (the other tabs are short lists
+  // Auto-scroll only on the Chat tab (the other tabs are short lists
   // that don't stream). Skipped when the user has scrolled up.
   useEffect(() => {
     if (tab !== "messages") return;
@@ -398,7 +398,7 @@ export default function ChatDetailScreen() {
       { content: "", audio },
       {
         onError: (err) => {
-          Alert.alert("Voice message failed", err.message);
+          Alert.alert("Voice chat failed", err.message);
         },
         onSettled: () => {
           setVoicePending(false);
@@ -625,17 +625,17 @@ export default function ChatDetailScreen() {
         <View style={styles.headerSpacer} />
       </View>
 
-      {/* Tab bar — Messages / Jobs (count). The Jobs tab is hidden on a
-          topic surface (topics don't own recurring jobs). */}
+      {/* Tab bar — Chat / Routines (count). The Routines tab is hidden on a
+          topic surface (topics don't own recurring routines). */}
       <View style={styles.tabBar}>
         <TabButton
-          label="Messages"
+          label="Chat"
           active={tab === "messages"}
           onPress={() => setTab("messages")}
         />
         {!isTopic ? (
           <TabButton
-            label="Jobs"
+            label="Routines"
             active={tab === "jobs"}
             count={jobs.data?.length ?? 0}
             onPress={() => setTab("jobs")}
@@ -675,8 +675,8 @@ export default function ChatDetailScreen() {
               {visible.length > 0 ? (
                 itemSegments.map((segment, segmentIndex) =>
                   segment.jobName ? (
-                    // Job-delivered messages: one light-blue left-bordered
-                    // container with a single "from <job name>" subtitle so
+                    // Routine-delivered chat: one light-blue left-bordered
+                    // container with a single "from <routine name>" subtitle so
                     // they're distinguishable from the user's own turn.
                     <View key={`job-${segmentIndex}`} style={styles.jobRun}>
                       <Text style={styles.jobRunLabel}>from {segment.jobName}</Text>
@@ -697,7 +697,7 @@ export default function ChatDetailScreen() {
                     <ActivityIndicator color={theme.muted} size="small" />
                     <Text style={styles.voicePendingText}>
                       {voice.data?.ready === false
-                        ? "Setting up voice messages — first time only, this can take a minute."
+                        ? "Setting up voice chat — first time only, this can take a minute."
                         : "Transcribing…"}
                     </Text>
                   </View>
@@ -715,7 +715,7 @@ export default function ChatDetailScreen() {
               activeOpacity={0.85}
               style={styles.jumpToBottom}
               accessibilityRole="button"
-              accessibilityLabel="Scroll to latest messages"
+              accessibilityLabel="Scroll to latest chat"
             >
               <Feather name="chevron-down" size={24} color={theme.text} />
             </TouchableOpacity>
@@ -820,14 +820,14 @@ export default function ChatDetailScreen() {
             <TextInput
               value={text}
               onChangeText={setText}
-              placeholder={`Message ${headerName}…`}
+              placeholder={`Chat with ${headerName}…`}
               placeholderTextColor={theme.inputPlaceholder}
               multiline
               editable={!!sessionId}
               onSubmitEditing={submit}
               blurOnSubmit={false}
               style={styles.inputText}
-              accessibilityLabel="Message input"
+              accessibilityLabel="Chat input"
             />
             {canStop ? (
               <>
@@ -836,7 +836,7 @@ export default function ChatDetailScreen() {
                     onPress={submit}
                     style={[styles.sendButton, styles.queueButton]}
                     accessibilityRole="button"
-                    accessibilityLabel="Queue message"
+                    accessibilityLabel="Queue chat"
                   >
                     {send.isPending ? (
                       <ActivityIndicator color={theme.buttonText} />
@@ -935,7 +935,7 @@ function TabButton({
   );
 }
 
-// Jobs tab — the agent's recurring jobs, mirroring the channel rows on
+// Routines tab — the agent's recurring routines, mirroring the channel rows on
 // the Channels screen.
 function JobsTab({ jobs, loading }: { jobs: JobRecord[]; loading: boolean }) {
   if (loading && jobs.length === 0) {
@@ -949,9 +949,9 @@ function JobsTab({ jobs, loading }: { jobs: JobRecord[]; loading: boolean }) {
     return (
       <View style={styles.tabEmpty}>
         <Feather name="clock" size={28} color={theme.placeholder} />
-        <Text style={styles.tabEmptyText}>No jobs yet</Text>
+        <Text style={styles.tabEmptyText}>No routines yet</Text>
         <Text style={styles.tabEmptySub}>
-          Recurring jobs run on a schedule and deliver to a channel.
+          Recurring routines run on a schedule and deliver to a channel.
         </Text>
       </View>
     );
@@ -1056,14 +1056,14 @@ const styles = StyleSheet.create({
     fontSize: 11
   },
 
-  // Messages.
+  // Chat transcript.
   messages: {
     padding: 16,
     paddingTop: 18,
     paddingBottom: 24,
     gap: 16
   },
-  // Job-delivered run container: light-blue left border + faint tint so a
+  // Routine-delivered run container: light-blue left border + faint tint so a
   // scheduled job's messages stand apart from the user's own conversation.
   jobRun: {
     gap: 16,
@@ -1092,7 +1092,7 @@ const styles = StyleSheet.create({
     fontSize: 18
   },
 
-  // Jobs tab list.
+  // Routines tab list.
   tabListContent: { paddingVertical: 4 },
   tabEmpty: {
     flex: 1,
@@ -1114,7 +1114,7 @@ const styles = StyleSheet.create({
     lineHeight: 20
   },
 
-  // Job list row.
+  // Routine list row.
   jobRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1151,7 +1151,7 @@ const styles = StyleSheet.create({
     fontSize: 12
   },
 
-  // Message area — wraps the transcript ScrollView so the floating jump
+  // Chat area — wraps the transcript ScrollView so the floating jump
   // button can be absolutely positioned relative to it. As a flex child it
   // shrinks when the keyboard opens, keeping the button above the composer.
   messagesArea: { flex: 1 },

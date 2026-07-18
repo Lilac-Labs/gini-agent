@@ -17,7 +17,7 @@ ngrok http <gateway-port>
 
 …as a supervised child. The agent reports a URL like `https://<id>.ngrok-free.app`, which Gini publishes and trusts automatically for exactly as long as the tunnel is connected. If the agent dies, the record flips to `error` and the front's trust is revoked. Disconnect kills the agent.
 
-The published front is **owner-equivalent**: any browser reaching the URL gets the same access as loopback, with no per-device pairing gate (see ADR [owner-token-auth.md](../adr/owner-token-auth.md)). The URL is public — treat it as an operator credential and share it only with devices you fully trust, or use the hosted edge for multi-user access.
+The published front is **owner-equivalent**: any browser reaching the URL gets the same access as loopback, with no per-device pairing gate (see ADR [owner-token-auth.md](../adr/owner-token-auth.md)). The URL is public — treat it as an operator credential and share it only with devices you fully trust or put an authentication proxy in front of it.
 
 ## Free-tier caveats
 

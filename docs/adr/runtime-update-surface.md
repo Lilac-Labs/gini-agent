@@ -173,10 +173,6 @@ installer-origin guardrails rather than adding a browser-only shortcut.
   rather than duplicating them.
 - Update remains scoped to the installer-managed runtime. Repo worktrees
   should still use normal git workflows.
-- Managed (platform-hosted) deployments roll updates platform-side, so the
-  web hides the sidebar's version/Update row there (see ADR
-  managed-deployment-mode.md); the update API itself is unchanged.
-
 ## Acceptance Checks
 
 - The sidebar shows a package/git version and an Update button.

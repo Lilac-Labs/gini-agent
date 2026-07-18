@@ -86,7 +86,7 @@ export async function connector(ctx: CliContext): Promise<void> {
       // button there via request_google_account).
       print({
         message:
-          "The CLI can't drive the Google OAuth flow. To add or reconnect a Google account, open the Integrations page in the web app (in chat, the agent can surface a button there). On hosted, the primary Google account is connected at sign-in through the host."
+          "The CLI can't drive the Google OAuth flow. To add or reconnect a Google account, open the Integrations page in the web app (in chat, the agent can surface a button there)."
       });
       return;
     }

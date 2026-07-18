@@ -121,10 +121,7 @@ async function checkGws(
     };
   }
   // No account attached, or accounts registered but none ever signed in (and
-  // none revoked). On hosted this is typically the post-sign-in provisioning
-  // window: the edge delivers the credential asynchronously, retrying for ~90s
-  // after the redirect, so the state usually heals itself — the agent must
-  // re-check before surfacing any button.
+  // none revoked). The user must complete the local Integrations flow.
   return {
     tool: "google (gws)",
     ok: false,
@@ -133,12 +130,9 @@ async function checkGws(
         ? "no Google account attached to this Gini instance"
         : "no live Google session on any attached account",
     action:
-      "No Google account is signed in yet. On hosted, the account is connected at sign-in through the host, " +
-      "and right after a fresh sign-in the credential can still be landing (delivery retries for about 90 " +
-      "seconds) — so this often resolves on its own. You MUST resolve this now, before continuing the task, " +
-      "even if the task does not use Google — then proceed. First re-check once by calling `list_connectors`: " +
-      "it refreshes the Google account registry and re-probes sign-in. Only if it still reports no signed-in " +
-      "Google account, call `request_google_account`: it puts a connect button (→ the Integrations page) in " +
+      "No Google account is signed in yet. You MUST resolve this now, before continuing the task, even if " +
+      "the task does not use Google — then proceed. Call `request_google_account`: it puts a connect button " +
+      "(→ the Integrations page) in " +
       "the chat. Tell the user to click it, then stop and wait for them to say it's done. Never run " +
       "`gws auth login`, and never drive a Google sign-in page with the browser tools."
   };

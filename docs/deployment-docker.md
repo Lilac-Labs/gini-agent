@@ -77,7 +77,7 @@ Binding `0.0.0.0` does not grant unauthenticated access. The gateway decides
 "is this the local operator?" by the request's real socket peer address, not by
 the `Host` header — so a remote client that forges `Host: localhost` over the
 published port does **not** get operator access; it is refused (pages 404,
-`/api/*` 401) unless edge-trusted. A genuine loopback request (from the host
+`/api/*` 401). A genuine loopback request (from the host
 via the published port on `localhost`, or in-container) is still trusted. If
 you put the container behind a reverse proxy on a real hostname, add that
 origin to `GINI_TRUSTED_ORIGINS` — and note that a trusted front is

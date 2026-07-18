@@ -315,16 +315,13 @@ export default function SkillsPage() {
                                 );
                               })()
                             ) : provider.externallySatisfied ? (
-                              // The credential is satisfied out-of-band with no
-                              // connector record — in hosted the guest ships
-                              // with its Google Workspace credential already in
-                              // place (baked by the host, registered at boot),
-                              // so there's nothing for the user to set up. Show
-                              // it as provisioned; account management (retag /
+                              // The credential is satisfied by an attached
+                              // Google account with no connector record. Show
+                              // it as connected; account management (retag /
                               // add / remove) lives on the Integrations page.
                               <div className="flex items-center gap-1.5">
                                 <Badge variant="outline" className="text-[10px] text-emerald-600">
-                                  provisioned
+                                  connected
                                 </Badge>
                                 <ManageInIntegrationsLink />
                               </div>
@@ -543,7 +540,7 @@ function providersByIdMap(providers: ProviderDescriptor[]): Map<string, Provider
 // Reverse of the provider credential template: credential NAME → the provider
 // whose template owns it (linear → LINEAR_API_KEY, google-oauth-desktop →
 // google-workspace-oauth). Lets the page route a required credential name to
-// its provider — and, for the hosted Google credential, read its
+// its provider — and, for the Google credential, read its
 // `externallySatisfied` bit — even before any connector record exists. Mirrors
 // providerForCredentialName in connectors/registry.ts.
 function providerByCredentialNameMap(providers: ProviderDescriptor[]): Map<string, ProviderDescriptor> {

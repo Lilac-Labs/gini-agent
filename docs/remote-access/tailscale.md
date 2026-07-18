@@ -24,7 +24,7 @@ https://<machine>.<tailnet>.ts.net
 tailscale serve --bg http://127.0.0.1:<gateway-port>
 ```
 
-The connected URL's origin is trusted by the gateway automatically for exactly as long as the tunnel is connected. A trusted front is **owner-equivalent** — anyone on your tailnet who can reach the URL gets the same access as loopback, with no per-device pairing gate (see ADR [owner-token-auth.md](../adr/owner-token-auth.md)) — so keep the tailnet limited to devices you fully trust, or use the hosted edge for multi-user access.
+The connected URL's origin is trusted by the gateway automatically for exactly as long as the tunnel is connected. A trusted front is **owner-equivalent** — anyone on your tailnet who can reach the URL gets the same access as loopback, with no per-device pairing gate (see ADR [owner-token-auth.md](../adr/owner-token-auth.md)) — so keep the tailnet limited to devices you fully trust or put an authentication proxy in front of it.
 
 ## Confirm it's live
 

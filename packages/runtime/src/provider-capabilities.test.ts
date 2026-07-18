@@ -285,14 +285,6 @@ describe("resolveProviderContextWindowTokens", () => {
     expect(resolveProviderContextWindowTokens(provider("azure", "o4-mini"))).toBe(200_000);
   });
 
-  test("hosted gini-model alias resolves to the 1M window of the deployment behind it", () => {
-    // Hosted guests are provisioned with provider.name=openai, model="gini-model"
-    // (the edge rewrites the alias to the real 1M Azure deployment). Without the
-    // alias mapping this fell to the 32K fallback, shrinking the context budget.
-    expect(resolveProviderContextWindowTokens(provider("openai", "gini-model"))).toBe(1_000_000);
-    expect(resolveProviderContextWindowTokens(provider("openai", "GINI-MODEL"))).toBe(1_000_000);
-  });
-
   test("deepseek v4 models and compatibility aliases resolve to one million tokens", () => {
     expect(resolveProviderContextWindowTokens(provider("deepseek", "deepseek-v4-flash"))).toBe(1_000_000);
     expect(resolveProviderContextWindowTokens(provider("deepseek", "deepseek-v4-pro"))).toBe(1_000_000);

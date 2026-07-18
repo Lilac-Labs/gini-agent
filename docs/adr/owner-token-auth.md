@@ -6,77 +6,67 @@
 
 ## Context
 
-Gini's runtime is a single-user personal agent: one gateway per instance, one
-operator. The former device-pairing subsystem (per-device session tokens,
-operator-approved handshakes, a `gini_session` cookie gate on non-loopback web
-fronts, `/api/pairing/*` routes, a `/pair` redirect, `PairedDevice` /
-`PairingCode` / `PairingRequest` state, `gini pairing` / `gini devices` CLI
-commands) implemented a multi-credential model on top of that single-user
-runtime. It carried real complexity — its own claim flows, rate limits,
-binding cookies, an apple-app-site-association route, a relay cookie gate,
-a bootstrap allowlist — while every credential it minted was owner-equivalent
-anyway: a paired session could approve further devices exactly like loopback.
-
-The real multi-user boundary is a hosted edge in front of the runtime:
-Google OAuth, per-user sessions, and per-instance isolation. Inside a single runtime, a second
-credential class bought no isolation, only surface area.
+Gini's runtime is a single-user personal agent: one gateway instance has one
+operator. The former device-pairing subsystem created per-device sessions,
+approval handshakes, cookie gates, pairing state, and CLI commands, but every
+credential it minted was owner-equivalent. It added surface area without
+creating a meaningful isolation boundary.
 
 ## Decision
 
-**The runtime authorizes exactly one credential: the owner token.** A bearer
-authorizes iff it equals the singleton `config.token`; the resolved credential
-id is always `"owner"`. The helpers live in `packages/runtime/src/http.ts`
-(`resolveCredentialFromBearer` / `authorizedBearer`, alongside
-`edgeTrustedRequest`).
+The runtime authorizes exactly one credential: the instance owner token stored
+in `config.json`. A bearer authorizes only when it equals `config.token`; the
+resolved credential id is always `owner`.
 
-- **The pairing subsystem is deleted**: `governance/pairing.ts`, the
-  `/api/pairing/*` routes, `/api/devices` (+revoke), the relay
-  `gini_session`/`gini_pair`/`gini_client` cookie gate, the `/pair` redirect,
-  the pairing bootstrap allowlist, the apple-app-site-association route, the
-  `PairedDevice`/`PairingCode`/`PairingRequest` state (and the `"pairing"`
-  event kind), and the `gini pairing`/`gini devices` CLI commands.
-  `normalizeState` sheds the legacy `pairingCodes`/`pairingRequests`/`devices`
-  keys from old `state.json` files.
-- **Non-loopback web fronts rely on host/origin trust alone.** The four trust
-  lanes (loopback, relay-domain, runtime-managed tunnel, `GINI_TRUSTED_ORIGINS`)
-  remain, plus a **forged-loopback peer guard**: a `Host: localhost` request
-  arriving from a non-loopback socket peer is refused (401 for `/api/*`, 404
-  for pages) unless edge-trusted. A trusted non-loopback front gets the same
-  access as loopback — no pairing cookie gate. Remote multi-user access is the
-  hosted edge's job.
-- **A hosted deployment authenticates at the edge.** Google OAuth runs at
-  the edge; the browser carries an edge session cookie and mobile carries the
-  same session token as a Bearer. The edge proxy injects `X-Gini-Edge` **and**
-  replaces `Authorization` with the runtime's own `config.token` upstream, so
-  every proxied request resolves as owner. `GINI_EDGE_SECRET` grants
-  owner-equivalence.
-- **Mobile connects directly to the runtime.** The setup screen stores the
-  operator-provided `{baseUrl, token}` (AsyncStorage `gini.auth.v1`) and sends
-  the owner Bearer on every call. Disconnecting clears those credentials
-  locally. There is no mobile-specific OAuth, QR, relay, or pairing flow.
-- **The push-device registry is kept** (`/api/push/devices`, `X-Device-Token`,
-  APNs) — it tracks notification endpoints, not credentials; its credential id
-  is always `"owner"`. `/api/mobile/bootstrap` remains, owner-bearer-gated.
+- Native `/api/*` callers send `Authorization: Bearer <config.token>` (or the
+  supported query token on streaming endpoints).
+- The Next.js BFF reads the token server-side and injects it only after its
+  Host/Origin and CSRF checks pass. Browser JavaScript never receives it.
+- The mobile client stores the operator-provided runtime URL and owner token,
+  sends the bearer on every request, and clears both locally on disconnect.
+- A signed upload URL is a narrow exception: its HMAC uses `config.token`, is
+  scoped to one upload id and method, and expires.
+- Push-device rows track notification endpoints, not credentials. They all use
+  the literal owner credential id.
+
+The pairing subsystem is removed: there are no pairing routes, device session
+tokens, pairing cookies, approval codes, paired-device records, or pairing CLI
+commands. Legacy pairing collections are discarded while normalizing older
+state files.
+
+### Web-front trust
+
+The gateway validates every web-bound request before proxying it to the BFF.
+Accepted fronts are loopback, the configured relay domain, a runtime-managed
+tunnel, or an explicit `GINI_TRUSTED_ORIGINS` entry. These lanes grant access
+to the browser surface, whose BFF then injects the owner token.
+
+A loopback Host is trusted only when the socket peer is also loopback. This
+prevents a remote peer on a non-loopback/container bind from forging
+`Host: localhost`. Such requests receive 401 on `/api/*` or 404 on pages.
+
+A trusted non-loopback browser front is owner-equivalent. Operators must expose
+one only to networks and devices they fully trust or put their own
+authentication proxy in front of it. Gini does not implement multi-user
+sessions inside a runtime instance.
 
 ## Consequences
 
-- Remote self-host fronts rely on the host/origin trust lanes plus the
-  forged-loopback peer guard; anyone a trusted front admits is
-  owner-equivalent. Expose a front only to devices you fully trust, or use
-  the hosted edge for multi-user access.
-- Revocation is coarse: rotate the `config.token` (self-host) or delete the
-  edge session row (hosted). There is no per-device revocation inside the
-  runtime.
-- All operator devices share one credential pool — audit rows distinguish
-  surfaces, not devices.
-- The runtime sheds an entire subsystem (routes, state records, CLI commands,
-  cookie plumbing, web pairing UI) with no isolation loss, because every
-  pairing credential was already owner-equivalent.
+- One token and one credential id match the runtime's single-user model.
+- Revocation is coarse: rotate `config.token` and update clients.
+- Audit records distinguish surfaces, tasks, and agents, not operator devices.
+- Browser safety depends on the gateway/BFF origin checks and on limiting
+  trusted remote fronts.
+- Mobile and other native clients may hold the owner token; browser clients do
+  not.
 
 ## Acceptance Checks
 
-- Owner-only 401 pin: `packages/runtime/src/http-nonloopback-bind.test.ts`
-  ("gini_device_-shaped token is 401") and `packages/runtime/src/http.test.ts`
-  ("only the owner bearer authorizes the mobile contracts").
-- Edge-secret owner-equivalence: `packages/runtime/src/http-edge-secret.test.ts`.
-- Mobile owner-token requests: `packages/mobile/src/api.test.ts`.
+- Owner-only native API authorization:
+  `packages/runtime/src/http.part1.test.ts`.
+- Forged loopback Host rejection and genuine loopback admission:
+  `packages/runtime/src/http-nonloopback-bind.test.ts`.
+- BFF origin and CSRF enforcement: web proxy tests.
+- Signed upload capability scope and expiry:
+  `packages/runtime/src/http.part4.test.ts`.
+- Mobile bearer requests: `packages/mobile/src/api.test.ts`.

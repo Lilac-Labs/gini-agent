@@ -10,8 +10,6 @@ The catalog carries four drivable providers. `gini-relay` is always enabled; `ta
 
 An instance runs on the user's machine bound to loopback. To reach it from a phone or a remote device, the gateway needs a publicly reachable URL fronted by a tunnel. Users pick among several tunnel providers (the hosted Gini Relay, their own Tailscale network, ngrok, Cloudflare); the hosted relay shipped first, and the Tailscale/ngrok/Cloudflare drivers followed as detection-gated catalog rows. The UI needs the full provider catalog up front — including the disabled ones and why they're disabled — so it can render the selection panel in one pass, and it needs the live connection status to decide which view to show.
 
-The tunnel surface is self-serve remote access, so a managed (platform-hosted) deployment — whose ingress an edge proxy terminates — hides the web's tunnel menu entirely (see ADR managed-deployment-mode.md); the backend contract below is unchanged.
-
 Tunnel connectivity follows the established capability pattern: an opt-in singleton on `RuntimeState` (`state.tunnel`), a behavior module exposing thin functions, HTTP routes that delegate to it, and a CLI shim that goes through the gateway. The browser-connect capability carries a parallel `state.browser` singleton — null by default (the runtime drives its own spawned Chrome), non-null only when the user attaches their own external Chrome over CDP (issue #420 removed the third, managed/visible-window, mode).
 
 ## Trust boundary

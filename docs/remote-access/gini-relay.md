@@ -20,7 +20,7 @@ The subdomain is keyed to this device, so reconnects and gateway restarts keep t
 
 ## Trust
 
-Relay subdomains are trusted by the gateway automatically — no configuration. A trusted front is **owner-equivalent**: any browser reaching the URL gets the same access as loopback, with no per-device pairing gate (see ADR [owner-token-auth.md](../adr/owner-token-auth.md)). Share the URL only with devices you fully trust, or use the hosted edge for multi-user access.
+Relay subdomains are trusted by the gateway automatically — no configuration. A trusted front is **owner-equivalent**: any browser reaching the URL gets the same access as loopback, with no per-device pairing gate (see ADR [owner-token-auth.md](../adr/owner-token-auth.md)). Share the URL only with devices you fully trust or put an authentication proxy in front of it.
 
 ## Confirm it's live
 

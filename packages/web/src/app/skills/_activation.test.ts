@@ -47,8 +47,8 @@ function connector(overrides: Partial<ConnectorRecord>): ConnectorRecord {
 }
 
 // The google-oauth-desktop provider as the /api/connectors/providers payload
-// surfaces it. On hosted it carries the Google Workspace credential and, when
-// the boot-registered account is present, reports it externally satisfied.
+// surfaces it. An account attached to this instance reports the credential as
+// externally satisfied.
 function gwsProvider(overrides: Partial<ProviderDescriptor> = {}): ProviderDescriptor {
   return {
     id: "google-oauth-desktop",
@@ -192,13 +192,13 @@ describe("deriveActivation: fallback when usable is absent", () => {
   });
 });
 
-describe("deriveActivation: hosted externally-satisfied fallthrough", () => {
+describe("deriveActivation: externally-satisfied fallthrough", () => {
   const serviceSkill = skill({
     name: "google-calendar",
     requiredCredentials: ["google-workspace-oauth"]
   });
 
-  test("no connector record + provider externallySatisfied -> active/ok (hosted Google account)", () => {
+  test("no connector record + provider externallySatisfied -> active/ok", () => {
     expect(activationFor(serviceSkill, [], gwsProvider({ externallySatisfied: true }))).toEqual({
       label: "active",
       tone: "ok"

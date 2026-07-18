@@ -113,7 +113,6 @@ import { hermesParityChecks } from "./runtime/parity";
 import { acknowledgeNotification, checkRelay, configureRelay, listRelays, queueNotification, sendQueuedNotifications } from "./integrations/relay";
 import { cancelTunnel, connectTunnel, disconnectTunnel, getTunnel, PROVIDER_UNAVAILABLE, refreshProviderDetection, selectProvider } from "./integrations/tunnel";
 import { isLoopbackHost, isLoopbackPeer, isRelayHost, isRuntimeTunnelHost, webBoundRequestAllowed } from "./lib/origin-trust";
-import { resolveEdgeSecret } from "./lib/container-env";
 import { cookieValue, serializeCookie } from "./lib/cookies";
 import { RateLimiter } from "./lib/rate-limit";
 import { signUploadParams, verifyUploadSignature } from "./lib/upload-signing";
@@ -131,7 +130,6 @@ import { v1Readiness } from "./runtime/readiness";
 import { getRun, listRuns } from "./execution/runs";
 import { assertCurrentRuntimeUpdateSupported, currentVersionInfo, isUpdateInFlight, refreshVersionInfo, scheduleRuntimeRestart, updateRuntime } from "./runtime/update";
 import { projectRoot } from "./paths";
-import { currentOwnerToken } from "./lib/owner-token";
 import { readDocSection } from "./docs";
 import { isLogStream, readLogTail } from "./state/logs";
 import { redactLogTail } from "./runtime/log-redaction";
@@ -583,7 +581,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       if (!uploadStat(config.instance, id)) return json({ error: "Upload not found" }, 404);
       const ttlSeconds = uploadSignTtlSeconds(new URL(request.url).searchParams.get("ttl"));
       const expUnixSeconds = Math.floor(Date.now() / 1000) + ttlSeconds;
-      const { exp, sig } = signUploadParams(currentOwnerToken(config.instance, config.token), id, expUnixSeconds);
+      const { exp, sig } = signUploadParams(config.token, id, expUnixSeconds);
       const path = `/api/uploads/${encodeURIComponent(id)}?inline=1&exp=${exp}&sig=${sig}`;
       return json({ path, exp });
     }],
@@ -842,7 +840,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       // null here means the bearer is valid for `authorizedBearer`
       // but not for credential resolution — treat as unauthenticated
       // rather than falling through anonymously.
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       // X-Device-Token is optional — mobile clients send it after
       // they've registered their APNs token via POST /push/devices, so
@@ -2099,12 +2097,11 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       hasSetupSkill: Boolean(p.setupSkill),
       // The setup skill NAME, if a provider declares one, so the Skills page
       // can match a service skill's required-credential connector back to its
-      // setup skill and defer the activation pill to it. On hosted no provider
-      // declares one — a Google account is connected at sign-in through the
-      // host, not via an in-chat setup skill — so this is generally undefined.
+      // setup skill and defer the activation pill to it. Google account
+      // connection is owned by the Integrations page, not an in-chat skill.
       setupSkill: p.setupSkill,
       // Live result of the provider's credentialExternallySatisfied hook
-      // (e.g. registered machine-global Google accounts). Lets the Skills
+      // (e.g. an instance-bound Google account). Lets the Skills
       // page mirror isSkillActive's absent-record fallthrough — the hook
       // only applies when no connector record with the credential name
       // exists; the page enforces that record check itself.
@@ -2293,7 +2290,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // always the literal "owner" now (owner-token-only auth). The CHECK
     // constraint on the devices table pins platform to "ios" for now.
     ["POST", /^\/api\/push\/devices$/, async (request) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       const payload = await body(request);
       const token = typeof payload.token === "string" ? payload.token.trim() : "";
@@ -2311,7 +2308,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       return json({ ok: true, device });
     }],
     ["DELETE", /^\/api\/push\/devices\/([^/]+)$/, async (request, params) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       const removed = removeDeviceForCredential(config.instance, params[0], credential);
       // 404 distinguishes "token does not exist OR belongs to a
@@ -2330,7 +2327,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // Bearer-gated like every other /api route; the NSE reads the bearer
     // from the App Group shared container the main app writes on auth.
     ["GET", /^\/api\/push\/preview$/, async (request) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       const params = new URL(request.url).searchParams;
       const sessionId = (params.get("sessionId") ?? "").trim();
@@ -2381,7 +2378,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     //     for the device.
     // Best-effort and idempotent; device-scoped like /read and /badge.
     ["POST", /^\/api\/push\/unwatch$/, async (request) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       const dev = requireDeviceToken(config, request, credential);
       if (!dev.ok) return json({ error: dev.reason }, dev.status);
@@ -2405,7 +2402,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // Credential scoping happens on every read/write so a paired
     // device can never see or mutate another credential's cursor.
     ["POST", /^\/api\/chat\/([^/]+)\/read$/, async (request, params) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       // Read state is keyed per device, not per credential — two
       // iPhones owned by the same human each track their own cursor.
@@ -2451,7 +2448,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // start". Sessions with no assistant_text fall back to clearing
     // the cursor entirely so the action still surfaces them as unread.
     ["DELETE", /^\/api\/chat\/([^/]+)\/read$/, async (request, params) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       const dev = requireDeviceToken(config, request, credential);
       if (!dev.ok) return json({ error: dev.reason }, dev.status);
@@ -2463,7 +2460,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
       return json({ ok: true });
     }],
     ["GET", /^\/api\/badge$/, async (request) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       // Badge totals are per-device (see /read endpoint comment).
       const dev = requireDeviceToken(config, request, credential);
@@ -2477,7 +2474,7 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // the list can mark each row independently. Sessions with zero
     // unread blocks are omitted; callers default to 0.
     ["GET", /^\/api\/unread$/, async (request) => {
-      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request, config));
+      const credential = resolveCredentialFromBearer(config, bearerFromRequest(request));
       if (!credential) return json({ error: "Unauthorized" }, 401);
       const dev = requireDeviceToken(config, request, credential);
       if (!dev.ok) return json({ error: dev.reason }, dev.status);
@@ -2715,20 +2712,19 @@ export function createHandler(config: RuntimeConfig): (request: Request, peerAdd
     // non-loopback bind (GINI_BIND_HOST=0.0.0.0, the container case) a remote
     // peer can forge `Host: localhost`; the host/origin gate alone would admit
     // it to the token-injecting BFF lane. The real peer address is
-    // kernel-reported and unforgeable. Non-loopback fronts (edge, relay,
+    // kernel-reported and unforgeable. Non-loopback fronts (relay,
     // tunnel, GINI_TRUSTED_ORIGINS) carry their own non-loopback Host and are
     // unaffected. See ADR docker-xvfb-deployment.md.
     const webHost = request.headers.get("host") ?? url.host;
-    if (isLoopbackHost(webHost) && !peerIsLoopback && !edgeTrustedRequest(request)) {
+    if (isLoopbackHost(webHost) && !peerIsLoopback) {
       return url.pathname.startsWith("/api/")
         ? withCors(request, json({ error: "Unauthorized" }, 401))
         : withCors(request, new Response("Not found", { status: 404 }));
     }
-    // A trusted non-loopback web front (edge, allowlisted origin, tunnel) gets
+    // A trusted non-loopback web front (allowlisted origin or tunnel) gets
     // the same access as loopback: the gates above are the whole admission
     // check. Auth is owner-token-only (see ADR owner-token-auth.md) — the
-    // browser never holds the bearer (the BFF injects it server-side), and
-    // hosted fronts authenticate at the edge before proxying.
+    // browser never holds the bearer because the BFF injects it server-side.
     return proxyWeb(request, url, config, peerIsLoopback);
   };
 
@@ -3403,7 +3399,7 @@ function signedUploadAccess(request: Request, config: RuntimeConfig): boolean {
   const match = url.pathname.match(UPLOAD_GET_PATH);
   if (!match) return false;
   return verifyUploadSignature(
-    currentOwnerToken(config.instance, config.token),
+    config.token,
     match[1]!,
     url.searchParams.get("exp"),
     url.searchParams.get("sig"),
@@ -3411,32 +3407,17 @@ function signedUploadAccess(request: Request, config: RuntimeConfig): boolean {
   );
 }
 
-// True when the request arrived through a trusted hosted edge: the operator has
-// configured a non-empty GINI_EDGE_SECRET AND the request carries an X-Gini-Edge
-// header whose value equals it exactly. An unset/empty secret can never match
-// (resolveEdgeSecret returns "" and the empty short-circuit fails closed), so a
-// request with no header — or an empty header — is never trusted. The secret is
-// only ever compared, never logged. Default off: with the env unset this always
-// returns false and the loopback-peer trust model is byte-for-byte unchanged.
-export function edgeTrustedRequest(request: Request): boolean {
-  const secret = resolveEdgeSecret();
-  if (secret === "") return false;
-  return request.headers.get("x-gini-edge") === secret;
-}
-
 // Owner-token-only credential resolution (see ADR owner-token-auth.md): the
 // runtime is single-user, so the singleton config.token is the ONLY bearer and
-// every authenticated caller is the literal "owner" credential. Hosted requests
-// arrive through the edge, which authenticates the user's session and presents
-// this guest's own config.token upstream — so they resolve identically. The
-// credential id keys per-credential state (push devices, read state, unread
+// every authenticated caller is the literal "owner" credential. The credential
+// id keys per-credential state (push devices, read state, unread
 // counters); "owner" being a constant means all of the operator's devices share
 // one pool, which is exactly the single-user model.
 function resolveCredentialFromBearer(
   config: RuntimeConfig,
   bearer: string | undefined
 ): "owner" | null {
-  return bearer && bearer === currentOwnerToken(config.instance, config.token) ? "owner" : null;
+  return bearer && bearer === config.token ? "owner" : null;
 }
 
 function authorizedBearer(config: RuntimeConfig, bearer: string | undefined): boolean {
@@ -3444,9 +3425,6 @@ function authorizedBearer(config: RuntimeConfig, bearer: string | undefined): bo
 }
 
 async function authorized(request: Request, config: RuntimeConfig): Promise<boolean> {
-  // A trusted edge is owner-equivalent — the same lane a valid config.token
-  // bearer takes — so admit it before parsing the bearer at all.
-  if (edgeTrustedRequest(request)) return true;
   const header = request.headers.get("authorization") ?? "";
   const queryToken = new URL(request.url).searchParams.get("token");
   const bearer = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : queryToken;
@@ -3456,16 +3434,12 @@ async function authorized(request: Request, config: RuntimeConfig): Promise<bool
 }
 
 // Pull the bearer off a request the same way `authorized` does so
-// per-route credential lookups stay consistent with the gate above. A trusted
-// edge resolves as the owner: substitute config.token so the downstream
-// resolveCredentialFromBearer maps it to "owner", identical to a real
-// config.token bearer. A real bearer on the request still wins when present.
-function bearerFromRequest(request: Request, config: RuntimeConfig): string | undefined {
+// per-route credential lookups stay consistent with the gate above.
+function bearerFromRequest(request: Request): string | undefined {
   const header = request.headers.get("authorization") ?? "";
   const queryToken = new URL(request.url).searchParams.get("token");
   const bearer = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : queryToken;
-  if (bearer) return bearer;
-  return edgeTrustedRequest(request) ? currentOwnerToken(config.instance, config.token) : undefined;
+  return bearer ?? undefined;
 }
 
 // Resolve and validate the optional X-Device-Token header. Returns the

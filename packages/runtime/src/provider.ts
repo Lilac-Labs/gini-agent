@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { buildAgentSystemContext, renderEphemeralContext } from "./system-prompt";
-import { hostedSecretFromFile } from "./lib/hosted-secret-file";
 import { loadInstructions, loadSoul, loadUserProfile } from "./runtime/identity-files";
 import { readState } from "./state";
 import { appendTrace } from "./state/trace";
@@ -956,13 +955,6 @@ export interface ToolCallingResult {
   responseId?: string;
   usage?: Record<string, unknown>;
   cost?: CostRecord;
-  // Headlines of any server-side native web searches the provider ran during
-  // the call (Responses API `web_search_call` items: a search's `query` or a
-  // page-open's `url`). These never become dispatchable tool calls — the search
-  // already executed on the provider — so the chat-task loop surfaces each as a
-  // display-only "Web search" chip. Absent for every non-Responses path. See
-  // ADR web-search-connectors.md.
-  webSearches?: string[];
 }
 
 // Echo provider stub registry for tool-calling. Tests register a sequence
@@ -1103,12 +1095,7 @@ export async function generateToolCallingResponse(
   // source (see src/execution/turn-abort.ts). When the signal aborts mid-call
   // the fetch body read rejects with an AbortError, surfaced to the caller for
   // classification via isAbortError. Omitted callers (CLI/tests) are unaffected.
-  signal?: AbortSignal,
-  // Fired once per native (server-side) web search as it completes, mid-call,
-  // carrying the query/url headline. Only the hosted Responses path emits these;
-  // the chat-task loop turns each into a display-only "Web search" chip that must
-  // land before the answer streams. Omitted callers are unaffected.
-  onWebSearch?: (query: string) => void
+  signal?: AbortSignal
 ): Promise<ToolCallingResult> {
   const provider = normalizeProvider(providerOverride ?? config.provider);
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
@@ -1132,18 +1119,6 @@ export async function generateToolCallingResponse(
         await abortableSleep(delayMs, signal).catch(() => {});
       } else {
         await abortableSleep(delayMs, signal);
-      }
-    }
-    // Replay any registered native web searches through onWebSearch BEFORE the
-    // text delta, mirroring the real Responses stream (searches complete first),
-    // so echo-backed tests exercise the chip-before-answer ordering.
-    if (onWebSearch && Array.isArray(result.webSearches)) {
-      for (const query of result.webSearches) {
-        try {
-          onWebSearch(query);
-        } catch {
-          // never let onWebSearch crash the test path.
-        }
       }
     }
     if (result.text && onDelta && !nonStreaming) {
@@ -1196,22 +1171,12 @@ export async function generateToolCallingResponse(
       return raceBedrockWithAnthropic(provider, messages, tools, onDelta, signal);
     }
 
-    // Hosted gini (openai/azure at the edge): run the turn on the Responses API
-    // so the built-in web_search tool is on by default — the model searches the
-    // live web mid-turn and cites sources, with no tenant search key. Everything
-    // else stays on Chat Completions.
-    if (shouldUseResponsesWebSearch(provider)) {
-      return callResponsesWithWebSearch(provider, messages, tools, onDelta, signal, onWebSearch);
-    }
-
     // Chat Completions is the default openai/azure tool-calling path. A gpt-5.x
     // deployment rejects function tools + reasoning_effort here and demands the
-    // Responses API (a 400 whose message names /v1/responses). That surfaces on
-    // the hosted edge for a guest whose GINI_HOSTED marker is unset — older
-    // provisioning that the /app-only fleet roll can't rewrite. Retry that exact
-    // failure on the Responses path so the turn succeeds instead of hard-failing;
-    // only openai/azure providers can hit it, and the error is specific enough
-    // that a normal turn is never re-routed.
+    // Responses API (a 400 whose message names /v1/responses). Retry that exact
+    // failure on the equivalent Responses function-calling path; only
+    // openai/azure providers can hit it, and the error is specific enough that a
+    // normal turn is never re-routed.
     try {
       return await callToolCallingChatCompletions(provider, messages, tools, onDelta, signal);
     } catch (error) {
@@ -1219,7 +1184,7 @@ export async function generateToolCallingResponse(
         (provider.name === "openai" || provider.name === "azure") &&
         isResponsesApiRequiredError(error)
       ) {
-        return callResponsesWithWebSearch(provider, messages, tools, onDelta, signal, onWebSearch);
+        return callOpenAIToolCallingResponses(provider, messages, tools, onDelta, signal);
       }
       throw error;
     }
@@ -1816,42 +1781,17 @@ function translateMessagesToResponsesInput(messages: ToolCallingMessage[]): Resp
   return { instructions: systemParts.join("\n\n"), input };
 }
 
-// The headline text for a native web_search_call, read from its `action`:
-// a `search` action carries `query` (or a `queries[]` list); a page-open or
-// find action carries `url`/`pattern`. Empty string when the action has no
-// such field (a search still happened — the chip just has no headline) so the
-// caller always records the call; undefined only when there's no action object
-// at all (an in-progress item), which the caller skips.
-function webSearchCallHeadline(action: unknown): string | undefined {
-  if (!isRecord(action) || Array.isArray(action)) return undefined;
-  if (typeof action.query === "string" && action.query.length > 0) return action.query;
-  if (Array.isArray(action.queries) && typeof action.queries[0] === "string" && action.queries[0].length > 0) {
-    return action.queries[0];
-  }
-  if (typeof action.url === "string" && action.url.length > 0) return action.url;
-  if (typeof action.pattern === "string" && action.pattern.length > 0) return action.pattern;
-  return "";
-}
-
 // Consume the Responses API SSE stream. Tracks text deltas
 // (`response.output_text.delta`), function-call lifecycle events
 // (`response.output_item.added` / `response.function_call_arguments.delta` /
-// `response.output_item.done`), and native web-search activity
-// (`web_search_call` items — collected into result.webSearches AND announced via
-// onWebSearch as each completes, never surfaced as dispatchable tool calls).
+// `response.output_item.done`).
 // Falls back to the final `response.completed` event's `response.output` array
-// if any tool calls or web searches were missed during streaming.
+// if any tool calls were missed during streaming.
 async function readResponsesToolCallingStream(
   response: Response,
   provider: ProviderConfig,
   onDelta?: (text: string) => void,
-  signal?: AbortSignal,
-  // Fired once per native web_search_call the moment it completes — which the
-  // Responses API always streams BEFORE the assistant message's text deltas.
-  // The chat-task loop emits a "Web search" chip here so the chip's block lands
-  // ahead of the answer block (born lazily on the first text delta); a trailing
-  // chip would push the answer out of its standalone bubble in group-exchanges.
-  onWebSearch?: (query: string) => void
+  signal?: AbortSignal
 ): Promise<ToolCallingResult> {
   if (!response.ok) {
     const raw = await response.text();
@@ -1878,29 +1818,6 @@ async function readResponsesToolCallingStream(
   // these entries and surface the final list when the stream completes.
   const callsById = new Map<string, { id: string; name: string; arguments: string; order: number }>();
   let nextOrder = 0;
-  // Native web_search activity. The Responses API runs the search server-side
-  // and emits `web_search_call` items (never `function_call`), so the loop never
-  // dispatches them — each is collected into result.webSearches AND announced via
-  // onWebSearch the moment it completes, so the chat-task loop can emit a "Web
-  // search" chip before the answer streams. The fired set dedupes an item that
-  // arrives both as an `output_item.done` event and again in the
-  // `response.completed` backstop below.
-  const webSearches: string[] = [];
-  const firedWebSearchItems = new Set<string>();
-  const noteWebSearchCall = (itemId: string, action: unknown): void => {
-    if (!itemId || firedWebSearchItems.has(itemId)) return;
-    const headline = webSearchCallHeadline(action);
-    if (headline === undefined) return;
-    firedWebSearchItems.add(itemId);
-    webSearches.push(headline);
-    if (onWebSearch) {
-      try {
-        onWebSearch(headline);
-      } catch {
-        // never abort the stream consumer on a UI-side error
-      }
-    }
-  };
   let responseId: string | undefined;
   let usage: Record<string, unknown> | undefined;
   let finalOutput: unknown[] | undefined;
@@ -2019,13 +1936,6 @@ async function readResponsesToolCallingStream(
 
     if (type === "response.output_item.done") {
       const item = isRecord(payload.item) ? payload.item : undefined;
-      // Native web search: the completed item carries the `action` (query/url);
-      // the earlier `added` event does not, so record it from the done event.
-      if (item && item.type === "web_search_call") {
-        const itemId = typeof item.id === "string" ? item.id : (typeof payload.item_id === "string" ? payload.item_id : "");
-        noteWebSearchCall(itemId, item.action);
-        return;
-      }
       if (item && item.type === "function_call") {
         const itemId = typeof item.id === "string" ? item.id : (typeof payload.item_id === "string" ? payload.item_id : "");
         const callId = typeof item.call_id === "string" ? item.call_id : itemId;
@@ -2101,12 +2011,6 @@ async function readResponsesToolCallingStream(
             if (existing.arguments.length === 0 && args.length > 0) existing.arguments = args;
           }
         }
-        // Backstop for native web searches whose `output_item.done` was missed
-        // mid-stream — the fired set makes this a no-op for ones already surfaced.
-        if (item.type === "web_search_call") {
-          const itemId = typeof item.id === "string" ? item.id : "";
-          noteWebSearchCall(itemId, item.action);
-        }
         // Some responses also embed assistant text in output items as
         // { type: "message", content: [{ type: "output_text", text }] }
         if (item.type === "message" && Array.isArray(item.content)) {
@@ -2156,8 +2060,7 @@ async function readResponsesToolCallingStream(
       finishReason,
       responseId,
       usage,
-      cost: estimateCost(provider, usage),
-      ...(webSearches.length > 0 ? { webSearches } : {})
+      cost: estimateCost(provider, usage)
     };
   } finally {
     try { await reader.cancel(); } catch {}
@@ -4118,24 +4021,11 @@ async function callOpenAIResponses(
   };
 }
 
-// The Responses API surface. `${baseUrl}/responses` for OpenAI-compatible
-// providers — including the hosted guest, whose baseUrl is the edge (the edge
-// exposes /responses as a router twin of /chat/completions). Azure routes the v1
-// Responses surface under /openai/v1.
+// The Responses API surface. OpenAI-compatible providers use
+// `${baseUrl}/responses`; Azure uses its `/openai/v1` surface.
 function responsesUrl(provider: ProviderConfig, baseUrl: string): string {
   if (provider.name === "azure") return `${baseUrl}/openai/v1/responses`;
   return `${baseUrl}/responses`;
-}
-
-// Whether this provider's tool-calling turn should run through the Responses API
-// with the built-in web_search tool instead of Chat Completions. Gated on the
-// hosted marker so web search is on by default for the gini model (openai/azure
-// pointed at the edge, which grounds the search on the service's Azure resource
-// with no tenant search key) while a plain local openai/azure user keeps the
-// Chat Completions path. See ADR web-search-connectors.md.
-export function shouldUseResponsesWebSearch(provider: ProviderConfig): boolean {
-  if (provider.name !== "openai" && provider.name !== "azure") return false;
-  return process.env.GINI_HOSTED === "1";
 }
 
 // A gpt-5.x deployment rejects function tools + reasoning_effort on Chat
@@ -4147,39 +4037,27 @@ export function isResponsesApiRequiredError(error: unknown): boolean {
   return message.includes("/v1/responses");
 }
 
-// Route an OpenAI/Azure tool-calling turn through the Responses API so the
-// built-in web_search tool (Bing-grounded on Azure) is available inline — the
-// model searches server-side mid-turn and returns cited prose, all in one turn,
-// with no tenant search key. The runtime's own function tools ride along as
-// Responses function tools; the now-redundant brave/exa `web_search` function
-// tool is dropped in favor of the built-in one. Reuses the same request
-// translation and stream reader as the codex responses path — its tool-call
-// handlers key on `function_call` items, so the server-side `web_search_call`
-// items never become dispatchable calls; they're announced via onWebSearch (and
-// collected into result.webSearches) for the chat-task loop to surface as
-// display-only "Web search" chips while the cited answer streams as text.
-async function callResponsesWithWebSearch(
+// Compatibility path for OpenAI/Azure deployments that require function calls
+// on the Responses API. It carries the same runtime function tools as Chat
+// Completions; web search remains the explicit connector-backed runtime tool.
+async function callOpenAIToolCallingResponses(
   provider: ProviderConfig,
   messages: ToolCallingMessage[],
   tools: ToolFunctionSpec[],
   onDelta?: (text: string) => void,
-  signal?: AbortSignal,
-  onWebSearch?: (query: string) => void
+  signal?: AbortSignal
 ): Promise<ToolCallingResult> {
   const bearer = readOpenAIBearer(provider);
   const baseUrl = resolveBaseUrl(provider.baseUrl, defaultBaseUrl(provider));
   const safeMessages = stripDocumentPartsIfUnsupported(messages, provider);
   const { instructions, input } = translateMessagesToResponsesInput(safeMessages);
-  const responsesTools: Array<Record<string, unknown>> = tools
-    .filter((tool) => tool.function.name !== "web_search")
-    .map((tool) => ({
+  const responsesTools: Array<Record<string, unknown>> = tools.map((tool) => ({
       type: "function",
       name: tool.function.name,
       description: tool.function.description,
       parameters: tool.function.parameters,
       strict: false
     }));
-  responsesTools.push({ type: "web_search" });
   const model = provider.name === "azure" ? (provider.deployment?.trim() || provider.model) : provider.model;
   const response = await fetch(responsesUrl(provider, baseUrl), {
     method: "POST",
@@ -4191,7 +4069,7 @@ async function callResponsesWithWebSearch(
     body: JSON.stringify({ model, store: false, stream: true, instructions, input, tools: responsesTools }),
     ...(signal ? { signal } : {})
   });
-  return readResponsesToolCallingStream(response, provider, onDelta, signal, onWebSearch);
+  return readResponsesToolCallingStream(response, provider, onDelta, signal);
 }
 
 async function callChatCompletions(
@@ -4436,11 +4314,7 @@ function parseJsonObject(raw: string): Record<string, unknown> {
 
 function readOpenAIBearer(provider: ProviderConfig): string {
   const envName = provider.apiKeyEnv ?? "OPENAI_API_KEY";
-  // Hosted restore: a guest resumed from the base snapshot has a frozen
-  // process.env, so the per-tenant router key is read from the tmpfs file the
-  // in-guest identity agent writes (via `<ENV>_FILE`), falling back to the env
-  // value everywhere else. See lib/hosted-secret-file.ts.
-  const apiKey = hostedSecretFromFile(`${envName}_FILE`, process.env[envName]);
+  const apiKey = process.env[envName];
   if (!apiKey) {
     // Typed so failTask records the needs-reauth state and renders the named
     // re-auth CTA for a key unset mid-turn (mirrors readAnthropicKey and

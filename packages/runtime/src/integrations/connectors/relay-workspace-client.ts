@@ -1,4 +1,5 @@
-// The Google OAuth Desktop client the gini-relay provisioning flow uses.
+// The distributed Google OAuth Desktop client used by the local browser flow
+// and the optional gini-relay Workspace grant.
 //
 // This is the SAME client the relay server authenticates against
 // (GINI_GOOGLE_CLIENT_ID/_SECRET on the relay): the relay mints a refresh token
@@ -10,8 +11,8 @@
 // (https://developers.google.com/identity/protocols/oauth2, "Installed
 // applications": "the client secret is obviously not treated as a secret"). A
 // Desktop client is designed to ship inside the distributed app; PKCE, not the
-// secret, is what protects the flow. Storing it here lets a provisioned user's
-// gws redeem the relay-issued refresh token with no per-user OAuth setup.
+// secret, is what protects the local browser flow. Storing it here also lets
+// gws redeem a relay-issued refresh token with the same client.
 export interface RelayWorkspaceClient {
   clientId: string;
   clientSecret: string;

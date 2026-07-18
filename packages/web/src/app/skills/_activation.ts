@@ -18,8 +18,8 @@ export type Activation = {
 // skill is active when every required credential NAME maps to a connector
 // whose `usable` bit is true. The absent-record fallthrough still applies:
 // when NO connector record with the required name exists at all, the owning
-// provider's `externallySatisfied` bit (its credentialExternallySatisfied
-// hook, e.g. the boot-registered hosted Google account) satisfies the
+    // provider's `externallySatisfied` bit (its credentialExternallySatisfied
+    // hook, e.g. an instance-bound Google account) satisfies the
 // credential. An existing record of any status (including disabled — explicit
 // operator off) keeps the record-based gate.
 export function deriveActivation(
@@ -49,9 +49,9 @@ export function deriveActivation(
     });
     if (satisfied) continue;
     // Absent-record fallthrough (mirrors isSkillActive): the hook only
-    // applies when no record with this name exists at all. In hosted this
-    // is how the Google Workspace credential is satisfied — the boot-
-    // registered account flips `externallySatisfied` true with no connector.
+    // applies when no record with this name exists at all. A Google account
+    // attached through Integrations flips `externallySatisfied` with no
+    // connector record.
     if (
       matches.length === 0 &&
       providerByCredentialName.get(credentialName)?.externallySatisfied

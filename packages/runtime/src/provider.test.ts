@@ -40,7 +40,6 @@ import {
   isResponsesApiRequiredError,
   setEchoToolCallingResponse,
   setEchoVisionResponse,
-  shouldUseResponsesWebSearch,
   type ToolCallingMessage,
   type ToolFunctionSpec
 } from "./provider";
@@ -6420,40 +6419,7 @@ describe("bedrock↔anthropic race (chat tool-calling failover)", () => {
   });
 });
 
-describe("hosted native web search (Responses API)", () => {
-  // Build a fetch stub that streams the given named-event SSE frames as a
-  // ReadableStream (mirrors the codex /responses reference test above) and
-  // captures the outgoing {url, init}. Returns the capture cell so the test
-  // can assert the request shape.
-  function stubResponsesStream(
-    events: Array<{ event: string; data: unknown }>
-  ): { captured: { url: string; init: RequestInit } | undefined; restore: () => void } {
-    const originalFetch = globalThis.fetch;
-    const cell: { captured: { url: string; init: RequestInit } | undefined } = { captured: undefined };
-    globalThis.fetch = ((input: RequestInfo | URL, init: RequestInit = {}) => {
-      cell.captured = { url: String(input), init };
-      const stream = new ReadableStream<Uint8Array>({
-        start(controller) {
-          const enc = new TextEncoder();
-          for (const ev of events) {
-            controller.enqueue(enc.encode(`event: ${ev.event}\ndata: ${JSON.stringify(ev.data)}\n\n`));
-          }
-          controller.enqueue(enc.encode("data: [DONE]\n\n"));
-          controller.close();
-        }
-      });
-      return Promise.resolve(new Response(stream, {
-        status: 200,
-        headers: { "content-type": "text/event-stream" }
-      }));
-    }) as unknown as typeof fetch;
-    return {
-      get captured() { return cell.captured; },
-      restore() { globalThis.fetch = originalFetch; }
-    } as { captured: { url: string; init: RequestInit } | undefined; restore: () => void };
-  }
-
-  // A real runtime function tool (rides along as a Responses function tool).
+describe("OpenAI Responses compatibility fallback", () => {
   const fileListTool: ToolFunctionSpec = {
     type: "function",
     function: {
@@ -6462,417 +6428,95 @@ describe("hosted native web search (Responses API)", () => {
       parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] }
     }
   };
-  // The now-redundant brave/exa search function tool — must be filtered out of
-  // the Responses tools array in favor of the built-in {type:"web_search"}.
-  const decoyWebSearchTool: ToolFunctionSpec = {
+  const webSearchTool: ToolFunctionSpec = {
     type: "function",
     function: {
       name: "web_search",
-      description: "search the web (redundant with the built-in tool)",
+      description: "search through the configured connector",
       parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] }
     }
   };
 
-  describe("shouldUseResponsesWebSearch", () => {
-    test("openai with GINI_HOSTED=1 → true", () => {
-      const restore = setEnv("GINI_HOSTED", "1");
-      try {
-        const provider = normalizeProvider({ name: "openai", model: "gini-model" });
-        expect(shouldUseResponsesWebSearch(provider)).toBe(true);
-      } finally {
-        restore();
-      }
-    });
-
-    test("azure with GINI_HOSTED=1 → true", () => {
-      const restore = setEnv("GINI_HOSTED", "1");
-      try {
-        const provider = normalizeProvider({ name: "azure", model: "gpt-5.5", baseUrl: "https://res.openai.azure.com" });
-        expect(shouldUseResponsesWebSearch(provider)).toBe(true);
-      } finally {
-        restore();
-      }
-    });
-
-    test("openai without GINI_HOSTED → false", () => {
-      const restore = setEnv("GINI_HOSTED", undefined);
-      try {
-        const provider = normalizeProvider({ name: "openai", model: "gini-model" });
-        expect(shouldUseResponsesWebSearch(provider)).toBe(false);
-      } finally {
-        restore();
-      }
-    });
-
-    test("anthropic is never routed through native web search, even hosted", () => {
-      const restoreHosted = setEnv("GINI_HOSTED", "1");
-      try {
-        const provider = normalizeProvider({ name: "anthropic", model: "claude-opus-4-8" });
-        expect(shouldUseResponsesWebSearch(provider)).toBe(false);
-        const restoreOff = setEnv("GINI_HOSTED", undefined);
-        try {
-          expect(shouldUseResponsesWebSearch(provider)).toBe(false);
-        } finally {
-          restoreOff();
-        }
-      } finally {
-        restoreHosted();
-      }
-    });
+  test("detects the provider error that explicitly requires /v1/responses", () => {
+    expect(isResponsesApiRequiredError(new Error(
+      "Function tools are not supported in /v1/chat/completions. Please use /v1/responses instead."
+    ))).toBe(true);
+    expect(isResponsesApiRequiredError(new Error("429 rate limited"))).toBe(false);
+    expect(isResponsesApiRequiredError(undefined)).toBe(false);
   });
 
-  describe("isResponsesApiRequiredError", () => {
-    test("matches the gpt-5.x '/v1/responses' 400 and nothing else", () => {
-      expect(isResponsesApiRequiredError(new Error(
-        "Function tools with reasoning_effort are not supported for gpt-5.5 in /v1/chat/completions. Please use /v1/responses instead."
-      ))).toBe(true);
-      expect(isResponsesApiRequiredError(new Error("429 rate limited"))).toBe(false);
-      expect(isResponsesApiRequiredError("a bare /v1/responses string")).toBe(true);
-      expect(isResponsesApiRequiredError(undefined)).toBe(false);
-    });
-  });
-
-  test("non-hosted openai tool turn falls back to /responses when chat/completions demands it (gpt-5.x)", async () => {
-    // A guest whose GINI_HOSTED marker is unset (older provisioning the /app-only
-    // roll can't rewrite) takes the chat/completions path, which a gpt-5.x
-    // deployment rejects with a 400 naming the Responses API. The turn must retry
-    // there instead of hard-failing.
-    const restoreHosted = setEnv("GINI_HOSTED", undefined);
+  test("retries an OpenAI tool turn on /responses with connector tools intact", async () => {
     const restoreKey = setEnv("OPENAI_API_KEY", "sk-fallback");
     let call = 0;
     const stub = installFetch(() => {
       call += 1;
       if (call === 1) {
-        return anthropicJson({ error: { message: "Function tools with reasoning_effort are not supported for gpt-5.5 in /v1/chat/completions. Please use /v1/responses instead." } }, 400);
+        return anthropicJson({ error: { message: "Please use /v1/responses instead." } }, 400);
       }
       return anthropicSse([
-        { event: "response.output_text.delta", data: { type: "response.output_text.delta", delta: "Example Domain" } },
-        { event: "response.completed", data: { type: "response.completed", response: { id: "resp_fb_1", usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 }, output: [{ id: "msg_1", type: "message", content: [{ type: "output_text", text: "Example Domain" }] }] } } }
+        { event: "response.output_text.delta", data: { type: "response.output_text.delta", delta: "Done" } },
+        { event: "response.completed", data: { type: "response.completed", response: { id: "resp_1", output: [] } } }
       ]);
     });
     try {
-      const provider = normalizeProvider({ name: "openai", model: "gini-model", baseUrl: "https://edge.example" });
-      let streamed = "";
+      const provider = normalizeProvider({ name: "openai", model: "gpt-5.5", baseUrl: "https://api.example/v1" });
       const result = await generateToolCallingResponse(
         config(provider),
-        [{ role: "user", content: "open example.com and read the heading" }],
-        [fileListTool],
-        (delta) => { streamed += delta; }
-      );
-      expect(result.text).toBe("Example Domain");
-      expect(streamed).toBe("Example Domain");
-      // Two fetches: chat/completions (400), then the /responses recovery.
-      expect(stub.calls.length).toBe(2);
-      expect(stub.calls[0].url).toBe("https://edge.example/chat/completions");
-      expect(stub.calls[1].url).toBe("https://edge.example/responses");
-    } finally {
-      stub.restore();
-      restoreKey();
-      restoreHosted();
-    }
-  });
-
-  test("hosted openai routes through /responses with the built-in web_search tool", async () => {
-    const restoreHosted = setEnv("GINI_HOSTED", "1");
-    const restoreKey = setEnv("OPENAI_API_KEY", "sk-web-search-key");
-    // A pure web-search turn: text deltas around a web_search lifecycle. No
-    // function_call items → the server-side web_search_call must NOT become a
-    // phantom tool call.
-    const stub = stubResponsesStream([
-      { event: "response.output_text.delta", data: { type: "response.output_text.delta", delta: "Latest: " } },
-      { event: "response.web_search_call.in_progress", data: { type: "response.web_search_call.in_progress", item_id: "ws_1" } },
-      { event: "response.output_item.added", data: {
-        type: "response.output_item.added",
-        item: { id: "ws_1", type: "web_search_call", status: "in_progress" }
-      } },
-      { event: "response.web_search_call.searching", data: { type: "response.web_search_call.searching", item_id: "ws_1" } },
-      { event: "response.web_search_call.completed", data: { type: "response.web_search_call.completed", item_id: "ws_1" } },
-      { event: "response.output_text.delta", data: {
-        type: "response.output_text.delta",
-        delta: "Anthropic shipped X ([techcrunch.com](https://tc.com/x))."
-      } },
-      { event: "response.completed", data: {
-        type: "response.completed",
-        response: {
-          id: "resp_ws_1",
-          usage: { input_tokens: 20, output_tokens: 30, total_tokens: 50 },
-          output: [
-            { id: "ws_1", type: "web_search_call", status: "completed" },
-            { id: "msg_1", type: "message", content: [{ type: "output_text", text: "Latest: Anthropic shipped X ([techcrunch.com](https://tc.com/x))." }] }
-          ]
-        }
-      } }
-    ]);
-    try {
-      const provider = normalizeProvider({ name: "openai", model: "gini-model", baseUrl: "https://edge.example" });
-      let streamed = "";
-      const result = await generateToolCallingResponse(
-        config(provider),
-        [
-          { role: "system", content: "you are gini" },
-          { role: "user", content: "what did anthropic ship?" }
-        ],
-        [fileListTool, decoyWebSearchTool],
-        (delta) => { streamed += delta; }
+        [{ role: "user", content: "search and list" }],
+        [fileListTool, webSearchTool]
       );
 
-      // The cited answer streams as text; the web_search_call never surfaces as
-      // a tool call, so the turn finishes as a plain text answer.
-      expect(result.text).toBe("Latest: Anthropic shipped X ([techcrunch.com](https://tc.com/x)).");
-      expect(result.toolCalls).toEqual([]);
-      expect(result.finishReason).toBe("stop");
-      expect(streamed).toBe("Latest: Anthropic shipped X ([techcrunch.com](https://tc.com/x)).");
-
-      // Request shape: hosted openai posts to /responses with streaming on.
-      expect(stub.captured?.url).toBe("https://edge.example/responses");
-      const sent = JSON.parse(String(stub.captured!.init!.body));
-      expect(sent.model).toBe("gini-model");
-      expect(sent.store).toBe(false);
-      expect(sent.stream).toBe(true);
-      expect(sent.instructions).toBe("you are gini");
-
-      // tools: exactly one built-in web_search + the real file_list function
-      // tool, and NO function tool named "web_search" (the decoy is dropped).
-      const builtInSearches = sent.tools.filter((t: { type: string }) => t.type === "web_search");
-      expect(builtInSearches).toEqual([{ type: "web_search" }]);
-      const functionToolNames = sent.tools
-        .filter((t: { type: string }) => t.type === "function")
-        .map((t: { name: string }) => t.name);
-      expect(functionToolNames).toContain("file_list");
-      expect(functionToolNames).not.toContain("web_search");
-      expect(sent.tools).toContainEqual({
-        type: "function",
-        name: "file_list",
-        description: "list files",
-        parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-        strict: false
-      });
-
-      // Auth: openai uses Authorization: Bearer <OPENAI_API_KEY>.
-      const headers = new Headers(stub.captured!.init!.headers as HeadersInit);
-      expect(headers.get("authorization")).toBe("Bearer sk-web-search-key");
+      expect(result.text).toBe("Done");
+      expect(stub.calls.map((entry) => entry.url)).toEqual([
+        "https://api.example/v1/chat/completions",
+        "https://api.example/v1/responses"
+      ]);
+      const body = JSON.parse(String(stub.calls[1]!.init.body));
+      expect(body.tools).toContainEqual(expect.objectContaining({ type: "function", name: "file_list" }));
+      expect(body.tools).toContainEqual(expect.objectContaining({ type: "function", name: "web_search" }));
+      expect(body.tools).not.toContainEqual({ type: "web_search" });
     } finally {
       stub.restore();
       restoreKey();
-      restoreHosted();
     }
   });
 
-  test("hosted openai surfaces native web searches in result.webSearches (query, queries[], url, pattern), deduped", async () => {
-    const restoreHosted = setEnv("GINI_HOSTED", "1");
-    const restoreKey = setEnv("OPENAI_API_KEY", "sk-web-search-key");
-    const wsDone = (id: string, action: unknown) => ({
-      event: "response.output_item.done",
-      data: {
-        type: "response.output_item.done",
-        item: { id, type: "web_search_call", status: "completed", action }
-      }
-    });
-    const stub = stubResponsesStream([
-      wsDone("ws_a", { type: "search", query: "anthropic news july 2026" }),
-      wsDone("ws_b", { type: "search", queries: ["gpt-5.5 release date"] }), // no `query` → queries[] branch
-      wsDone("ws_c", { type: "open_page", url: "https://news.ycombinator.com/" }), // url branch
-      wsDone("ws_d", { type: "find_in_page", pattern: "OpenPrinter" }), // pattern branch
-      wsDone("ws_e", {}), // action present, no headline field → "" (a search still happened)
-      wsDone("", { type: "search", query: "no-id search" }), // empty item id → skipped
-      { event: "response.output_text.delta", data: { type: "response.output_text.delta", delta: "Here you go." } },
-      { event: "response.completed", data: {
-        type: "response.completed",
-        response: {
-          id: "resp_ws_multi",
-          usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
-          output: [
-            // ws_a repeated in the backstop → must dedupe (captured once, from the done event).
-            { id: "ws_a", type: "web_search_call", status: "completed", action: { type: "search", query: "anthropic news july 2026" } },
-            // ws_f appears ONLY in the backstop (its output_item.done was missed) → captured here.
-            { id: "ws_f", type: "web_search_call", status: "completed", action: { type: "search", query: "backstop-only search" } },
-            { id: "msg_1", type: "message", content: [{ type: "output_text", text: "Here you go." }] }
-          ]
-        }
-      } }
-    ]);
-    try {
-      const provider = normalizeProvider({ name: "openai", model: "gini-model", baseUrl: "https://edge.example" });
-      const announced: string[] = [];
-      const result = await generateToolCallingResponse(
-        config(provider),
-        [{ role: "user", content: "what's new?" }],
-        [],
-        () => {},
-        undefined,
-        undefined,
-        (query) => announced.push(query)
-      );
-      const expectedHeadlines = [
-        "anthropic news july 2026",
-        "gpt-5.5 release date",
-        "https://news.ycombinator.com/",
-        "OpenPrinter",
-        "",
-        "backstop-only search"
-      ];
-      expect(result.webSearches).toEqual(expectedHeadlines);
-      // onWebSearch fires once per de-duped search, in stream order, so the
-      // chat-task loop can emit each chip before the answer streams.
-      expect(announced).toEqual(expectedHeadlines);
-      // Native web searches never become dispatchable tool calls.
-      expect(result.toolCalls).toEqual([]);
-      expect(result.text).toBe("Here you go.");
-    } finally {
-      stub.restore();
-      restoreKey();
-      restoreHosted();
-    }
-  });
-
-  test("a web_search_call with no action detail is not surfaced (webSearches absent)", async () => {
-    const restoreHosted = setEnv("GINI_HOSTED", "1");
-    const restoreKey = setEnv("OPENAI_API_KEY", "sk-x");
-    const stub = stubResponsesStream([
-      { event: "response.output_item.added", data: {
-        type: "response.output_item.added",
-        item: { id: "ws_1", type: "web_search_call", status: "in_progress" }
-      } },
-      // done event carries no `action` → nothing to headline → not surfaced.
-      { event: "response.output_item.done", data: {
-        type: "response.output_item.done",
-        item: { id: "ws_1", type: "web_search_call", status: "completed" }
-      } },
-      { event: "response.output_text.delta", data: { type: "response.output_text.delta", delta: "ok" } },
-      { event: "response.completed", data: {
-        type: "response.completed",
-        response: { id: "r", usage: { input_tokens: 1, output_tokens: 1 }, output: [
-          { id: "ws_1", type: "web_search_call", status: "completed" }
-        ] }
-      } }
-    ]);
-    try {
-      const provider = normalizeProvider({ name: "openai", model: "gini-model", baseUrl: "https://edge.example" });
-      const result = await generateToolCallingResponse(config(provider), [{ role: "user", content: "hi" }], [], () => {});
-      expect(result.webSearches).toBeUndefined();
-    } finally {
-      stub.restore();
-      restoreKey();
-      restoreHosted();
-    }
-  });
-
-  test("hosted openai still fires a function tool alongside web_search", async () => {
-    const restoreHosted = setEnv("GINI_HOSTED", "1");
-    const restoreKey = setEnv("OPENAI_API_KEY", "sk-web-search-key");
-    // web_search lifecycle interleaved with a real file_list function call.
-    const stub = stubResponsesStream([
-      { event: "response.output_text.delta", data: { type: "response.output_text.delta", delta: "Checking... " } },
-      { event: "response.web_search_call.in_progress", data: { type: "response.web_search_call.in_progress", item_id: "ws_1" } },
-      { event: "response.output_item.added", data: {
-        type: "response.output_item.added",
-        item: { id: "ws_1", type: "web_search_call", status: "in_progress" }
-      } },
-      // function_call lifecycle for file_list.
-      { event: "response.output_item.added", data: {
-        type: "response.output_item.added",
-        item: { id: "item_fn", type: "function_call", call_id: "call_fn", name: "file_list", arguments: "" }
-      } },
-      { event: "response.web_search_call.searching", data: { type: "response.web_search_call.searching", item_id: "ws_1" } },
-      { event: "response.function_call_arguments.delta", data: {
-        type: "response.function_call_arguments.delta", item_id: "item_fn", delta: '{"path":"' } },
-      { event: "response.function_call_arguments.delta", data: {
-        type: "response.function_call_arguments.delta", item_id: "item_fn", delta: '/tmp"}' } },
-      { event: "response.function_call_arguments.done", data: {
-        type: "response.function_call_arguments.done", item_id: "item_fn", arguments: '{"path":"/tmp"}' } },
-      { event: "response.web_search_call.completed", data: { type: "response.web_search_call.completed", item_id: "ws_1" } },
-      { event: "response.output_item.done", data: {
-        type: "response.output_item.done",
-        item: { id: "item_fn", type: "function_call", call_id: "call_fn", name: "file_list", arguments: '{"path":"/tmp"}' }
-      } },
-      { event: "response.completed", data: {
-        type: "response.completed",
-        response: {
-          id: "resp_ws_fn",
-          usage: { input_tokens: 15, output_tokens: 8, total_tokens: 23 },
-          output: [
-            { id: "ws_1", type: "web_search_call", status: "completed" },
-            { id: "item_fn", type: "function_call", call_id: "call_fn", name: "file_list", arguments: '{"path":"/tmp"}' }
-          ]
-        }
-      } }
-    ]);
-    try {
-      const provider = normalizeProvider({ name: "openai", model: "gini-model", baseUrl: "https://edge.example" });
-      const result = await generateToolCallingResponse(
-        config(provider),
-        [
-          { role: "system", content: "you are gini" },
-          { role: "user", content: "list /tmp and check the web" }
-        ],
-        [fileListTool, decoyWebSearchTool]
-      );
-
-      expect(result.finishReason).toBe("tool_calls");
-      // Exactly one tool call — file_list — and NONE for the web_search_call.
-      expect(result.toolCalls).toHaveLength(1);
-      expect(result.toolCalls[0]?.id).toBe("call_fn");
-      expect(result.toolCalls[0]?.function.name).toBe("file_list");
-      expect(JSON.parse(result.toolCalls[0]?.function.arguments ?? "{}")).toEqual({ path: "/tmp" });
-      expect(result.toolCalls.some((c) => c.function.name === "web_search")).toBe(false);
-    } finally {
-      stub.restore();
-      restoreKey();
-      restoreHosted();
-    }
-  });
-
-  test("hosted azure routes to /openai/v1/responses with api-key auth and the deployment model", async () => {
-    const restoreHosted = setEnv("GINI_HOSTED", "1");
+  test("uses Azure's v1 Responses URL, deployment, and api-key auth", async () => {
     const restoreKey = setEnv("AZURE_OPENAI_API_KEY", "azure-secret-key");
-    const stub = stubResponsesStream([
-      { event: "response.output_text.delta", data: { type: "response.output_text.delta", delta: "Answer." } },
-      { event: "response.completed", data: {
-        type: "response.completed",
-        response: {
-          id: "resp_azure_ws",
-          usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
-          output: [
-            { id: "msg_1", type: "message", content: [{ type: "output_text", text: "Answer." }] }
-          ]
-        }
-      } }
-    ]);
+    let call = 0;
+    const stub = installFetch(() => {
+      call += 1;
+      if (call === 1) {
+        return anthropicJson({ error: { message: "Please use /v1/responses instead." } }, 400);
+      }
+      return anthropicSse([
+        { event: "response.output_text.delta", data: { type: "response.output_text.delta", delta: "Azure" } },
+        { event: "response.completed", data: { type: "response.completed", response: { id: "resp_azure", output: [] } } }
+      ]);
+    });
     try {
       const provider = normalizeProvider({
         name: "azure",
         model: "gpt-5.5",
-        baseUrl: "https://res.openai.azure.com",
-        deployment: "gpt-5.5-dep"
+        deployment: "gpt-5.5-dep",
+        baseUrl: "https://res.openai.azure.com"
       });
       const result = await generateToolCallingResponse(
         config(provider),
-        [
-          { role: "system", content: "you are gini" },
-          { role: "user", content: "hello" }
-        ],
+        [{ role: "user", content: "hello" }],
         [fileListTool]
       );
 
-      expect(result.text).toBe("Answer.");
-
-      // Azure routes the v1 Responses surface under /openai/v1.
-      expect(stub.captured?.url).toBe("https://res.openai.azure.com/openai/v1/responses");
-      const sent = JSON.parse(String(stub.captured!.init!.body));
-      // Azure sends the deployment name, not the model id.
-      expect(sent.model).toBe("gpt-5.5-dep");
-      expect(sent.stream).toBe(true);
-      expect(sent.tools).toContainEqual({ type: "web_search" });
-
-      // Azure authenticates with the resource key in an api-key header, not
-      // Authorization: Bearer.
-      const headers = new Headers(stub.captured!.init!.headers as HeadersInit);
+      expect(result.text).toBe("Azure");
+      expect(stub.calls[1]!.url).toBe("https://res.openai.azure.com/openai/v1/responses");
+      const body = JSON.parse(String(stub.calls[1]!.init.body));
+      expect(body.model).toBe("gpt-5.5-dep");
+      const headers = new Headers(stub.calls[1]!.init.headers as HeadersInit);
       expect(headers.get("api-key")).toBe("azure-secret-key");
       expect(headers.get("authorization")).toBeNull();
     } finally {
       stub.restore();
       restoreKey();
-      restoreHosted();
     }
   });
 });

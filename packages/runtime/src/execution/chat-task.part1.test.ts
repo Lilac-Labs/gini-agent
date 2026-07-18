@@ -2066,11 +2066,7 @@ describe("buildInactiveSkillsBlock", () => {
     };
   }
 
-  test("routes the google-workspace-oauth credential to request_connector with the provider id", () => {
-    // google-workspace-oauth maps to google-oauth-desktop. In hosted this
-    // provider declares no setup skill (the credential is baked into the guest
-    // at provisioning), so the block emits the bare request_connector shortcut
-    // for the provider id — no read_skill / setup-skill detour.
+  test("routes the google-workspace-oauth credential to request_google_account", () => {
     const skill = makeSkill({
       name: "google-calendar",
       description: "Google Calendar",
@@ -2078,9 +2074,8 @@ describe("buildInactiveSkillsBlock", () => {
     });
     const block = buildInactiveSkillsBlock([skill]);
     expect(block).toContain("google-oauth-desktop");
-    expect(block).toContain("call `request_connector` with provider id `google-oauth-desktop`");
-    // No setup skill is declared, so the block must not tell the model to
-    // read_skill first.
+    expect(block).toContain("call `request_google_account`");
+    expect(block).not.toContain("call `request_connector` with provider id `google-oauth-desktop`");
     expect(block).not.toMatch(/read_skill/);
   });
 
@@ -2098,7 +2093,7 @@ describe("buildInactiveSkillsBlock", () => {
     expect(providerLines[0]).toContain("google-calendar");
     expect(providerLines[0]).toContain("google-gmail");
     expect(providerLines[0]).toContain("google-drive");
-    expect(providerLines[0]).toContain("call `request_connector` with provider id `google-oauth-desktop`");
+    expect(providerLines[0]).toContain("call `request_google_account`");
   });
 
   test("falls back to request_connector guidance for providers without a setup skill", () => {
@@ -2213,19 +2208,17 @@ describe("buildInactiveSkillsBlock", () => {
     expect(block).toContain('{name, type:"api-key", skillId}');
   });
 
-  test("emits no browser-shortcut directive for the Google Workspace credential", () => {
-    // On hosted, the Google account is connected at sign-in through the host
-    // and google-oauth-desktop declares no setup skill, so the Google credential
-    // routes through the bare request_connector line — with no read_skill detour
-    // and no "ONLY correct path" browser-shortcut directive.
+  test("steers Google Workspace setup through the local Integrations flow", () => {
     const skill = makeSkill({
       name: "google-calendar",
       requiredCredentials: ["google-workspace-oauth"]
     });
     const block = buildInactiveSkillsBlock([skill]);
     expect(block).toContain("google-oauth-desktop");
-    expect(block).not.toContain("ONLY correct path");
-    expect(block).not.toContain("browser_navigate");
+    expect(block).toContain("request_google_account");
+    expect(block).toContain("only Google sign-in path");
+    expect(block).toContain("Do NOT use browser tools");
+    expect(block).toContain("do NOT run `gws auth login`");
     expect(block).not.toMatch(/read_skill/);
   });
 

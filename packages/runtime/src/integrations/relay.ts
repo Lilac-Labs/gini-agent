@@ -8,7 +8,7 @@ export function listRelays(config: RuntimeConfig) {
 export async function configureRelay(config: RuntimeConfig, input: Record<string, unknown>) {
   const name = String(input.name ?? "local");
   const endpoint = String(input.endpoint ?? "local://localhost");
-  const mode = input.mode === "hosted" || input.mode === "lan" ? input.mode : "local-only";
+  const mode = input.mode === "lan" ? input.mode : "local-only";
   return mutateState(config.instance, (state) => createRelayRecord(state, { name, endpoint, mode }));
 }
 
@@ -21,7 +21,7 @@ export async function checkRelay(config: RuntimeConfig, idOrName: string) {
     relay.status = relay.mode === "local-only" ? "degraded" : "configured";
     relay.message = relay.mode === "local-only"
       ? "Local-only relay mode is available; remote reachability is not configured."
-      : "Relay record is configured. Hosted transport implementation is deferred.";
+      : "LAN relay record is configured. Remote transport implementation is deferred.";
     // Relay health is an instance-level probe; the relay endpoint serves
     // every agent.
     addAudit(

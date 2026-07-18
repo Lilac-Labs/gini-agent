@@ -1729,8 +1729,8 @@ export function buildEnabledSkillsBlock(skills: SkillRecord[]): string {
 // Inactive-but-enabled skills block. Distinct from buildEnabledSkillsBlock:
 // these skills are turned on but unusable because a required credential is
 // missing. We tell the model exactly which provider needs connecting so it
-// can either invoke the provider's setup skill (when the provider declares
-// one) or call `request_connector` directly to ask the user to connect.
+// can invoke the provider's setup skill, call `request_google_account` for
+// Google Workspace, or call `request_connector` directly.
 //
 // Skills with `requiredCredentials` undefined / empty are skipped: those are
 // inactive for some other reason (validation status, etc.) and there's no
@@ -1811,6 +1811,9 @@ export function buildInactiveSkillsBlock(skills: SkillRecord[], state?: RuntimeS
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, entry]) => {
       const skillList = Array.from(new Set(entry.skills)).sort().join(", ");
+      if (key === "google-oauth-desktop") {
+        return `- ${key} (used by: ${skillList}) — call \`request_google_account\` so the user can connect Google through the local Integrations flow.`;
+      }
       if (entry.setupSkill) {
         return `- ${key} (used by: ${skillList}) — run \`read_skill\` with \`${entry.setupSkill}\` first; request_connector will be rejected until you do.`;
       }
@@ -1829,9 +1832,10 @@ export function buildInactiveSkillsBlock(skills: SkillRecord[], state?: RuntimeS
   // Browser tools exist for unrelated web tasks; they are not a bypass for
   // the connector handshake.
   const hasSetupSkill = Array.from(grouped.values()).some((entry) => entry.setupSkill);
+  const hasGoogleAccountFlow = grouped.has("google-oauth-desktop");
   const intro = hasSetupSkill
-    ? "Skills below need an external connector. The runtime gates `request_connector` for providers that declare a setup skill — call `read_skill` with the setup skill first (it owns the full prerequisite flow and will invoke request_connector itself). For a registered provider WITHOUT a setup skill, call `request_connector` with the provider id; for a credential with no registered provider, call `request_connector` with `{name, type:\"api-key\", skillId}` as the line indicates. Each line tells you exactly how to call it."
-    : "Skills below need an external connector. For a registered provider, call `request_connector` with the provider id; for a credential with no registered provider, call `request_connector` with `{name, type:\"api-key\", skillId}` as the line indicates. Each line tells you exactly how to call it. Never ask the user to paste a key as a chat message — request_connector captures it securely.";
+    ? "Skills below need an external connector. The runtime gates `request_connector` for providers that declare a setup skill — call `read_skill` with the setup skill first (it owns the full prerequisite flow and will invoke request_connector itself). For Google Workspace, call `request_google_account`; for another registered provider without a setup skill, call `request_connector` with the provider id; for a credential with no registered provider, call `request_connector` with `{name, type:\"api-key\", skillId}` as the line indicates. Each line tells you exactly how to call it."
+    : "Skills below need an external connector. For Google Workspace, call `request_google_account`; for another registered provider, call `request_connector` with the provider id; for a credential with no registered provider, call `request_connector` with `{name, type:\"api-key\", skillId}` as the line indicates. Each line tells you exactly how to call it. Never ask the user to paste a key as a chat message — request_connector captures it securely.";
   const sections: string[] = [
     intro,
     ...lines
@@ -1839,6 +1843,11 @@ export function buildInactiveSkillsBlock(skills: SkillRecord[], state?: RuntimeS
   if (hasSetupSkill) {
     sections.push(
       "IMPORTANT: When a skill above lists a setup skill, that setup skill is the ONLY correct path to satisfy the user's request. Do NOT use `browser_navigate`, `browser_click`, or other browser tools to access the provider's web surface directly (e.g. navigating to gmail.com or calendar.google.com to extract data, or opening a Google sign-in page outside the setup flow). The browser tools are for unrelated tasks. If the user asks for something that requires a missing-connector skill, your first step is `read_skill` with the listed setup skill — never `browser_navigate`."
+    );
+  }
+  if (hasGoogleAccountFlow) {
+    sections.push(
+      "IMPORTANT: `request_google_account` is the only Google sign-in path. Do NOT use browser tools to open a Google sign-in page, and do NOT run `gws auth login`; the user completes OAuth through Integrations."
     );
   }
   return sections.join("\n");
@@ -2408,24 +2417,6 @@ async function runLoop(
         void enqueueFlush();
       }
     };
-    // Native (server-side) web search runs inside the provider call and never
-    // reaches the tool-dispatch loop, so the user would otherwise have no signal
-    // it happened. Surface each search as a display-only "Web search" chip the
-    // moment it completes: the provider fires this mid-stream, BEFORE the
-    // assistant message streams, so the chip's block lands ahead of the answer
-    // block (born lazily on the first text delta). Ordering matters for more than
-    // aesthetics — a chip trailing the answer pushes the answer out of its
-    // standalone bubble in group-exchanges (it folds into the collapsed tool
-    // group). Status goes straight to "ok": the search already ran on the
-    // provider, there's nothing to await or dispatch. See ADR web-search-connectors.md.
-    let webSearchSeq = 0;
-    const onWebSearch = (query: string): void => {
-      if (!emitCtx) return;
-      const callId = `websearch_${taskId}_${iterations}_${webSearchSeq++}`;
-      emitToolCallRunning(emitCtx, { toolName: "web_search", callId, args: { query } });
-      emitToolCallStatus(emitCtx, { callId, status: "ok" });
-    };
-
     // Re-check terminal status under the lock that flips
     // currentStep to "Thinking" so a cancel queued between the
     // lock-free top-of-loop check and this mutation doesn't get
@@ -2628,8 +2619,7 @@ async function runLoop(
           providerTools,
           onDelta,
           providerOverride,
-          turnSignal,
-          onWebSearch
+          turnSignal
         );
       } catch (error) {
         // Turn-abort: cancelTask aborted the in-flight model call. Drain any

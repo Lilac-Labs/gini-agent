@@ -322,9 +322,8 @@ const server = Bun.serve({
       // The only WS that rides this bridge is non-privileged Next HMR; all live
       // application data (chat, events) flows over SSE through the bearer-gated
       // /api surface. The host/origin trust gate above (webBoundRequestAllowed)
-      // is the whole admission check — auth is owner-token-only (see ADR
-      // owner-token-auth.md), and hosted fronts arrive through the edge, which
-      // authenticates before proxying.
+      // is the whole admission check; auth is owner-token-only (see ADR
+      // owner-token-auth.md).
       return proxyWebSocketUpgrade(request, server, config);
     }
     // Pass the real socket peer address so the handler's loopback-operator

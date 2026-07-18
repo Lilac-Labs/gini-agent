@@ -145,26 +145,22 @@ describe("buildAuthPreflightBlock", () => {
     expect(await buildAuthPreflightBlock(sanitizedEnv, run, dirs)).toBe("");
   });
 
-  test("first-time branch is provisioning-aware: re-check via list_connectors before the button", async () => {
-    // Right after a hosted sign-in the credential delivery can still be in
-    // flight, so the no-account text routes through a list_connectors re-check
-    // (which self-heals the registry and re-probes) BEFORE any CTA.
+  test("first-time branch sends the user directly to the local account flow", async () => {
     const block = await buildAuthPreflightBlock(sanitizedEnv, notAuthedRun, noAccount);
     const gwsLine = block.split("\n").find((line) => line.startsWith("- google (gws):")) ?? "";
-    expect(gwsLine).toContain("list_connectors");
     expect(gwsLine).toContain("request_google_account");
-    expect(gwsLine.indexOf("list_connectors")).toBeLessThan(gwsLine.indexOf("request_google_account"));
+    expect(gwsLine).not.toContain("list_connectors");
     expect(gwsLine).not.toContain("RE-AUTH");
   });
 
-  test("attached-but-never-signed-in accounts get the provisioning-aware text, not the reauth CTA", async () => {
+  test("attached-but-never-signed-in accounts get first-time text, not the reauth CTA", async () => {
     // An attached row whose dir holds no live grant and no revoked token (e.g.
-    // a credential delivery still landing). Ordering a reconnect here is the
-    // false positive this branch exists to avoid.
+    // a credential awaiting its first completed login). Ordering a reconnect
+    // here is the false positive this branch exists to avoid.
     const block = await buildAuthPreflightBlock(sanitizedEnv, notAuthedRun, withAccount);
     const gwsLine = block.split("\n").find((line) => line.startsWith("- google (gws):")) ?? "";
     expect(gwsLine).toContain("no live Google session on any attached account");
-    expect(gwsLine).toContain("list_connectors");
+    expect(gwsLine).not.toContain("list_connectors");
     expect(gwsLine).not.toContain("RE-AUTH");
   });
 

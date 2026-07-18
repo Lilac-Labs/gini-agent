@@ -540,7 +540,7 @@ export interface SystemNoteAuthError {
   // 401/403 text — "incorrect key", "quota exceeded", "key disabled").
   detail: string;
   // Where the CTA sends the user to re-establish the credential. "docs" → the
-  // hosted step-through (OAuth/CLI providers like codex, whose re-auth is a
+  // documented step-through (OAuth/CLI providers like codex, whose re-auth is a
   // non-obvious terminal flow); "settings" → the in-app Settings → Providers
   // key form (API-key providers); "aws" → Settings, worded for the AWS access
   // key + secret bedrock stores (no bearer API key). See ADR provider-reauth-guidance.md.
@@ -550,7 +550,7 @@ export interface SystemNoteAuthError {
 
 // Generic navigation call-to-action attached to a system note: the web chat
 // renders an inline button linking to `href`. Hrefs are app-relative routes
-// ("/integrations"), valid on local and hosted alike because chat and the
+  // ("/integrations"), valid because chat and the
 // target page are routes of the one web app served from a single origin
 // (ADR gateway-web-reverse-proxy.md). Unlike SystemNoteAuthError this
 // carries no provider semantics — it's for runtime affordances like
@@ -1660,7 +1660,7 @@ export interface RelayRecord {
   name: string;
   endpoint: string;
   status: RelayStatus;
-  mode: "local-only" | "lan" | "hosted";
+  mode: "local-only" | "lan";
   createdAt: string;
   updatedAt: string;
   lastHealthAt?: string;

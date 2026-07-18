@@ -134,7 +134,7 @@ describe("deriveActivation: server usable bit", () => {
     const codexSkill = skill({ name: "codex-delegate", requiredCredentials: ["codex"] });
     const codexProvider: ProviderDescriptor = {
       id: "codex", label: "Codex", description: "", fields: [],
-      hasProbe: true, hasDetect: true, selfServe: true
+      hasProbe: true, hasDetect: true
     };
     const conn = connector({ name: "codex", provider: "codex", usable: true });
     const result = deriveActivation(

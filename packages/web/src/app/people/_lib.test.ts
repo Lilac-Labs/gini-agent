@@ -172,7 +172,6 @@ function status(over: Partial<CrmExtractionStatus> = {}): CrmExtractionStatus {
     accounts: [],
     agentId: null,
     subagentId: null,
-    turnModel: null,
     source: "gmail",
     lastError: null,
     lastActivityAt: null,

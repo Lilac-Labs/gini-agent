@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, Loader2, RotateCwIcon } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { api, streamUrl } from "@/lib/api";
@@ -122,17 +122,6 @@ export function ScreencastModal({
             if (url) setOrigin(new URL(url).origin);
           } catch {
             // drop a malformed/unparseable url event
-          }
-        });
-        source.addEventListener("nav", (ev) => {
-          try {
-            const { canGoBack, canGoForward } = JSON.parse((ev as MessageEvent).data) as {
-              canGoBack?: boolean;
-              canGoForward?: boolean;
-            };
-            setNav({ canGoBack: canGoBack === true, canGoForward: canGoForward === true });
-          } catch {
-            // drop a malformed/unparseable nav event
           }
         });
       },

@@ -50,13 +50,10 @@ id is always `"owner"`. The helpers live in `packages/runtime/src/http.ts`
   replaces `Authorization` with the runtime's own `config.token` upstream, so
   every proxied request resolves as owner. `GINI_EDGE_SECRET` grants
   owner-equivalence.
-- **Mobile signs in with Google via the edge** (`/auth/google?mode=mobile` →
-  `gini://auth?token=…` redirect), stores `{baseUrl, token}` (AsyncStorage
-  `gini.auth.v1`), and sends the Bearer on every call; sign-out POSTs
-  `/auth/mobile/logout` then clears locally. No QR/relay/pairing; the Google
-  login renders only when the build sets `EXPO_PUBLIC_EDGE_BASE_URL`, and the
-  manual `/setup` connect screen (owner bearer paste) remains for self-hosted
-  gateways.
+- **Mobile connects directly to the runtime.** The setup screen stores the
+  operator-provided `{baseUrl, token}` (AsyncStorage `gini.auth.v1`) and sends
+  the owner Bearer on every call. Disconnecting clears those credentials
+  locally. There is no mobile-specific OAuth, QR, relay, or pairing flow.
 - **The push-device registry is kept** (`/api/push/devices`, `X-Device-Token`,
   APNs) — it tracks notification endpoints, not credentials; its credential id
   is always `"owner"`. `/api/mobile/bootstrap` remains, owner-bearer-gated.
@@ -82,4 +79,4 @@ id is always `"owner"`. The helpers live in `packages/runtime/src/http.ts`
   ("gini_device_-shaped token is 401") and `packages/runtime/src/http.test.ts`
   ("only the owner bearer authorizes the mobile contracts").
 - Edge-secret owner-equivalence: `packages/runtime/src/http-edge-secret.test.ts`.
-- Mobile OAuth login/logout: `packages/mobile/src/oauth-login.test.ts`.
+- Mobile owner-token requests: `packages/mobile/src/api.test.ts`.

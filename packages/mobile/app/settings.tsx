@@ -8,30 +8,23 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "@/src/auth";
-import { revokeEdgeSession } from "@/src/oauth-login";
 import { family, theme } from "@/src/theme";
 
 export default function SettingsScreen() {
   const { credentials, clear } = useAuth();
 
-  const onSignOut = () => {
+  const onClear = () => {
     Alert.alert(
       "Sign out?",
-      "Stored credentials will be removed from this device.",
+      "Stored URL and token will be removed from this device.",
       [
         { text: "Cancel", style: "cancel" },
         {
           text: "Sign out",
           style: "destructive",
           onPress: async () => {
-            // Revoke the session server-side first (best-effort — an edge
-            // deletes the sessions row so the token is dead even if a copy
-            // lingers somewhere; a self-hosted gateway has no such endpoint
-            // and the call is swallowed), then drop it locally and land on
-            // the auth gate, which routes to login or setup by build mode.
-            await revokeEdgeSession(credentials);
             await clear();
-            router.replace("/");
+            router.replace("/setup");
           }
         }
       ]
@@ -44,16 +37,28 @@ export default function SettingsScreen() {
 
       <View style={styles.body}>
         <View style={styles.section}>
-          <Text style={styles.label}>Connected to</Text>
+          <Text style={styles.label}>Base URL</Text>
           <Text style={styles.value}>{credentials?.baseUrl ?? "—"}</Text>
         </View>
 
-        <TouchableOpacity onPress={onSignOut} style={styles.button}>
+        <View style={styles.section}>
+          <Text style={styles.label}>Token</Text>
+          <Text style={styles.value} numberOfLines={1}>
+            {credentials?.token ? maskToken(credentials.token) : "—"}
+          </Text>
+        </View>
+
+        <TouchableOpacity onPress={onClear} style={styles.button}>
           <Text style={styles.buttonText}>Sign out</Text>
         </TouchableOpacity>
       </View>
     </SafeAreaView>
   );
+}
+
+function maskToken(token: string): string {
+  if (token.length <= 12) return "•".repeat(token.length);
+  return `${token.slice(0, 4)}…${token.slice(-4)}`;
 }
 
 const styles = StyleSheet.create({

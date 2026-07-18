@@ -344,7 +344,7 @@ describe("api() helpers", () => {
     // sign-out + redirect.
     expect(isCredentialRejected(new ApiError(401, "Unauthorized"))).toBe(true);
     // A locally-thrown "no_credentials" 401 = already signed out → ignored so
-    // background polls can't re-fire router.replace("/login") in a loop.
+    // background polls can't re-fire the signed-out redirect in a loop.
     expect(
       isCredentialRejected(new ApiError(401, "No credentials configured", "no_credentials"))
     ).toBe(false);

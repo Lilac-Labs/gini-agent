@@ -48,7 +48,7 @@ Gini's **runtime is the gateway**: a single Bun process per instance owns state 
 - Authenticated localhost gateway and a Next.js + Tailwind + shadcn/ui control plane
 - Persistent chat, runs, tasks, approvals, traces, audit events, jobs, memories, and skills
 - Approval-gated file, terminal, and code tools
-- Provider support: Codex OAuth; OpenAI / Azure OpenAI / DeepSeek / OpenRouter API keys; the first-party Anthropic Claude API; Amazon Bedrock (model-agnostic Converse, AWS SigV4 — Claude, Nova, Llama, Mistral, DeepSeek); and any OpenAI-compatible local server
+- Provider support: Codex OAuth; OpenAI / Azure OpenAI / DeepSeek / Atlas Cloud / OpenRouter API keys; the first-party Anthropic Claude API; Amazon Bedrock (model-agnostic Converse, AWS SigV4 — Claude, Nova, Llama, Mistral, DeepSeek); and any OpenAI-compatible local server
 - Local embeddings, reranking, and voice-message speech-to-text by default
 - Parallel instances with isolated state, ports, and logs
 - In-chat actionable controls — secure credential/secret fields, sign-in and sensitive-step handoff into the agent's browser, choice prompts, and confirm-before-send — so the agent unblocks itself in context instead of stranding you
@@ -129,6 +129,7 @@ Run `gini setup` for an interactive picker, or configure directly:
 gini provider set codex gpt-5.5            # Codex OAuth (reads ~/.codex/auth.json)
 gini provider set openai gpt-5.4-mini      # uses $OPENAI_API_KEY
 gini provider set openrouter <model>       # uses $OPENROUTER_API_KEY
+gini provider set atlascloud qwen/qwen3.5-flash # uses $ATLASCLOUD_API_KEY
 gini provider set local <model> --base-url http://127.0.0.1:8000/v1
 gini provider set anthropic claude-opus-4-8 # first-party Claude API, uses $ANTHROPIC_API_KEY
 # Amazon Bedrock: model-agnostic Converse, SigV4-signed with AWS keys you enter via the web form or `gini setup`
@@ -139,11 +140,11 @@ gini provider set azure gpt-4o \
   --deployment <deployment> --api-version 2024-10-21 --auth-scheme api-key  # uses $AZURE_OPENAI_API_KEY
 ```
 
-For step-by-step setup of each provider — getting credentials, installing any prerequisite tooling (Ollama, …), and configuring it in the CLI or web — see the per-provider guides: [OpenAI](docs/providers/openai.md), [Anthropic](docs/providers/anthropic.md), [Amazon Bedrock](docs/providers/bedrock.md), [Azure OpenAI](docs/providers/azure.md), [OpenRouter](docs/providers/openrouter.md), [DeepSeek](docs/providers/deepseek.md), [Codex](docs/providers/codex.md), and [Local](docs/providers/local.md). The [providers index](docs/providers/README.md) lists them all with their auth model at a glance.
+For step-by-step setup of each provider — getting credentials, installing any prerequisite tooling (Ollama, …), and configuring it in the CLI or web — see the per-provider guides: [OpenAI](docs/providers/openai.md), [Anthropic](docs/providers/anthropic.md), [Amazon Bedrock](docs/providers/bedrock.md), [Azure OpenAI](docs/providers/azure.md), [OpenRouter](docs/providers/openrouter.md), [DeepSeek](docs/providers/deepseek.md), [Atlas Cloud](docs/providers/atlascloud.md), [Codex](docs/providers/codex.md), and [Local](docs/providers/local.md). The [providers index](docs/providers/README.md) lists them all with their auth model at a glance.
 
 The `local` provider works with any OpenAI-compatible server (oMLX, vLLM, LM Studio, llama.cpp). The `azure` provider targets an Azure OpenAI resource: set `--base-url` to `https://<resource>.openai.azure.com` and pick a deployment; `--api-version` defaults to a GA value and `--auth-scheme` defaults to `api-key` (a resource key), with `bearer` available for an Entra token. API keys are read from environment variables, and Codex OAuth is read from `~/.codex/auth.json` (or `CODEX_AUTH_JSON`) — nothing is written to Gini config. Run `gini --help` for the full flag set, or see [provider-extra-body.md](docs/adr/provider-extra-body.md) for the `--extra-body` contract and [Azure OpenAI As A First-Class Provider](docs/adr/azure-provider.md) for the Azure routing contract. When a credential fails mid-chat, see [Codex re-authentication](docs/providers/codex.md#re-authentication) and [Provider Re-Authentication Guidance](docs/adr/provider-reauth-guidance.md).
 
-`gini setup`'s interactive picker covers every provider — OpenAI, Codex, Anthropic, Amazon Bedrock, Azure OpenAI, OpenRouter, DeepSeek, and Local — prompting for whatever each one needs (an API key, the AWS access key + secret for Bedrock, the resource endpoint and deployment for Azure, the base URL for Local). `gini provider set …` (above) and the web **Settings → Add provider** form remain available for scripted or non-interactive configuration.
+`gini setup`'s interactive picker covers every provider — OpenAI, Codex, Anthropic, Amazon Bedrock, Azure OpenAI, OpenRouter, DeepSeek, Atlas Cloud, and Local — prompting for whatever each one needs (an API key, the AWS access key + secret for Bedrock, the resource endpoint and deployment for Azure, the base URL for Local). `gini provider set …` (above) and the web **Settings → Add provider** form remain available for scripted or non-interactive configuration.
 
 ## Parallel Instances
 

@@ -149,6 +149,8 @@ export function resolveProviderContextWindowTokens(provider: ProviderConfig): nu
       return openrouterContextWindowTokens(model);
     case "deepseek":
       return deepseekContextWindowTokens(model);
+    case "atlascloud":
+      return FALLBACK_CONTEXT_WINDOW_TOKENS;
     case "anthropic":
       return anthropicContextWindowTokens(model);
     case "bedrock":
@@ -291,6 +293,11 @@ export function resolveProviderModality(provider: ProviderConfig): ProviderModal
       return openrouterModality(model);
     case "deepseek":
       // Confirmed text-only API — no image/file content part.
+      return { vision: false, nativeDocs: false };
+    case "atlascloud":
+      // Atlas Cloud's OpenAI-compatible LLM endpoint is used here for text chat
+      // models. Keep attachments conservative until the runtime has per-model
+      // modality discovery for Atlas model ids.
       return { vision: false, nativeDocs: false };
     case "anthropic":
       // Claude Opus/Sonnet/Haiku accept image input and ingest documents

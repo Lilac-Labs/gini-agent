@@ -12,6 +12,7 @@ provider in Gini (both the CLI and the web Add Provider form).
 | Azure OpenAI | API key / Entra | `AZURE_OPENAI_API_KEY` | [azure.md](azure.md) |
 | OpenRouter | API key | `OPENROUTER_API_KEY` | [openrouter.md](openrouter.md) |
 | DeepSeek | API key | `DEEPSEEK_API_KEY` | [deepseek.md](deepseek.md) |
+| Atlas Cloud | API key | `ATLASCLOUD_API_KEY` | [atlascloud.md](atlascloud.md) |
 | Codex (OpenAI OAuth) | OAuth / CLI | `~/.codex/auth.json` (no key) | [codex.md](codex.md) |
 | Local (OpenAI-compatible) | none / optional key | `GINI_LOCAL_API_KEY` (optional) | [local.md](local.md) |
 

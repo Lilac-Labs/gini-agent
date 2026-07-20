@@ -8,13 +8,13 @@
 // Behavior:
 //   - GET /api/setup/status reflects the live provider config plus the
 //     available picker options (SUPPORTED_PROVIDERS: openai, codex, openrouter,
-//     deepseek, local, anthropic, bedrock, azure). `current` is the active
+//     deepseek, atlascloud, local, anthropic, bedrock, azure). `current` is the active
 //     provider name when configured; null otherwise. `providerConfigured` is
 //     true when the active provider has valid creds — same definition
 //     `providerHealth` uses.
 //   - POST /api/setup/provider accepts {provider, apiKey?, model?, baseUrl?}
-//     for the env-keyed providers (openai/openrouter/deepseek/local/anthropic/
-//     azure) — plus apiVersion/deployment/authScheme for azure's
+//     for the env-keyed providers (openai/openrouter/deepseek/atlascloud/local/
+//     anthropic/azure) — plus apiVersion/deployment/authScheme for azure's
 //     deployment-scoped routing; {provider: "bedrock", model?, awsRegion?,
 //     awsAccessKeyId?, awsSecretAccessKey?}, which SigV4-signs with the entered
 //     AWS keys (written to secrets.env under the AWS_* names); or
@@ -56,7 +56,7 @@ import { isValidEnvVarName, removeKeyFromSecretsEnv, writeKeyToSecretsEnv } from
 import { requestAutostartRefresh } from "./autostart-refresh";
 import type { ProviderConfig, ProviderName, RuntimeConfig } from "../types";
 
-const SUPPORTED_PROVIDERS = ["openai", "codex", "openrouter", "deepseek", "local", "anthropic", "bedrock", "azure"] as const;
+const SUPPORTED_PROVIDERS = ["openai", "codex", "openrouter", "deepseek", "atlascloud", "local", "anthropic", "bedrock", "azure"] as const;
 type SupportedProvider = (typeof SUPPORTED_PROVIDERS)[number];
 
 // Env-keyed providers that authenticate via an env var written to
@@ -72,6 +72,7 @@ const ENV_KEY_PROVIDERS: Record<string, { envVar: string; allowEmptyKey: boolean
   openai: { envVar: "OPENAI_API_KEY", allowEmptyKey: false, defaultModel: "gpt-5.4-mini" },
   openrouter: { envVar: "OPENROUTER_API_KEY", allowEmptyKey: false, defaultModel: "openrouter/auto" },
   deepseek: { envVar: "DEEPSEEK_API_KEY", allowEmptyKey: false, defaultModel: "deepseek-v4-flash" },
+  atlascloud: { envVar: "ATLASCLOUD_API_KEY", allowEmptyKey: false, defaultModel: "qwen/qwen3.5-flash" },
   local: { envVar: "GINI_LOCAL_API_KEY", allowEmptyKey: true, defaultModel: "local/default" },
   // First-party Anthropic Messages API key.
   anthropic: { envVar: "ANTHROPIC_API_KEY", allowEmptyKey: false, defaultModel: "claude-opus-4-8" },

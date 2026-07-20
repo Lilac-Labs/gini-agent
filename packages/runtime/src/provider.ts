@@ -18,6 +18,8 @@ const DEFAULT_CODEX_MODEL = "gpt-5.5";
 const DEFAULT_CODEX_AUTH_PATH = "~/.codex/auth.json";
 const DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1";
 const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash";
+const DEFAULT_ATLASCLOUD_BASE_URL = "https://api.atlascloud.ai/v1";
+const DEFAULT_ATLASCLOUD_MODEL = "qwen/qwen3.5-flash";
 // Anthropic Messages API (first-party Claude). The default baseUrl is the bare
 // host (no /v1) — callAnthropicMessages appends /v1/messages. Auth is the
 // ANTHROPIC_API_KEY (sk-ant…) in the x-api-key header. Amazon Bedrock is a
@@ -156,6 +158,7 @@ const PROVIDER_API_KEY_ENV: Record<string, string> = {
   openai: "OPENAI_API_KEY",
   openrouter: "OPENROUTER_API_KEY",
   deepseek: "DEEPSEEK_API_KEY",
+  atlascloud: "ATLASCLOUD_API_KEY",
   local: "GINI_LOCAL_API_KEY",
   anthropic: "ANTHROPIC_API_KEY",
   azure: "AZURE_OPENAI_API_KEY"
@@ -406,6 +409,16 @@ export function providerCatalog(): ProviderCatalogItem[] {
       costHint: "external"
     },
     {
+      id: "atlascloud",
+      name: "atlascloud",
+      displayName: "Atlas Cloud",
+      baseUrl: DEFAULT_ATLASCLOUD_BASE_URL,
+      auth: "env",
+      models: [DEFAULT_ATLASCLOUD_MODEL, "deepseek-ai/deepseek-v4-pro"],
+      capabilities: ["chat-completions", "tool-calling", "openai-compatible"],
+      costHint: "external"
+    },
+    {
       id: "azure",
       name: "azure",
       displayName: "Azure OpenAI",
@@ -450,6 +463,8 @@ export function providerDisplayLabel(name: ProviderName): string {
       return "OpenRouter";
     case "deepseek":
       return "DeepSeek";
+    case "atlascloud":
+      return "Atlas Cloud";
     case "anthropic":
       return "Anthropic";
     case "bedrock":
@@ -3521,6 +3536,7 @@ export async function generateTaskSummary(
       provider.name === "openrouter" ||
       provider.name === "local" ||
       provider.name === "deepseek" ||
+      provider.name === "atlascloud" ||
       // Azure OpenAI exposes deployment-scoped chat/completions, not the flat
       // /responses surface this path uses for standard OpenAI — route it through
       // the chat-completions builder so the URL + api-key header come out right.
@@ -3665,6 +3681,7 @@ export async function generateStructured<T>(
     provider.name === "local" ||
     provider.name === "openai" ||
     provider.name === "deepseek" ||
+    provider.name === "atlascloud" ||
     provider.name === "azure"
   ) {
     return callStructuredChatCompletions(provider, request);
@@ -3891,6 +3908,15 @@ export function normalizeProvider(provider: ProviderConfig): ProviderConfig {
       baseUrl: pickBaseUrl(provider.baseUrl, DEFAULT_DEEPSEEK_BASE_URL),
       apiKeyEnv: provider.apiKeyEnv ?? "DEEPSEEK_API_KEY",
       ...(extraBody ? { extraBody } : {})
+    };
+  }
+  if (provider.name === "atlascloud") {
+    return {
+      name: "atlascloud",
+      model: provider.model || DEFAULT_ATLASCLOUD_MODEL,
+      baseUrl: pickBaseUrl(provider.baseUrl, DEFAULT_ATLASCLOUD_BASE_URL),
+      apiKeyEnv: provider.apiKeyEnv ?? "ATLASCLOUD_API_KEY",
+      ...(provider.extraBody ? { extraBody: provider.extraBody } : {})
     };
   }
   if (provider.name === "codex") {
@@ -4839,6 +4865,7 @@ function defaultBaseUrl(provider: ProviderConfig): string {
   if (provider.name === "openrouter") return "https://openrouter.ai/api/v1";
   if (provider.name === "local") return "http://127.0.0.1:11434/v1";
   if (provider.name === "deepseek") return DEFAULT_DEEPSEEK_BASE_URL;
+  if (provider.name === "atlascloud") return DEFAULT_ATLASCLOUD_BASE_URL;
   if (provider.name === "anthropic") return DEFAULT_ANTHROPIC_BASE_URL;
   if (provider.name === "bedrock") return bedrockRuntimeBaseUrl(provider.awsRegion ?? DEFAULT_BEDROCK_REGION);
   // Azure has no universal default — it is per-resource. Return empty so a

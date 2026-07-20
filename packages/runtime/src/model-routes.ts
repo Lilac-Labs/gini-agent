@@ -53,7 +53,7 @@ export function anthropicMirrorModelId(bedrockModelId: string): string | undefin
 // revisions and features first), codex's OAuth bundle beats the metered
 // clouds, and openrouter/local are deliberate opt-ins that should never
 // win a tie. Unknown providers sort last in catalog order.
-const ROUTE_PRIORITY = ["openai", "anthropic", "deepseek", "codex", "azure", "bedrock", "openrouter", "local"] as const;
+const ROUTE_PRIORITY = ["openai", "anthropic", "deepseek", "atlascloud", "codex", "azure", "bedrock", "openrouter", "local"] as const;
 
 function routePriority(provider: ProviderCatalogItem["name"]): number {
   const index = (ROUTE_PRIORITY as readonly string[]).indexOf(provider);

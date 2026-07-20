@@ -64,6 +64,7 @@ export function providerBrandLabel(name: string): string {
     openai: "OpenAI",
     openrouter: "OpenRouter",
     deepseek: "DeepSeek",
+    atlascloud: "Atlas Cloud",
     anthropic: "Anthropic",
     bedrock: "Amazon Bedrock",
     azure: "Azure OpenAI",

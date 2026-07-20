@@ -199,6 +199,28 @@ describe("provider integration (against in-process mock server)", () => {
     });
   });
 
+  test("atlascloud generateTaskSummary uses the OpenAI-compatible endpoint and bearer key", async () => {
+    await withMockServer(async ({ server, setEnv, uniqueEnvName }) => {
+      const keyEnv = uniqueEnvName();
+      setEnv(keyEnv, "test-atlas-key");
+      const provider = normalizeProvider({
+        name: "atlascloud",
+        model: "qwen/qwen3.5-flash",
+        baseUrl: server.url,
+        apiKeyEnv: keyEnv
+      });
+      const result = await generateTaskSummary(cfg(provider), "summarize via atlas");
+      expect(result.text).toBe("mock-echo: summarize via atlas");
+      expect(server.received).toHaveLength(1);
+      const captured = server.received[0]!;
+      expect(captured.method).toBe("POST");
+      expect(captured.url.endsWith("/v1/chat/completions")).toBe(true);
+      expect(captured.headers.authorization).toBe("[REDACTED]");
+      const sent = captured.body as Record<string, unknown>;
+      expect(sent.model).toBe("qwen/qwen3.5-flash");
+    });
+  });
+
   test("local provider sends no Authorization header when api key env is unset", async () => {
     await withMockServer(async ({ server, uniqueEnvName }) => {
       const keyEnv = uniqueEnvName();

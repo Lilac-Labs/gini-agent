@@ -118,7 +118,7 @@ describe("setup-api", () => {
   test("status: providerConfigured reflects the codex platform default on a fresh instance", () => {
     const status = getSetupStatus(config);
     expect(status.ok).toBe(true);
-    expect(status.providers).toEqual(["openai", "codex", "openrouter", "deepseek", "local", "anthropic", "bedrock", "azure"]);
+    expect(status.providers).toEqual(["openai", "codex", "openrouter", "deepseek", "atlascloud", "local", "anthropic", "bedrock", "azure"]);
     // Platform default is "codex". providerHealth treats codex as
     // configured when the runtime can find an auth.json; in this
     // scratch env there is none (CODEX_AUTH_JSON is scrubbed in

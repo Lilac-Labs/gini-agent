@@ -880,22 +880,32 @@ describe("provider", () => {
 
   // ---------------- extraBody plumbing (oMLX-style chat_template_kwargs) ----------------
 
-  // The openai/openrouter/local providers all forward `extraBody` into the
+  // The openai/openrouter/atlascloud/local providers all forward `extraBody` into the
   // request body of every chat-completions call (tool-calling, structured,
   // vision, generateTaskSummary). Codex uses /responses with its own shape
   // and is not expected to honor extraBody — verified separately by the
   // /responses tests above which already assert the request body keys.
 
-  test("normalizeProvider preserves extraBody for local/openai/openrouter and drops it for echo/codex", () => {
+  test("normalizeProvider preserves extraBody for local/openai/openrouter/atlascloud and drops it for echo/codex", () => {
     const extraBody = { chat_template_kwargs: { enable_thinking: true } };
     expect(normalizeProvider({ name: "local", model: "m", extraBody }).extraBody).toEqual(extraBody);
     expect(normalizeProvider({ name: "openai", model: "m", extraBody }).extraBody).toEqual(extraBody);
     expect(normalizeProvider({ name: "openrouter", model: "m", extraBody }).extraBody).toEqual(extraBody);
+    expect(normalizeProvider({ name: "atlascloud", model: "m", extraBody }).extraBody).toEqual(extraBody);
     expect(normalizeProvider({ name: "azure", model: "m", baseUrl: "https://r.openai.azure.com", extraBody }).extraBody).toEqual(extraBody);
     // echo and codex don't carry extraBody through. Echo is deterministic and
     // bypasses the HTTP path; codex uses /responses (different wire shape).
     expect(normalizeProvider({ name: "echo", model: "m", extraBody }).extraBody).toBeUndefined();
     expect(normalizeProvider({ name: "codex", model: "m", extraBody }).extraBody).toBeUndefined();
+  });
+
+  test("normalizeProvider applies Atlas Cloud OpenAI-compatible defaults", () => {
+    expect(normalizeProvider({ name: "atlascloud", model: "" })).toEqual({
+      name: "atlascloud",
+      model: "qwen/qwen3.5-flash",
+      baseUrl: "https://api.atlascloud.ai/v1",
+      apiKeyEnv: "ATLASCLOUD_API_KEY"
+    });
   });
 
   test("normalizeProvider applies azure defaults: api-key auth, GA api-version, AZURE_OPENAI_API_KEY env", () => {
@@ -1047,15 +1057,20 @@ describe("provider", () => {
   });
 
   test("non-azure providers stay configured from their env var alone", () => {
-    const prev = process.env.OPENAI_API_KEY;
+    const prevOpenAI = process.env.OPENAI_API_KEY;
+    const prevAtlas = process.env.ATLASCLOUD_API_KEY;
     process.env.OPENAI_API_KEY = "sk-x";
+    process.env.ATLASCLOUD_API_KEY = "atlas-key";
     try {
       // openai has a working default endpoint, so the env key is enough even
       // when it isn't the active provider.
       expect(isProviderConfigured("openai", "azure", undefined, undefined)).toBe(true);
+      expect(isProviderConfigured("atlascloud", "azure", undefined, undefined)).toBe(true);
     } finally {
-      if (prev === undefined) delete process.env.OPENAI_API_KEY;
-      else process.env.OPENAI_API_KEY = prev;
+      if (prevOpenAI === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = prevOpenAI;
+      if (prevAtlas === undefined) delete process.env.ATLASCLOUD_API_KEY;
+      else process.env.ATLASCLOUD_API_KEY = prevAtlas;
     }
   });
 
@@ -3585,6 +3600,7 @@ describe("resolveDispatchProvider (transient fallback)", () => {
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "DEEPSEEK_API_KEY",
+    "ATLASCLOUD_API_KEY",
     "GINI_LOCAL_API_KEY",
     "ANTHROPIC_API_KEY",
     "AZURE_OPENAI_API_KEY",
@@ -3824,6 +3840,7 @@ describe("auth-error classification", () => {
     expect(providerDisplayLabel("openai")).toBe("OpenAI");
     expect(providerDisplayLabel("openrouter")).toBe("OpenRouter");
     expect(providerDisplayLabel("deepseek")).toBe("DeepSeek");
+    expect(providerDisplayLabel("atlascloud")).toBe("Atlas Cloud");
     expect(providerDisplayLabel("azure")).toBe("Azure OpenAI");
     expect(providerDisplayLabel("local")).toBe("Local");
     expect(providerDisplayLabel("echo")).toBe("Gini Echo");
@@ -3839,6 +3856,7 @@ describe("auth-error classification", () => {
     expect(providerReauth("bedrock")).toEqual({ kind: "aws", url: "/settings" });
     expect(providerReauth("openai")).toEqual({ kind: "settings", url: "/settings" });
     expect(providerReauth("deepseek")).toEqual({ kind: "settings", url: "/settings" });
+    expect(providerReauth("atlascloud")).toEqual({ kind: "settings", url: "/settings" });
     expect(providerReauth("openrouter")).toEqual({ kind: "settings", url: "/settings" });
     expect(providerReauth("azure")).toEqual({ kind: "settings", url: "/settings" });
     expect(providerReauth("local")).toEqual({ kind: "settings", url: "/settings" });

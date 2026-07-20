@@ -23,7 +23,7 @@ export type SkillStatus = "enabled" | "disabled" | "archived";
 
 export type JobStatus = "active" | "paused" | "failed";
 
-export type ProviderName = "echo" | "openai" | "codex" | "openrouter" | "local" | "deepseek" | "anthropic" | "bedrock" | "azure";
+export type ProviderName = "echo" | "openai" | "codex" | "openrouter" | "local" | "deepseek" | "atlascloud" | "anthropic" | "bedrock" | "azure";
 
 export type ImprovementStatus = "proposed" | "approved" | "rejected" | "applied";
 

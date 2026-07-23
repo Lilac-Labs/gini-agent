@@ -121,6 +121,17 @@ gini approvals     # review pending tool approvals
 
 (From a repo clone, prefix with `bun run`.)
 
+## MCP Servers
+
+Gini can connect to remote MCP servers over Streamable HTTP. For live web search and URL fetching without an account or API key, add the optional Parallel Search MCP server:
+
+```bash
+gini mcp add parallel-search --url https://search.parallel.ai/mcp
+gini mcp health parallel-search
+```
+
+The health check discovers the server's `web_search` and `web_fetch` tools.
+
 ## Providers
 
 Run `gini setup` for an interactive picker, or configure directly:
